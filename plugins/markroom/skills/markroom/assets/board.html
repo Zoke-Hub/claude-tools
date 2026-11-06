@@ -1,0 +1,2327 @@
+<!--
+MarkRoom · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
+Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
+-->
+<title>__TITLE__</title>
+<meta name="author" content="Zoke">
+<meta name="generator" content="MarkRoom by Zoke">
+<meta name="description" content="MarkRoom — your review room: mark it, note it, and Claude changes it.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500&display=swap">
+<style>
+/* MarkRoom: a light-table viewer for one image or video at a time (pan + zoom), a minimap for wide strips, and beside it
+   the notes panel: one numbered note per group of marks, with Open / Done status and Claude's reply.
+   Layout: a slim header (name, file tabs, save status), the frame with its tool bar on the left, notes on the right. */
+:root {
+  --bg: #F3F1EE; --surface: #FFFFFF; --fg: #1F1C1A; --muted: #6C6560; --line: #DAD4CC; --chip: #EAE5DF;
+  --accent: #2A55D0; --accent-ink: #FFFFFF; --danger: #B42318; --ok: #23864F; --reply: #EEF2FC;
+  --stage: #2A2725; --stage-fg: #CFC8C1;
+  --halo: #FFFFFF;
+  --f-display: "Newsreader", Georgia, "Times New Roman", serif;
+  --f-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161514; --surface: #201E1C; --fg: #EDE9E4; --muted: #A29B94; --line: #37332F; --chip: #2A2724;
+    --accent: #86A2FF; --accent-ink: #0E1222; --danger: #FF8A7E; --ok: #5BCB8A; --reply: #1E2436;
+    --stage: #0D0C0B; --stage-fg: #B7B0A9;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161514; --surface: #201E1C; --fg: #EDE9E4; --muted: #A29B94; --line: #37332F; --chip: #2A2724;
+  --accent: #86A2FF; --accent-ink: #0E1222; --danger: #FF8A7E; --ok: #5BCB8A; --reply: #1E2436;
+  --stage: #0D0C0B; --stage-fg: #B7B0A9;
+  color-scheme: dark;
+}
+
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--f-ui); }
+.app { height: 100vh; height: 100dvh; min-height: 560px; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+
+/* header: board name, the file tabs, save status */
+.top { display: flex; align-items: center; gap: 10px 20px; min-width: 0; padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.brand { flex: none; display: flex; align-items: baseline; gap: 4px 12px; min-width: 0; max-width: 40%; }
+.brand h1 { margin: 0; min-width: 0; font: 500 21px/1.2 var(--f-display); letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brand p { margin: 0; flex: none; color: var(--muted); font: 12px/1.3 var(--f-mono); white-space: nowrap; }
+.brand .by { font: 500 10px/1.3 var(--f-mono); letter-spacing: .14em; text-transform: uppercase; opacity: .75; }
+.top #save { flex: none; margin-left: auto; }
+
+/* the tool bar sits on the frame's top edge, in the frame's own dark */
+.vbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 12px; padding: 6px 8px;
+  background: var(--stage); border-radius: 12px 12px 0 0; border-bottom: 1px solid rgba(255,255,255,.07); }
+.vbar-l, .vbar-r { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.vbar-l > * + * { padding-left: 10px; border-left: 1px solid rgba(255,255,255,.1); }
+.vbar .seg { flex-wrap: nowrap; padding: 0; background: transparent; border: 0; }
+.vbar .tbtn { color: var(--stage-fg); }
+.vbar .tbtn:hover { background: rgba(255,255,255,.08); }
+.vbar .tbtn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.vbar .sw { border-color: var(--stage); box-shadow: 0 0 0 1px rgba(255,255,255,.22); }
+.vbar .sw[aria-pressed="true"] { box-shadow: 0 0 0 2px #fff; }
+.vbar .zoomval { color: var(--stage-fg); }
+.seg { display: flex; flex-wrap: wrap; gap: 2px; padding: 2px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+.tbtn { appearance: none; border: 0; background: transparent; color: var(--fg); height: 32px; min-width: 34px; padding: 0 9px;
+  border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font: 500 13px var(--f-ui); cursor: pointer; }
+.tbtn:hover { background: var(--chip); }
+.tbtn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.tbtn:focus-visible, .btn:focus-visible, .sw:focus-visible, .num:focus-visible, .link:focus-visible, .imgtab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tbtn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.tbtn .k { font: 11px var(--f-mono); opacity: .6; }
+.zoomval { font: 12px var(--f-mono); min-width: 48px; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; align-self: center; }
+.swatches { display: flex; gap: 7px; align-items: center; padding: 0 4px; }
+.sw { width: 22px; height: 22px; border-radius: 50%; padding: 0; border: 2px solid var(--surface); background: var(--c); box-shadow: 0 0 0 1px var(--line); cursor: pointer; }
+.sw[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--fg); }
+.chip { font: 12px var(--f-ui); color: var(--muted); padding: 5px 11px; border-radius: 999px; background: var(--chip); white-space: nowrap; }
+.chip[data-state="error"] { color: var(--danger); white-space: normal; max-width: 300px; }
+#save { box-sizing: border-box; text-align: center; }   /* holds its widest width (see holdChip), so the header never shifts on a save */
+.chip[data-state="saved"]::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; vertical-align: 1px; }
+
+/* image switcher */
+.imgtabs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
+.imgtabs .vers { flex: none; display: flex; align-items: center; gap: 6px; margin-left: 4px; color: var(--muted); font: 12px var(--f-ui); }
+.imgtabs select { height: 34px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); font: 500 13px var(--f-ui); padding: 0 8px; }
+.imgtab { appearance: none; flex: none; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px 0 4px; border: 1px solid transparent;
+  border-radius: 9px; background: transparent; color: var(--muted); font: 500 13px var(--f-ui); cursor: pointer; }
+.imgtab:hover { color: var(--fg); background: var(--chip); }
+.imgtab img { width: 40px; height: 26px; object-fit: cover; border-radius: 5px; max-width: none; }
+.imgtab .cnt { font: 11px var(--f-mono); color: var(--muted); }
+.imgtab[aria-current="true"] { color: var(--fg); background: var(--chip); border-color: var(--line); }
+/* closing a tab hides it (with all its versions) for everyone; Closed tabs brings it back. Images and notes stay. */
+.tabw { flex: none; position: relative; display: flex; }
+.tabw .imgtab { padding-right: 32px; }
+.tabw.dragging { z-index: 2; opacity: .9; }
+.tabw.dragging .imgtab { cursor: grabbing; background: var(--surface); border-color: var(--accent); box-shadow: 0 6px 16px rgba(0,0,0,.22); }
+.imgtabs.reordering, .imgtabs.reordering * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+.tabw.solo .imgtab { padding-right: 12px; }
+.tabx { appearance: none; position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 22px; height: 22px; padding: 0; border: 0;
+  border-radius: 6px; background: transparent; color: var(--muted); font: 16px/1 var(--f-ui); cursor: pointer; display: grid; place-items: center; }
+.tabx:hover { background: var(--chip); color: var(--fg); }
+.closedbtn { appearance: none; flex: none; height: 34px; margin-left: auto; padding: 0 11px; border: 1px dashed var(--line); border-radius: 9px;
+  background: transparent; color: var(--muted); font: 500 12px var(--f-ui); cursor: pointer; white-space: nowrap; }
+.closedbtn:hover, .closedbtn[aria-expanded="true"] { color: var(--fg); border-color: var(--muted); }
+.tabx:focus-visible, .closedbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tabpop { position: fixed; z-index: 30; width: 300px; max-width: calc(100vw - 24px); box-sizing: border-box; background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 11px; box-shadow: 0 14px 36px rgba(0,0,0,.3); padding: 12px; display: grid; gap: 10px; font: 13px/1.4 var(--f-ui); }
+.tabpop p { margin: 0; color: var(--muted); }
+.tabpop .row { display: flex; justify-content: flex-end; gap: 8px; }
+.tabpop ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; max-height: 50vh; overflow: hidden auto; }
+.tabpop li { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.tabpop li .btn { flex: none; }
+.tabpop li img { width: 40px; height: 26px; object-fit: cover; border-radius: 5px; flex: none; max-width: none; }
+.tabpop li .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.tabpop li .meta { display: block; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font: 11px var(--f-mono); font-weight: 400; }
+
+/* viewer */
+.viewer { position: relative; min-height: 0; background: var(--stage); border-radius: 0 0 12px 12px; overflow: hidden;
+  touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
+.viewer.t-pin, .viewer.t-arrow, .viewer.t-box, .viewer.t-pen { cursor: var(--tool-cursor, crosshair); }   /* a crosshair with the tool's sign, in its colour (toolCursor) */
+.viewer.t-text { cursor: text; }
+.viewer.grab, .viewer.grab * { cursor: grab !important; }
+.viewer.panning, .viewer.panning * { cursor: grabbing !important; }
+#stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+#img { display: block; max-width: none; box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 24px 70px rgba(0,0,0,.4); }
+#ov { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+#ov .hit { pointer-events: stroke; }
+.viewer.t-move #ov .hit { cursor: move; }
+#labels { position: absolute; inset: 0; pointer-events: none; }
+.viewer.hide-marks #ov, .viewer.hide-marks #labels { display: none; }
+.loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--stage-fg); font: 13px var(--f-mono); pointer-events: none; padding: 16px; text-align: center; }
+
+/* marks over the image (always on the image, so the halo stays white in both themes) */
+.pin { position: absolute; width: 0; height: 0; }
+.pin .head { position: absolute; left: -14px; top: -42px; width: 28px; height: 28px; border-radius: 50%; background: var(--c); color: #fff;
+  font: 600 13px/28px var(--f-ui); text-align: center; box-shadow: 0 0 0 2px var(--halo), 0 2px 7px rgba(0,0,0,.35); cursor: pointer; pointer-events: auto; }
+.pin .stem { position: absolute; left: -1px; top: -14px; width: 2px; height: 11px; background: var(--c); }
+.pin .tip { position: absolute; left: -4px; top: -4px; width: 8px; height: 8px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 2px var(--halo); }
+.pin.sel .head, .badge.sel, .tlabel.sel .tnum { box-shadow: 0 0 0 2px var(--halo), 0 0 0 5px var(--accent); }
+.badge { position: absolute; transform: translate(-50%, -50%); min-width: 22px; height: 22px; padding: 0 5px; border-radius: 11px; background: var(--c);
+  color: #fff; font: 600 12px/22px var(--f-ui); text-align: center; box-shadow: 0 0 0 2px var(--halo), 0 1px 5px rgba(0,0,0,.3); cursor: pointer; pointer-events: auto; box-sizing: border-box; }
+.tlabel { position: absolute; max-width: 300px; padding: 5px 10px 6px 12px; background: rgba(255,255,255,.95); color: var(--c); border-left: 3px solid var(--c);
+  border-radius: 2px 6px 6px 2px; font: 600 15px/1.3 var(--f-ui); white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 2px 9px rgba(0,0,0,.28);
+  cursor: pointer; pointer-events: auto; }
+.tlabel.sel { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tnum { position: absolute; left: -13px; top: -13px; min-width: 20px; height: 20px; padding: 0 4px; border-radius: 10px; background: var(--c); color: #fff;
+  font: 600 11px/20px var(--f-ui); font-style: normal; text-align: center; box-shadow: 0 0 0 2px var(--halo); box-sizing: border-box; }
+.done-mark { opacity: .45; }
+.done-mark .head::after, .badge.done-mark::after { content: "✓"; position: absolute; right: -7px; top: -7px; width: 14px; height: 14px; border-radius: 50%;
+  background: #23864F; color: #fff; font: 700 9px/14px var(--f-ui); box-shadow: 0 0 0 1.5px var(--halo); }
+@keyframes pulse { 0% { transform: scale(1); } 40% { transform: scale(1.35); } 100% { transform: scale(1); } }
+.pulse .head, .badge.pulse, .tlabel.pulse { animation: pulse .6s ease-out 2; }
+@media (prefers-reduced-motion: reduce) { .pulse .head, .badge.pulse, .tlabel.pulse { animation: none; } }
+
+/* the Done button beside the group of marks being collected, and the editor for text written on the image */
+.donebtn { position: absolute; z-index: 5; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 13px 0 10px; border: 0;
+  border-radius: 999px; background: var(--accent); color: var(--accent-ink); font: 600 13px var(--f-ui); white-space: nowrap; cursor: pointer;
+  box-shadow: 0 0 0 2px var(--halo), 0 6px 18px rgba(0,0,0,.35); }
+.donebtn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.donebtn .cnt { font: 500 11px var(--f-mono); opacity: .75; }
+.donebtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.tedit { position: absolute; z-index: 4; box-sizing: border-box; width: 240px; max-width: 300px; min-height: 0; margin: 0; padding: 5px 10px 6px 12px;
+  background: rgba(255,255,255,.97); color: var(--c); border: 0; border-left: 3px solid var(--c); border-radius: 2px 6px 6px 2px;
+  font: 600 15px/1.3 var(--f-ui); resize: none; overflow: hidden; cursor: text; user-select: text; -webkit-user-select: text;
+  box-shadow: 0 0 0 2px var(--accent), 0 2px 9px rgba(0,0,0,.28); }
+.tedit:focus { outline: none; border-color: transparent; border-left-color: var(--c); }
+.tedit::placeholder { color: #8A837E; font-weight: 400; font-style: italic; }
+@supports (field-sizing: content) { .tedit { field-sizing: content; width: auto; min-width: 160px; } }
+
+/* popover note */
+.pop { position: absolute; z-index: 5; width: 300px; max-width: calc(100% - 16px); box-sizing: border-box; background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 11px; box-shadow: 0 14px 36px rgba(0,0,0,.38); padding: 10px; display: grid; gap: 8px; cursor: auto;
+  user-select: text; -webkit-user-select: text; }
+.pop-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pop-head .kind { font-weight: 600; min-width: 0; }
+.pop-head .where { margin-left: auto; color: var(--muted); font: 11px var(--f-mono); text-align: right; white-space: nowrap; }
+.pop-hint { margin-top: -3px; color: var(--muted); font: 11px/1.35 var(--f-mono); }
+/* pictures pasted or dropped into a note box: thumbnails under it, full size on click */
+.pics { display: flex; flex-wrap: wrap; gap: 6px; }
+.pic { position: relative; width: 64px; height: 48px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); background: var(--chip); flex: none; }
+.pic img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; max-width: none; }
+.picx { appearance: none; position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%;
+  background: rgba(0,0,0,.6); color: #fff; font: 13px/18px var(--f-ui); cursor: pointer; display: none; }
+.pic:hover .picx, .picx:focus-visible { display: block; }
+textarea.drop-on { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.picview { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; background: rgba(0,0,0,.82); padding: 24px; cursor: zoom-out; }
+.picview img { max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.pop-foot { display: flex; align-items: center; gap: 8px; }
+.pop-foot .swatches { padding: 0; margin-right: auto; }
+.pop-foot .sw { width: 18px; height: 18px; }
+
+/* minimap + status */
+.under { display: grid; gap: 8px; margin-top: 8px; }
+.mini { position: relative; justify-self: center; width: 100%; max-width: 940px; border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--line); cursor: pointer; touch-action: none; background: var(--stage); }
+.mini img { display: block; width: 100%; height: 100%; max-width: 100%; pointer-events: none; user-select: none; }
+.mview { position: absolute; border: 2px solid var(--accent); border-radius: 3px; background: rgba(42,85,208,.10); pointer-events: none; box-sizing: border-box; }
+.mdot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--c); transform: translate(-50%, -50%); box-shadow: 0 0 0 1.5px var(--halo); pointer-events: none; }
+/* two fixed lines: the pointer readout, then the shortcuts. The height never changes, so the frame above stays put as the
+   pointer moves on and off the image */
+.status { display: grid; grid-template-rows: 16px 16px; height: 32px; overflow: hidden; white-space: nowrap; color: var(--muted); font: 11px/16px var(--f-mono); }
+.status > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.status #readout { font-variant-numeric: tabular-nums; }
+.status b { color: var(--fg); font-weight: 500; }
+
+/* notes panel: the right column, its list scrolls between a fixed head and a fixed foot with Send */
+.work { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 27vw, 400px); min-height: 0; }
+.mainc { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; min-width: 0; min-height: 0; padding: 14px 20px 12px; }
+.side { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); border-left: 1px solid var(--line); }
+.compose { flex: none; display: grid; gap: 8px; padding: 16px 20px; border-bottom: 1px solid var(--line); box-shadow: inset 3px 0 0 var(--accent); }
+.compose .side-lbl { color: var(--accent); }
+.notes { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.notes-head { flex: none; display: grid; gap: 8px; padding: 16px 20px 12px; }
+.notes-head h2 { margin: 0; font: 600 15px/1.3 var(--f-ui); }
+.notes-head h2 span { color: var(--muted); font-weight: 500; }
+.notes-head p { margin: 0 0 2px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.filters { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; }
+.filters .seg { background: var(--bg); }
+#notesList { flex: 1; min-height: 0; overflow: auto; display: grid; gap: 10px; align-content: start; padding: 2px 20px 20px; }
+.notes-foot { flex: none; display: flex; gap: 8px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom, 0px)); background: var(--surface); border-top: 1px solid var(--line); }
+.notes-foot .sendbtn { flex: 1; justify-content: center; height: 40px; font-size: 14px; }
+.notes-foot #copyAll { height: 40px; }
+.sendbtn { display: inline-flex; align-items: center; gap: 7px; }
+.sendbtn .k { font: 11px var(--f-mono); opacity: .75; }
+.sendbtn:disabled { opacity: .5; cursor: default; }
+.ro .sendbtn { display: none !important; }
+.btn { appearance: none; border: 1px solid var(--line); background: var(--surface); color: var(--fg); height: 32px; padding: 0 13px; border-radius: 8px;
+  font: 500 13px var(--f-ui); cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+/* notes on the whole image: always in view under the note being written, a quiet tinted block so the active note (blue rule) stands apart */
+.whole { flex: none; padding: 14px 20px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.overall { display: grid; gap: 8px; }
+.overall textarea { min-height: calc(4 * 1.45em + 18px); max-height: 30vh; field-sizing: content; }   /* grows to fit the hint or the note, so no line is cut */
+.overall .ov-head .side-lbl { font-weight: 600; }
+.ov-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ov-head label, .ov-head .state { flex: none; }
+.ov-saved { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--f-mono); color: var(--muted); font-weight: 400 !important; }
+.ov-foot { display: flex; gap: 14px; align-items: center; }
+textarea { width: 100%; box-sizing: border-box; min-height: 64px; resize: vertical; font: 14px/1.45 var(--f-ui); color: var(--fg); background: var(--surface);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+textarea::placeholder { color: var(--muted); }
+.cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.card { min-width: 0; background: var(--bg); border: 1px solid transparent; border-radius: 11px; padding: 12px; display: grid; gap: 8px; align-content: start; }
+.card.sel { background: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.card.is-done > textarea { opacity: .7; }
+.card-head { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.num { appearance: none; border: 0; background: var(--c); color: #fff; min-width: 26px; height: 26px; padding: 0 7px; border-radius: 13px;
+  font: 600 13px var(--f-ui); cursor: pointer; flex: none; }
+.card-head .kind { font-weight: 600; }
+.card-head .who { color: var(--muted); font-size: 12px; }
+.card-head .where { margin-left: auto; color: var(--muted); font: 12px var(--f-mono); text-align: right; min-width: 0; }
+.ontext { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }
+.state { font: 600 11px var(--f-ui); letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+.state.done { background: var(--ok); color: #fff; }
+.reply { background: var(--reply); border-radius: 8px; padding: 8px 10px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.reply b { display: block; font: 600 11px var(--f-ui); letter-spacing: .05em; text-transform: uppercase; color: var(--accent); margin-bottom: 2px; }
+.card-foot { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.card-foot .r { display: flex; gap: 14px; }
+.link { appearance: none; border: 0; background: none; padding: 3px 0; color: var(--accent); font: 500 13px var(--f-ui); cursor: pointer; }
+.link.danger { color: var(--danger); }
+.empty { border: 1px dashed var(--line); border-radius: 11px; padding: 16px; color: var(--muted); font-size: 13px; }
+.empty b { color: var(--fg); }
+
+/* a new round added while the board is open opens by itself; this notice says so (with Back), or that it waits for the note being written */
+.newround { position: fixed; left: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 21; max-width: min(380px, calc(100% - 32px));
+  box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,.25); font: 13px/1.35 var(--f-ui); }
+.newround span { flex: 1; min-width: 0; }
+.newround .btn { flex: none; }
+/* every hover hint on the board: shown the moment the pointer is on it, gone the moment it leaves
+   (the browser's own title tooltip waits about a second) */
+.hovertip { position: fixed; z-index: 45; max-width: 280px; padding: 5px 9px; border-radius: 6px; background: var(--fg); color: var(--bg);
+  font: 500 12px/1.35 var(--f-ui); white-space: normal; pointer-events: none; box-shadow: 0 4px 14px rgba(0,0,0,.25); }
+.toast { position: fixed; left: 50%; bottom: calc(22px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--fg); color: var(--bg);
+  padding: 8px 14px; border-radius: 8px; font: 13px var(--f-ui); z-index: 20; max-width: calc(100% - 32px); }
+.copybox { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(0,0,0,.45); padding: 16px; }
+.copybox > div { width: min(720px, 100%); background: var(--surface); border-radius: 12px; padding: 16px; display: grid; gap: 10px; box-sizing: border-box; }
+.copybox textarea { min-height: 260px; font: 12px/1.5 var(--f-mono); }
+
+/* saved copy (read-only snapshot) */
+.ro [data-tool]:not([data-tool="move"]), .ro #swatches, .ro #undo, .ro .card .toggle, .ro .card .del, .ro #popDel, .ro #popSw, .ro #popHint { display: none !important; }
+.ro textarea[readonly] { background: var(--bg); }
+
+/* ---------- video tabs: same tools on top, a transport under the frame, the note composer at the top of the notes panel;
+   full screen gives the frame and the panel the whole screen ---------- */
+#vid { display: block; max-width: none; background: #000; box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 24px 70px rgba(0,0,0,.4); }
+.side-lbl { font: 600 11px var(--f-ui); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.pop.docked { position: static; width: auto; max-width: none; box-shadow: none; z-index: auto; }
+.pop.docked textarea { min-height: 96px; }
+.pop.is-new .num, .pop.is-new #popDel, .pop.is-new #popSw { display: none; }
+.transport { display: grid; gap: 6px; margin-top: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 8px 10px; }
+.trow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.vtc { font: 500 16px var(--f-mono); font-variant-numeric: tabular-nums; margin-inline: 2px; }
+.vtc small { color: var(--muted); font-size: 12px; }
+.vbeats { position: relative; height: 18px; }
+.vbeat { position: absolute; top: 0; height: 17px; box-sizing: border-box; border-radius: 4px; background: var(--chip); border: 1px solid var(--line); color: var(--muted);
+  font: 11px/15px var(--f-ui); padding: 0 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+.vbeat.cur { color: var(--fg); border-color: var(--accent); }
+.vtrack { position: relative; height: 32px; border-radius: 7px; background: var(--chip); cursor: pointer; touch-action: none; }
+.vtrack .tick { position: absolute; top: 0; height: 6px; border-left: 1px solid var(--line); }
+.vtrack .tlab { position: absolute; bottom: 1px; transform: translateX(-50%); font: 10px var(--f-mono); color: var(--muted); pointer-events: none; }
+.vpin { position: absolute; top: 6px; width: 13px; height: 13px; margin-left: -6.5px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: var(--c);
+  box-shadow: 0 0 0 1.5px var(--surface); cursor: pointer; }
+.vpin.done { opacity: .45; } .vpin.sel { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+.vrng { position: absolute; top: 10px; height: 5px; border-radius: 3px; background: var(--c); opacity: .55; pointer-events: none; }
+.vhead { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; }
+.vin { position: absolute; top: 0; bottom: 0; border-left: 2px dashed var(--accent); pointer-events: none; }
+.app.full { position: fixed; inset: 0; z-index: 15; min-height: 0; overflow: hidden; background: var(--bg); grid-template-rows: auto minmax(0, 1fr);
+  padding-block: env(safe-area-inset-top, 0px) env(safe-area-inset-bottom, 0px); }
+/* full screen keeps the slim header on top: at the very top of a full screen the system's own bar (the macOS menu bar, the
+   app's title bar) slides over the page and catches clicks, so the tool bar sits below that strip, not in it */
+.app.full .status { display: none; }
+/* the header's top row (name, save status) is never clicked, so it can sit in that strip; the tabs go on a row below it,
+   clear of the strip, so files switch without leaving full screen */
+.app.full .top { flex-wrap: wrap; row-gap: 8px; padding-top: 36px; }
+.app.full .brand { order: 1; }
+.app.full .top #save { order: 2; }
+.app.full .imgtabs { order: 3; flex: 1 1 100%; }
+
+/* narrow windows: one column that scrolls, the frame first, the notes under it with Send kept in reach */
+@media (max-width: 1000px) {
+  .app { height: auto; min-height: 100vh; grid-template-rows: auto auto; }
+  .top { flex-wrap: wrap; padding: 10px 16px; }
+  .brand { max-width: none; flex: 1 1 auto; }
+  .imgtabs { order: 3; flex: 1 1 100%; }
+  .work { grid-template-columns: minmax(0, 1fr); }
+  .mainc { grid-template-rows: auto auto auto auto; padding: 12px 16px; }
+  .viewer { height: clamp(300px, 62vh, 760px); }
+  .side { border-left: 0; border-top: 1px solid var(--line); }
+  .notes-head, .compose, .whole { padding-inline: 16px; }
+  #notesList { overflow: visible; padding-inline: 16px; }
+  .notes-foot { position: sticky; bottom: 0; padding-inline: 16px; }
+  .status .hint { display: none; }
+  .app.full { height: 100vh; height: 100dvh; grid-template-rows: auto minmax(0, 1fr); }
+  .app.full .work { grid-template-rows: minmax(0, 1fr) minmax(0, 38%); min-height: 0; }
+  .app.full .mainc { grid-template-rows: auto minmax(0, 1fr) auto auto; min-height: 0; }
+  .app.full .viewer { height: auto; }
+  .app.full .side { min-height: 0; }
+  .app.full #notesList { overflow: auto; }
+  .app.full .notes-foot { position: static; }
+}
+@media (max-width: 720px) {
+  .tbtn .lbl { display: none; }
+  .brand .sub { display: none; }
+  .viewer { height: 52vh; }
+  .vbar-l > * + * { padding-left: 0; border-left: 0; }
+}
+</style>
+
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1>__TITLE__</h1>
+      <p class="sub">__SUBTITLE__</p>
+      <p class="by">MarkRoom · by Zoke</p>
+    </div>
+    <nav class="imgtabs" id="imgtabs" aria-label="Images on this board" hidden></nav>
+    <span class="chip" id="save" data-state="connecting" role="status">Connecting…</span>
+  </header>
+  <div class="tabpop" id="tabPop" role="dialog" aria-modal="false" hidden></div>
+
+  <div class="work">
+  <main class="mainc">
+  <div class="vbar" role="toolbar" aria-label="Mark-up tools">
+    <div class="vbar-l">
+      <div class="seg" id="tools">
+        <button class="tbtn" data-tool="move" title="Move and select (V). Drag empty space to pan." aria-pressed="true">
+          <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg><span class="lbl">Move</span></button>
+        <button class="tbtn" data-tool="pin" title="Marker (P). Click to drop a numbered marker." aria-pressed="false">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="9" r="5"/><path d="M12 14v7"/></svg><span class="lbl">Marker</span></button>
+        <button class="tbtn" data-tool="arrow" title="Arrow (A). Drag from where it starts to what it points at." aria-pressed="false">
+          <svg viewBox="0 0 24 24"><path d="M5 19L19 5M10 5h9v9"/></svg><span class="lbl">Arrow</span></button>
+        <button class="tbtn" data-tool="box" title="Box (B). Drag to frame an area." aria-pressed="false">
+          <svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1.5"/></svg><span class="lbl">Box</span></button>
+        <button class="tbtn" data-tool="pen" title="Draw (D). Freehand; every stroke joins the note you're making." aria-pressed="false">
+          <svg viewBox="0 0 24 24"><path d="M3 18c3-1 4-7 7-7s2.5 5 5.5 4S19 7 21 6"/></svg><span class="lbl">Draw</span></button>
+        <button class="tbtn" data-tool="text" title="Text (T). Click to write on the image." aria-pressed="false">
+          <svg viewBox="0 0 24 24"><path d="M5 6h14M12 6v13M9 19h6"/></svg><span class="lbl">Text</span></button>
+      </div>
+      <div class="swatches" id="swatches" role="group" aria-label="Colour"></div>
+      <div class="seg">
+        <button class="tbtn" id="undo" title="Undo (⌘Z / Ctrl+Z)" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/></svg></button>
+        <button class="tbtn" id="hide" title="Hide marks to see the image clean" aria-label="Hide marks" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg></button>
+      </div>
+    </div>
+    <div class="vbar-r">
+      <div class="seg">
+        <button class="tbtn" id="zout" title="Zoom out (−)" aria-label="Zoom out"><svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg></button>
+        <span class="zoomval" id="zoomval">100%</span>
+        <button class="tbtn" id="zin" title="Zoom in (+)" aria-label="Zoom in"><svg viewBox="0 0 24 24"><path d="M6 12h12M12 6v12"/></svg></button>
+        <button class="tbtn" id="fit" title="Fit the whole image (0)">Fit</button>
+        <button class="tbtn" id="fill" title="Fill the viewer (L)">Fill</button>
+        <button class="tbtn" id="actual" title="Actual pixels (1:1)">1:1</button>
+        <button class="tbtn" id="fullBtn" title="Full screen (F)" aria-label="Full screen" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <div class="viewer t-move" id="viewer" aria-label="Image under review. Scroll to move, pinch or ⌘/Ctrl + scroll to zoom.">
+    <div id="stage"><img id="img" src="__FIRST_SRC__" alt="Image under review" draggable="false"><video id="vid" playsinline preload="auto" hidden></video></div>
+    <svg id="ov" aria-hidden="true"></svg>
+    <div id="labels"></div>
+    <div class="loading" id="loading">Loading the image…</div>
+    <textarea class="tedit" id="tedit" rows="1" hidden placeholder="Type on the image…" aria-label="Text on the image"></textarea>
+    <button class="donebtn" id="doneBtn" hidden title="Finish this group of marks and write its note (Enter)">
+      <svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Done<span class="cnt" id="doneCnt"></span></button>
+    <div class="pop" id="pop" hidden>
+      <div class="pop-head"><button class="num" id="popNum" tabindex="-1"></button><span class="kind" id="popKind"></span><span class="where" id="popWhere"></span></div>
+      <textarea id="popText" rows="3" placeholder="What should change here?"></textarea>
+      <div class="pics" id="popPics" hidden></div>
+      <div class="pop-hint" id="popHint"></div>
+      <div class="pop-foot">
+        <div class="swatches" id="popSw" role="group" aria-label="Colour of this note's marks"></div>
+        <button class="link danger" id="popDel">Delete</button>
+        <button class="btn primary" id="popSave">Save</button>
+      </div>
+    </div>
+  </div>
+  <div class="transport" id="transport" hidden>
+    <div class="vbeats" id="vbeats" hidden></div>
+    <div class="vtrack" id="vtrack" title="Click or drag to move the playhead"><div id="vticks"></div><div id="vranges"></div><div id="vpins"></div><div class="vin" id="vin" hidden></div><div class="vhead" id="vhead"></div></div>
+    <div class="trow">
+      <div class="seg">
+        <button class="tbtn" id="vprev" title="Previous note" aria-label="Previous note"><svg viewBox="0 0 24 24"><path d="M6 5v14M18 6l-9 6 9 6z"/></svg></button>
+        <button class="tbtn" id="vback" title="Back one frame (←)">−1f</button>
+        <button class="tbtn" id="vplay" title="Play / pause (Space)"><svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg><span class="lbl">Play</span></button>
+        <button class="tbtn" id="vfwd" title="Forward one frame (→)">+1f</button>
+        <button class="tbtn" id="vnext" title="Next note" aria-label="Next note"><svg viewBox="0 0 24 24"><path d="M18 5v14M6 6l9 6-9 6z"/></svg></button>
+      </div>
+      <span class="vtc" id="vtc">00:00:00</span>
+      <button class="btn" id="vsetin" title="Mark where a range starts; the note covers it up to the playhead (I)">Set in (I)</button>
+      <span class="chip" id="vinmsg" hidden></span>
+    </div>
+  </div>
+  <div class="under">
+    <div class="status">
+      <span id="readout">Point at the image to read its pixel position.</span>
+      <span class="hint">Scroll to move · ⌘/Ctrl + scroll or pinch to zoom · Space + drag to pan · Enter finishes a note</span>
+    </div>
+    <div class="mini" id="mini" title="Click or drag to jump" hidden>
+      <img id="miniImg" src="__FIRST_SRC__" alt="" draggable="false">
+      <div id="mdots"></div>
+      <div class="mview" id="mview"></div>
+    </div>
+  </div>
+  </main>
+
+  <aside class="side" id="side" aria-label="Notes">
+    <div class="compose" id="compose" hidden>
+      <div class="side-lbl" id="sideLbl">Note</div>
+      <div id="popDock"></div>
+    </div>
+    <section class="whole" id="whole" aria-labelledby="ovLabel">
+      <div class="overall">
+        <div class="ov-head"><label for="overall"><span class="side-lbl" id="ovLabel">Notes on the whole image</span></label><span class="state" id="ovState" hidden></span>
+          <span class="ov-saved" id="ovSaved" aria-live="polite"></span></div>
+        <textarea id="overall" rows="4" placeholder="Anything that applies everywhere: spacing, density, colour, type… It saves as you type; Claude reads it with the other notes. Paste or drop a picture to add it."></textarea>
+        <div class="pics" id="ovPics" hidden></div>
+        <div class="reply" id="ovReply" hidden><b>Claude</b><span></span></div>
+        <div class="ov-foot" id="ovFoot" hidden><button class="link" id="ovToggle"></button></div>
+      </div>
+    </section>
+    <section class="notes" aria-labelledby="notesTitle">
+      <div class="notes-head">
+        <h2 id="notesTitle">Notes <span id="count"></span></h2>
+        <p>Every note and the marks that go with it. Notes save as you type, and Claude reads them straight from this page.</p>
+        <div class="filters">
+      <div class="seg" role="group" aria-label="Show notes">
+        <button class="tbtn" data-filter="all" aria-pressed="true">All <span class="k" id="nAll">0</span></button>
+        <button class="tbtn" data-filter="open" aria-pressed="false">Open <span class="k" id="nOpen">0</span></button>
+        <button class="tbtn" data-filter="done" aria-pressed="false">Done <span class="k" id="nDone">0</span></button>
+      </div>
+      <div class="seg" role="group" aria-label="Which files" id="scopeSeg" hidden>
+        <button class="tbtn" data-scope="this" aria-pressed="true">This file</button>
+        <button class="tbtn" data-scope="all" aria-pressed="false">All files</button>
+      </div>
+        </div>
+      </div>
+      <div id="notesList">
+        <div class="empty" id="empty"></div>
+        <ol class="cards" id="cards"></ol>
+      </div>
+      <div class="notes-foot">
+      <button class="btn primary sendbtn" id="sendClaude" title="Tell Claude to start on the open notes shown here"><span id="sendLbl">Send notes to Claude</span><span class="k" id="sendCnt"></span></button>
+        <button class="btn" id="copyAll">Copy all notes</button>
+      </div>
+    </section>
+  </aside>
+  </div>
+</div>
+<div class="toast" id="toast" hidden aria-live="polite"></div>
+<div class="hovertip" id="tip" role="tooltip" hidden></div>
+<div class="picview" id="picView" hidden role="dialog" aria-label="Picture"><img id="picViewImg" alt="Pasted picture, full size"></div>
+<div class="newround" id="newRound" role="status" aria-live="polite" hidden><span id="nrText"></span><button class="btn primary" id="nrOpen">Open</button><button class="link" id="nrClose">Dismiss</button></div>
+
+<script id="markroom-config">
+window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom","images":[]}/*/CFG*/;
+</script>
+<script>
+(() => {
+  const CFG = window.MARKROOM_CFG || { images: [] };
+  const IMAGES = CFG.images || [];
+  const COLORS = { red: "#E0362C", blue: "#1F66E0", green: "#13925A", ink: "#1F1C1A" };
+  const COLOR_NAMES = { red: "Red", blue: "Blue", green: "Green", ink: "Black" };
+  const KIND = { pin: "Marker", arrow: "Arrow", box: "Box", pen: "Drawing", text: "Text" };
+  const KINDS = { pin: "Markers", arrow: "Arrows", box: "Boxes", pen: "Drawings", text: "Texts" };
+  // Kept from the earlier name, so drafts saved in a viewer's browser carry over to rebuilt boards.
+  const LOCAL_KEY = "redline:" + (CFG.key || "board");
+  // the newest render on the board (the last one added): whenever a new round is published, every viewer lands on it
+  const NEWEST = IMAGES.find((im) => im.id === CFG.newest) || IMAGES[IMAGES.length - 1] || null;
+  const SEEN_KEY = LOCAL_KEY + ":seen";
+  const SNAP = CFG.snapshot || null, RO = !!SNAP;          // a saved copy: marks are embedded and nothing can change
+
+  const $ = (s) => document.querySelector(s);
+  const viewer = $("#viewer"), stage = $("#stage"), img = $("#img"), svg = $("#ov"), labelsEl = $("#labels"), pop = $("#pop"), popText = $("#popText");
+  const doneBtn = $("#doneBtn"), tedit = $("#tedit");
+  const vid = $("#vid"), app = $(".app");
+  // ---------- video tabs: a note is stamped with a time (t, and t2 for a range); marks are drawn on that frame ----------
+  const isVid = (im) => !!(im && im.type === "video");
+  const VID = () => isVid(cur);
+  const fpsOf = (im) => (im && im.fps) || 25;
+  const fps = () => fpsOf(cur);
+  const snapT = (t, f = fps()) => Math.round(t * f) / f;
+  function tcOf(t, f = fps()) { const fr = Math.round((t || 0) * f), p = (k) => String(k).padStart(2, "0"); return p(Math.floor(fr / f / 60)) + ":" + p(Math.floor(fr / f) % 60) + ":" + p(fr % f); }
+  const nowT = () => snapT(vid.currentTime || 0);
+  const vdur = () => (isFinite(vid.duration) && vid.duration) || (cur && cur.dur) || 0;
+  let rangeIn = null;
+  const cardsEl = $("#cards"), overallEl = $("#overall"), saveChip = $("#save");
+  const f = (n) => (Math.round(n * 10) / 10).toString();
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const dateText = (s) => { try { return new Date(s).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); } catch (_) { return ""; } };
+  const scrollMotion = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
+  const isAssetId = (v) => /^[0-9a-f]{32}$/.test(String(v || ""));   // an id in the artifact's asset store
+
+  // ---------- state ----------
+  // A note is one numbered comment and every mark drawn for it: { id, n, img, items: [mark, ...], text, status, at, by, reply, edited }.
+  // Marks made one after another collect into the active note until Done; selecting a note makes it the active one again.
+  const marks = new Map();                     // note id -> note
+  const views = new Map();                     // image id -> {z, tx, ty}
+  let cur = NEWEST;
+  let W = cur ? cur.w : 1, H = cur ? cur.h : 1;
+  const view = { z: 1, tx: 0, ty: 0 };
+  let vw = 0, vh = 0;
+  let tool = "move", color = "red", hoverId = null, focusId = null, pulseId = null, draft = null, spaceDown = false, lastDown = null, hinted = false;
+  let draftId = null;                          // video: the note being drawn or typed, kept out of the list until it is saved (Enter or Save in the note box)
+  let activeId = null, ui = null;              // the note being made or edited; ui: "collect" (Done button showing) or "edit" (comment box open)
+  let tdraft = null;                           // text being typed on the image: { id, i, x, y, color } (id null: a new text mark)
+  let filter = "all", scope = "this", started = false, viewReady = false;
+  const undo = [];
+  const pending = new Map(), tomb = new Set(), timers = new Map(), queues = new Map(), created = new Set();
+  let mode = "connecting", col = null, ovCol = null, inflight = 0, saveError = false, myId = null, users = null;
+  const overall = new Map();                   // image id -> text
+  const ovMeta = new Map();                    // image id -> { reply, status, exists }
+  function renderOverallMeta(saved) {
+    if (!cur) return;
+    const m = ovMeta.get(cur.id) || {}, txt = (overall.get(cur.id) || "").trim();
+    const st = $("#ovState"); st.hidden = !txt; st.textContent = m.status === "done" ? "Done" : "Open"; st.classList.toggle("done", m.status === "done");
+    const r = $("#ovReply"); r.hidden = !m.reply; r.querySelector("span").textContent = m.reply || "";
+    $("#ovFoot").hidden = !txt || RO || mode !== "db"; $("#ovToggle").textContent = m.status === "done" ? "Reopen" : "Mark done";
+    if (saved != null) $("#ovSaved").textContent = saved;
+    paintPics($("#ovPics"), m.atts || [], { ov: cur.id });
+    renderSendBtn();                                           // the whole-image box counts as an open note
+  }
+
+  const isDirty = (id) => pending.has(id) || timers.has(id) || queues.has(id);
+  const imgById = (id) => IMAGES.find((i) => i.id === id) || IMAGES[0];
+  const wide = () => W / H >= 2.2;
+
+  // ---------- geometry ----------
+  const toS = (x, y) => [view.tx + x * view.z, view.ty + y * view.z];
+  const toI = (sx, sy) => [(sx - view.tx) / view.z, (sy - view.ty) / view.z];
+  function itemBox(it) {
+    if (it.kind === "arrow" || it.kind === "box") return [Math.min(it.x, it.x2), Math.min(it.y, it.y2), Math.max(it.x, it.x2), Math.max(it.y, it.y2)];
+    if (it.kind === "pen") {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let i = 0; i < it.p.length; i += 2) { x0 = Math.min(x0, it.p[i]); x1 = Math.max(x1, it.p[i]); y0 = Math.min(y0, it.p[i + 1]); y1 = Math.max(y1, it.p[i + 1]); }
+      return [x0, y0, x1, y1];
+    }
+    return [it.x, it.y, it.x, it.y];
+  }
+  function noteBox(m) {
+    let b = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const it of m.items) { const c = itemBox(it); b = [Math.min(b[0], c[0]), Math.min(b[1], c[1]), Math.max(b[2], c[2]), Math.max(b[3], c[3])]; }
+    return b;
+  }
+  function anchorI(m) { if (!m.items.length) { const im = imgById(m.img); return [im.w / 2, im.h / 2]; } const b = noteBox(m); return [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]; }
+  function badgeI(it) {
+    if (it.kind === "box") return [Math.min(it.x, it.x2), Math.min(it.y, it.y2)];
+    if (it.kind === "pen") return [it.p[0], it.p[1]];
+    return [it.x, it.y];
+  }
+  function summary(m) {
+    const n = {};
+    for (const it of m.items) n[it.kind] = (n[it.kind] || 0) + 1;
+    return Object.entries(n).map(([k, c]) => (c > 1 ? c + " " + KINDS[k] : KIND[k])).join(" + ") || "Note";
+  }
+  const noteColor = (m) => COLORS[(m.items[0] || {}).color] || COLORS.red;
+  const textsOf = (m) => m.items.filter((it) => it.kind === "text").map((it) => it.label);
+  function whereText(m, withImage) {
+    const [x, y] = anchorI(m);
+    const im = imgById(m.img);
+    if (m.t != null) { const fr = fpsOf(im); return (withImage && IMAGES.length > 1 ? im.label + " · " : "") + tcOf(m.t, fr) + (m.t2 != null ? " → " + tcOf(m.t2, fr) : ""); }
+    return (withImage && IMAGES.length > 1 ? im.label + " · " : "") + "x " + Math.round(x) + ", y " + Math.round(y);
+  }
+  const cloneItems = (m) => m.items.map((it) => Object.assign({}, it, it.p ? { p: it.p.slice() } : {}));
+  function roundItem(it) {
+    if (it.p) { it.p = it.p.map(Math.round); return; }
+    it.x = Math.round(it.x); it.y = Math.round(it.y);
+    if (it.x2 != null) { it.x2 = Math.round(it.x2); it.y2 = Math.round(it.y2); }
+  }
+  function translateItem(it, dx, dy) {
+    if (it.p) { it.p = it.p.map((v, i) => v + (i % 2 ? dy : dx)); return; }
+    it.x += dx; it.y += dy;
+    if (it.x2 != null) { it.x2 += dx; it.y2 += dy; }
+  }
+
+  // ---------- view ----------
+  function measure() { const r = viewer.getBoundingClientRect(); vw = r.width; vh = r.height; }
+  const fitZ = () => Math.min(vw / W, vh / H);
+  const fillZ = () => (W / H >= vw / vh ? vh / H : vw / W);
+  const minZ = () => fitZ() * 0.8;
+  const maxZ = () => Math.max(4, fitZ() * 2);
+  function clampView() {
+    const w = W * view.z, h = H * view.z, m = 60;
+    view.tx = w <= vw ? (vw - w) / 2 : Math.min(m, Math.max(vw - w - m, view.tx));
+    view.ty = h <= vh ? (vh - h) / 2 : Math.min(m, Math.max(vh - h - m, view.ty));
+  }
+  let autoFit = true;                          // the view follows the viewer's size until the reviewer zooms or pans
+  function zoomAt(sx, sy, k) {
+    autoFit = false;
+    const nz = Math.min(maxZ(), Math.max(minZ(), view.z * k));
+    const [ix, iy] = toI(sx, sy);
+    view.z = nz; view.tx = sx - ix * nz; view.ty = sy - iy * nz;
+    clampView(); schedule();
+  }
+  function centerOn(ix, iy) { view.tx = vw / 2 - ix * view.z; view.ty = vh / 2 - iy * view.z; clampView(); schedule(); }
+  function setZoomKeepCenter(z) { const [cx, cy] = toI(vw / 2, vh / 2); view.z = Math.min(maxZ(), Math.max(minZ(), z)); centerOn(cx, cy); }
+  function initialView() {
+    autoFit = !wide();
+    if (wide()) { view.z = vh / H; view.tx = 0; view.ty = 0; clampView(); }
+    else { view.z = fitZ(); clampView(); }
+  }
+
+  let raf = 0;
+  function schedule() { if (!raf) raf = requestAnimationFrame(frame); }
+  function frame() {
+    raf = 0;
+    stage.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.z})`;
+    renderMarks(); positionUI(); updateMiniView();
+    $("#zoomval").textContent = Math.round(view.z * 100) + "%";
+  }
+
+  // ---------- image switching ----------
+  // keepView: a carry object (from switchVersion) takes the previous round's place with it; otherwise a file seen before
+  // returns to the view it was left at
+  function showImage(im, keepView) {
+    if (!im) return;
+    const carry = keepView && typeof keepView === "object" ? keepView : null;
+    if (cur && started) views.set(cur.id, { z: view.z, tx: view.tx, ty: view.ty });
+    started = true;
+    finish(); draft = null;
+    cur = im; W = im.w; H = im.h;
+    const v = isVid(im);
+    rangeIn = null;
+    img.hidden = v; vid.hidden = !v; $("#transport").hidden = !v; $("#compose").hidden = !v;
+    $("#loading").hidden = false; $("#loading").textContent = v ? "Loading the video…" : "Loading the image…";
+    if (v) {
+      vid.style.width = W + "px"; vid.style.height = H + "px";
+      if (vid.getAttribute("src") !== im.src) vid.src = im.src;
+      if (vid.readyState >= 2) $("#loading").hidden = true;
+      pendingSeek = carry && carry.t != null ? { t: carry.t, play: carry.play } : null;
+      if (pendingSeek && vid.readyState >= 1) applySeek();
+      $("#popDock").appendChild(pop); pop.classList.add("docked");
+      popText.placeholder = "Write a note for this frame… (C)";
+      buildTrack();
+    } else {
+      vid.pause();
+      viewer.appendChild(pop); pop.classList.remove("docked", "is-new");
+      popText.placeholder = "What should change here?";
+      img.style.width = W + "px"; img.style.height = H + "px";
+      if (img.getAttribute("src") !== im.src) img.src = im.src;
+      if (img.complete && img.naturalWidth) $("#loading").hidden = true;
+      $("#miniImg").src = im.src;
+    }
+    $("#ovLabel").textContent = v ? "Notes on the whole video" : "Notes on the whole image";
+    viewer.setAttribute("aria-label", (v ? "Video" : "Image") + " under review. Scroll to move, pinch or ⌘/Ctrl + scroll to zoom.");
+    const mini = $("#mini"); mini.hidden = v || !wide(); mini.style.aspectRatio = W + " / " + H;
+    measure();
+    const sv = views.get(im.id);
+    viewReady = vw > 0 && vh > 0;                              // no size yet: the resize observer sets the first view
+    if (viewReady) {
+      if (carry && carry.view) applyRelView(carry.view);
+      else if (carry) initialView();
+      else if (sv) { Object.assign(view, sv); clampView(); } else initialView();
+    }
+    if (carry && carry.mismatch) toast(carry.mismatch);
+    overallEl.value = overall.get(im.id) || ""; renderOverallMeta();
+    for (const t of document.querySelectorAll(".imgtab")) t.setAttribute("aria-current", String(t.dataset.group === groupOf(im)));
+    if (location.hash.slice(1) !== im.id && IMAGES.length > 1) { try { history.replaceState(null, "", "#" + im.id); } catch (_) {} }
+    renderAll();
+  }
+  img.addEventListener("load", () => { if (!VID()) $("#loading").hidden = true; });
+  vid.addEventListener("loadeddata", () => { if (VID()) { $("#loading").hidden = true; tickVideo(); } });
+  // ---------- switching versions keeps your place ----------
+  // Another round of the same tab opens at the same zoom and the same spot on the frame (mapped by proportion when the
+  // sizes differ), and a video at the same moment when the two renders' timing matches: the same length (within a frame),
+  // the same fps, and the same beats where both have them. Otherwise the video starts from the beginning and says why.
+  let pendingSeek = null;
+  function relView() { return { nx: (vw / 2 - view.tx) / view.z / W, ny: (vh / 2 - view.ty) / view.z / H, zr: view.z / fitZ() }; }
+  function applyRelView(r) {
+    autoFit = false;
+    view.z = clamp(r.zr * fitZ(), minZ(), maxZ());
+    view.tx = vw / 2 - r.nx * W * view.z; view.ty = vh / 2 - r.ny * H * view.z;
+    clampView();
+  }
+  function timingDiff(a, b) {
+    const fa = fpsOf(a), fb = fpsOf(b), tol = 1 / Math.max(fa, fb) + 1e-3;
+    if (Math.abs(fa - fb) > 0.01) return fa + " fps vs " + fb + " fps";
+    if (Math.abs((a.dur || 0) - (b.dur || 0)) > tol) return (a.dur || 0).toFixed(2) + " s vs " + (b.dur || 0).toFixed(2) + " s";
+    const ba = a.beats || [], bb = b.beats || [];
+    if (ba.length && bb.length && (ba.length !== bb.length || ba.some((x, i) => Math.abs(x.a - bb[i].a) > tol || Math.abs(x.b - bb[i].b) > tol))) return "the sections are timed differently";
+    return "";
+  }
+  function switchVersion(im) {
+    if (!im || !cur || im === cur) return;
+    const carry = { view: autoFit ? null : relView(), t: null, play: false };
+    if (isVid(cur) && isVid(im)) {
+      const why = timingDiff(cur, im);
+      if (!why) { carry.t = vid.currentTime || 0; carry.play = !vid.paused && !vid.ended; }
+      else carry.mismatch = cur.label + " and " + im.label + " are timed differently (" + why + "), so " + im.label + " starts from the beginning.";
+    }
+    showImage(im, carry);
+  }
+  function applySeek() {
+    const s = pendingSeek; pendingSeek = null;
+    if (!s || !VID()) return;
+    setVideoTime(s.t);
+    if (s.play) vid.play().catch(() => {});
+    tickVideo();
+  }
+  vid.addEventListener("loadedmetadata", () => { if (pendingSeek && VID()) applySeek(); });
+  vid.addEventListener("error", () => { if (VID()) { $("#loading").hidden = false; $("#loading").textContent = "This video did not load. Reload the page to try again."; } });
+  img.addEventListener("error", () => { $("#loading").hidden = false; $("#loading").textContent = "This image did not load. Reload the page to try again."; });
+  // tabs: one per group. Rounds of the same thing (build_board --group) share a tab; the tab opens the latest round and
+  // the Version dropdown beside the tabs opens an older one. Notes stay on the round they were written on.
+  const groupOf = (im) => (im && (im.group || im.id)) || "";
+  // tab order: layout/tabs = { order: [group ids], at, by }, set by dragging a tab (or Alt + ←/→ anywhere, for the open tab) and the same for everyone.
+  // Tabs it doesn't name (a new round's tab, say) follow in the board's own order.
+  let tabOrder = null;
+  const groups = () => { const g = []; for (const im of IMAGES) if (!g.includes(groupOf(im))) g.push(groupOf(im));
+    if (!tabOrder || !tabOrder.length) return g;
+    const known = tabOrder.filter((x) => g.includes(x)); return known.concat(g.filter((x) => !known.includes(x))); };
+  const versionsOf = (gid) => IMAGES.filter((im) => groupOf(im) === gid);
+  const latestOf = (gid) => { const v = versionsOf(gid); return v[v.length - 1]; };
+  const tabName = (gid) => { const im = latestOf(gid); return (im && (im.group || im.label)) || gid; };
+  // closed tabs: tabs/<tabDocId(group)> = { id: <group or image id>, label, hidden: true | false, at, by }. Closing hides the tab and
+  // all of its versions for everyone; the images and notes stay. Closed tabs (end of the tab row) reopens one. One tab always stays open.
+  const tabState = new Map();                  // group id -> { hidden, at, by, label, src: doc id }
+  let tabCol = null;
+  const tabDocId = (gid) => String(gid).replace(/[^\w.-]+/g, "_").slice(0, 120) || "_";
+  // a tab closed before its newest round was added opens again: a new round always shows
+  const isClosed = (gid) => { const s = tabState.get(gid), im = latestOf(gid);
+    return !!(s && s.hidden) && !(im && im.added && s.at && im.added > s.at); };
+  function visGroups() {
+    const gs = groups(), v = gs.filter((g) => !isClosed(g));
+    return v.length ? v : (cur ? [groupOf(cur)] : gs.slice(-1));    // everything closed (two people at once, say): keep one showing
+  }
+  const closedGroups = () => { const v = visGroups(); return groups().filter((g) => !v.includes(g)); };
+  const tabShown = (imgId) => { const im = IMAGES.find((i) => i.id === imgId); return !im || visGroups().includes(groupOf(im)); };
+  function renderTabs() {
+    const nav = $("#imgtabs"), gs = visGroups(), closed = closedGroups(), vers = cur ? versionsOf(groupOf(cur)) : [];
+    nav.hidden = gs.length < 2 && vers.length < 2 && !closed.length;
+    $("#scopeSeg").hidden = IMAGES.filter((im) => gs.includes(groupOf(im))).length < 2;
+    if (nav.hidden) return;
+    const solo = gs.length < 2 || RO, sig = JSON.stringify([gs, gs.map((g) => latestOf(g).id), closed.length, solo]);
+    if (nav.dataset.sig !== sig) {
+      nav.dataset.sig = sig; delete nav.dataset.shown;
+      nav.innerHTML = gs.map((gid) => { const im = latestOf(gid), name = tabName(gid);
+        return `<span class="tabw${solo ? " solo" : ""}" data-group="${esc(gid)}"><button class="imgtab" data-group="${esc(gid)}"${solo ? "" : ' title="Drag to move this tab. Alt + ← / → moves the open tab from anywhere."'}><img src="${esc(im.poster || im.src)}" alt="" loading="lazy"><span>${esc((isVid(im) ? "▶ " : "") + name)}</span><span class="cnt"></span></button>`
+          + (solo ? "" : `<button class="tabx" data-close="${esc(gid)}" title="Close this tab" aria-label="Close tab ${esc(name)}">×</button>`) + `</span>`; }).join("")
+        + `<label class="vers" id="vers" hidden>Version <select id="versSel" aria-label="Version"></select></label>`
+        + (closed.length && !RO ? `<button class="closedbtn" id="closedBtn" aria-haspopup="dialog" aria-expanded="false">Closed tabs (${closed.length})</button>` : "");
+      nav.querySelectorAll(".imgtab").forEach((b) => {
+        b.addEventListener("click", (e) => { if (tabDrag.justDropped) { e.preventDefault(); return; } if (groupOf(cur) !== b.dataset.group) showImage(latestOf(b.dataset.group)); });
+        if (solo) return;
+        b.addEventListener("pointerdown", (e) => tabPointerDown(e, b));
+        b.addEventListener("keydown", (e) => {
+          if (!e.altKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+          e.preventDefault(); e.stopPropagation();
+          moveTab(b.dataset.group, e.key === "ArrowRight" ? 1 : -1);
+        });
+      });
+      nav.querySelectorAll(".tabx").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); askCloseTab(b.dataset.close, b); }));
+      $("#versSel").addEventListener("change", (e) => switchVersion(imgById(e.target.value)));
+      const cb = $("#closedBtn"); if (cb) cb.addEventListener("click", () => openClosedTabs(cb));
+      if (tabPopFor) closeTabPop();
+    }
+    for (const b of nav.querySelectorAll(".imgtab")) {
+      const gid = b.dataset.group, ids = versionsOf(gid).map((im) => im.id);
+      const list = [...marks.values()].filter((m) => ids.includes(m.img)), open = list.filter((m) => m.status !== "done").length;
+      b.querySelector(".cnt").textContent = list.length ? open + " open" : "";
+      b.setAttribute("aria-current", String(!!cur && groupOf(cur) === gid));
+    }
+    const vl = $("#vers"), sel = $("#versSel");
+    vl.hidden = vers.length < 2;
+    if (vers.length > 1) {
+      const want = vers.slice().reverse().map((im, i) => { const n = [...marks.values()].filter((m) => m.img === im.id && m.status !== "done").length;
+        return `<option value="${esc(im.id)}">${esc(im.label + (i === 0 ? " · latest" : "") + (n ? " · " + n + " open" : ""))}</option>`; }).join("");
+      if (sel.innerHTML !== want) sel.innerHTML = want;
+      sel.value = cur.id;
+    }
+    // the selected tab (and its Version dropdown) scrolls into view whenever the selection moves to another tab: the newest
+    // round's tab is often far along the row
+    const on = cur && nav.querySelector('.imgtab[aria-current="true"]');
+    if (on && nav.dataset.shown !== groupOf(cur)) {
+      nav.dataset.shown = groupOf(cur);
+      requestAnimationFrame(() => {
+        const nr = nav.getBoundingClientRect(), t = (on.closest(".tabw") || on).getBoundingClientRect();
+        const right = vl.hidden ? t.right : Math.max(t.right, vl.getBoundingClientRect().right);
+        if (t.left < nr.left || right > nr.right) nav.scrollLeft += Math.min(t.left - nr.left - 8, right - nr.right + 8);
+      });
+    }
+  }
+  // the in-page confirm for closing a tab, and the Closed tabs list (window.confirm doesn't work in artifacts)
+  const tabPop = $("#tabPop");
+  let tabPopFor = null, tabAnchor = null;
+  function placeTabPop(anchor) {
+    tabPop.hidden = false; tabAnchor = anchor;
+    const r = anchor.getBoundingClientRect(), w = tabPop.offsetWidth, h = tabPop.offsetHeight, cw = document.documentElement.clientWidth;
+    tabPop.style.left = clamp(r.left, 12, cw - w - 12) + "px";
+    // below the anchor, or above it where it sits near the bottom (the Send button at the foot of the notes panel)
+    tabPop.style.top = (r.bottom + 6 + h > window.innerHeight - 12 && r.top - 6 - h >= 12 ? r.top - 6 - h : r.bottom + 6) + "px";
+  }
+  function closeTabPop() {
+    tabPop.hidden = true; tabPop.innerHTML = ""; tabPopFor = null; tabAnchor = null;
+    const cb = $("#closedBtn"); if (cb) cb.setAttribute("aria-expanded", "false");
+  }
+  // a small question in the page beside its button: buttons = [{ act, text, primary?, run? }]; every button closes it first,
+  // then runs its action, and the primary one takes the focus
+  function popDialog(key, label, html, buttons, anchor) {
+    tabPop.innerHTML = html + `<div class="row">` + buttons.map((b) => `<button class="btn${b.primary ? " primary" : ""}" data-act="${b.act}">${b.text}</button>`).join("") + `</div>`;
+    tabPopFor = key;
+    tabPop.setAttribute("aria-label", label);
+    for (const b of buttons) tabPop.querySelector(`[data-act="${b.act}"]`).addEventListener("click", () => { closeTabPop(); if (b.run) b.run(); });
+    placeTabPop(anchor); tabPop.querySelector(".btn.primary").focus();
+  }
+  function askCloseTab(gid, anchor) {
+    if (tabPopFor === "close:" + gid) { closeTabPop(); return; }
+    if (mode === "connecting") { toast("Still connecting. Try again in a moment."); return; }
+    if (visGroups().length < 2) { toast("A board keeps at least one tab open."); return; }
+    const ids = versionsOf(gid).map((im) => im.id), n = ids.length, name = tabName(gid);
+    const open = [...marks.values()].filter((m) => ids.includes(m.img) && m.status !== "done").length;
+    popDialog("close:" + gid, "Close this tab?", `<b>Close “${esc(name)}”?</b>`
+      + `<p>It disappears for everyone on this board${n > 1 ? ", with all " + n + " versions" : ""}. ${open ? "Its " + open + " open note" + (open > 1 ? "s stay" : " stays") + " saved" : "Its notes stay saved"}, and <b>Closed tabs</b> brings it back.</p>`,
+      [{ act: "cancel", text: "Cancel" }, { act: "close", text: "Close tab", primary: true, run: () => setTabClosed(gid, true) }], anchor);
+  }
+  function openClosedTabs(anchor) {
+    if (tabPopFor === "menu") { closeTabPop(); return; }
+    tabPop.innerHTML = `<b>Closed tabs</b><ul>` + closedGroups().map((gid) => {
+      const im = latestOf(gid), s = tabState.get(gid) || {}, who = s.by && names[s.by] ? " · " + names[s.by].name : "";
+      return `<li><img src="${esc(im.poster || im.src)}" alt=""><span class="nm">${esc((isVid(im) ? "▶ " : "") + tabName(gid))}<span class="meta">${esc(s.at ? "Closed " + dateText(s.at) + who : "Closed")}</span></span>`
+        + `<button class="btn" data-open="${esc(gid)}">Reopen</button></li>`; }).join("")
+      + `</ul><p>Closing a tab only hides it. Its images, versions and notes are all still on the board.</p>`;
+    tabPopFor = "menu";
+    tabPop.setAttribute("aria-label", "Closed tabs");
+    tabPop.querySelectorAll("[data-open]").forEach((b) => b.addEventListener("click", () => {
+      const gid = b.dataset.open; closeTabPop(); setTabClosed(gid, false); showImage(latestOf(gid));
+    }));
+    anchor.setAttribute("aria-expanded", "true");
+    placeTabPop(anchor); const first = tabPop.querySelector("[data-open]"); if (first) first.focus();
+  }
+  tabPop.addEventListener("keydown", (e) => { if (e.key === "Escape") closeTabPop(); if (e.key !== "Tab") e.stopPropagation(); });   // tool keys don't fire in here
+  document.addEventListener("pointerdown", (e) => { if (tabPopFor && !e.target.closest("#tabPop, .tabx, #closedBtn, #sendClaude")) closeTabPop(); });
+  window.addEventListener("resize", () => { if (tabPopFor) closeTabPop(); });
+  window.addEventListener("scroll", () => { if (tabPopFor && tabAnchor && tabAnchor.isConnected) placeTabPop(tabAnchor); }, true);   // the page or the tab row
+  function setTabClosed(gid, hide) {
+    if (hide && !visGroups().some((g) => g !== gid)) { toast("A board keeps at least one tab open."); return; }
+    const doc = { id: gid, label: tabName(gid), hidden: hide, at: new Date().toISOString(), by: myId || null };
+    tabState.set(gid, Object.assign({ src: tabDocId(gid) }, doc));
+    if (mode === "db") enqueue("__tab_" + gid, () => tabCol.doc(tabDocId(gid)).set(doc));
+    else if (mode === "local") saveLocal();
+    if (hide) toast("Closed “" + doc.label + "”. Reopen it from Closed tabs.");
+    afterTabsChange(false);
+  }
+  // ---------- moving tabs ----------
+  // Drag a tab along the row and drop it: the others make way as it passes their middle. With a mouse the drag starts after a
+  // few pixels; on touch, hold the tab a moment first (a plain swipe still scrolls the row). The new order saves for everyone.
+  const tabDrag = { el: null, gid: null, x0: 0, y0: 0, on: false, timer: 0, id: null, touch: false, justDropped: false, before: null };
+  function moveTab(gid, dir) {                                 // one place left (-1) or right (+1) along the row
+    const vis = visGroups(), i = vis.indexOf(gid), j = i + dir;
+    if (i < 0 || j < 0 || j >= vis.length) return;
+    const next = vis.slice(); next.splice(i, 1); next.splice(j, 0, gid); setTabOrder(next, gid);
+  }
+  function tabPointerDown(e, b) {
+    if (e.button > 0 || tabDrag.el) return;
+    Object.assign(tabDrag, { el: b.closest(".tabw"), gid: b.dataset.group, x0: e.clientX, y0: e.clientY, on: false, id: e.pointerId, touch: e.pointerType === "touch" });
+    tabDrag.before = [...$("#imgtabs").querySelectorAll(".tabw")].map((w) => w.dataset.group);
+    if (tabDrag.touch) tabDrag.timer = setTimeout(() => startTabDrag(), 350);
+  }
+  function startTabDrag() {
+    if (!tabDrag.el || tabDrag.on) return;
+    tabDrag.on = true; tabDrag.el.classList.add("dragging"); $("#imgtabs").classList.add("reordering");
+    if (navigator.vibrate && tabDrag.touch) try { navigator.vibrate(10); } catch (_) {}
+  }
+  function endTabDrag(cancel) {
+    clearTimeout(tabDrag.timer);
+    const { el, gid, on, before } = tabDrag; tabDrag.el = null; tabDrag.on = false;
+    if (!el) return;
+    el.classList.remove("dragging"); $("#imgtabs").classList.remove("reordering");
+    if (!on) return;
+    tabDrag.justDropped = true; setTimeout(() => { tabDrag.justDropped = false; }, 0);    // the click that follows a drop isn't a tab switch
+    const after = [...$("#imgtabs").querySelectorAll(".tabw")].map((w) => w.dataset.group);
+    if (cancel || after.join("\n") === before.join("\n")) { $("#imgtabs").dataset.sig = ""; renderTabs(); return; }
+    setTabOrder(after, gid);
+  }
+  window.addEventListener("pointermove", (e) => {
+    if (!tabDrag.el || e.pointerId !== tabDrag.id) return;
+    const dx = e.clientX - tabDrag.x0, dy = e.clientY - tabDrag.y0;
+    if (!tabDrag.on) {
+      if (tabDrag.touch) { if (Math.hypot(dx, dy) > 8) endTabDrag(true); return; }    // moved before the hold: it's a swipe
+      if (Math.abs(dx) < 6) return;
+      startTabDrag();
+    }
+    const nav = $("#imgtabs"), nr = nav.getBoundingClientRect();
+    if (e.clientX < nr.left + 32) nav.scrollLeft -= 12; else if (e.clientX > nr.right - 32) nav.scrollLeft += 12;
+    // pass a neighbour's middle and it swaps places with the dragged tab
+    for (const w of nav.querySelectorAll(".tabw")) {
+      if (w === tabDrag.el) continue;
+      const r = w.getBoundingClientRect(), mid = r.left + r.width / 2;
+      const isBefore = tabDrag.el.compareDocumentPosition(w) & Node.DOCUMENT_POSITION_PRECEDING;
+      if (isBefore && e.clientX < mid) { nav.insertBefore(tabDrag.el, w); break; }
+      if (!isBefore && e.clientX > mid) { nav.insertBefore(tabDrag.el, w.nextSibling); }
+    }
+  });
+  window.addEventListener("pointerup", (e) => { if (tabDrag.el && e.pointerId === tabDrag.id) endTabDrag(false); });
+  window.addEventListener("pointercancel", (e) => { if (tabDrag.el && e.pointerId === tabDrag.id) endTabDrag(!tabDrag.on); });
+  window.addEventListener("keydown", (e) => { if (tabDrag.on && e.key === "Escape") { e.stopPropagation(); endTabDrag(true); } }, true);
+  // a held touch drag mustn't scroll the row or the page under the finger
+  document.addEventListener("touchmove", (e) => { if (tabDrag.on) e.preventDefault(); }, { passive: false });
+  // vis: the open tabs in their new order. Closed tabs keep their place among them, so reopening one puts it back where it was.
+  function setTabOrder(vis, moved) {
+    const all = groups(), closed = all.filter((g) => !vis.includes(g)), next = vis.slice();
+    for (const g of closed) {                       // after the open tab that came before it
+      const prevOpen = all.slice(0, all.indexOf(g)).reverse().find((x) => vis.includes(x) || next.includes(x));
+      next.splice(prevOpen == null ? 0 : next.indexOf(prevOpen) + 1, 0, g);
+    }
+    const hadFocus = !!(document.activeElement && document.activeElement.classList.contains("imgtab"));
+    tabOrder = next;
+    const doc = { order: next, at: new Date().toISOString(), by: myId || null };
+    if (mode === "db") enqueue("__taborder", () => layoutCol.doc("tabs").set(doc));
+    else if (mode === "local") saveLocal();
+    renderTabs();
+    const b = moved != null && [...$("#imgtabs").querySelectorAll(".imgtab")].find((x) => x.dataset.group === moved);
+    if (b && hadFocus) b.focus();                  // Alt + ←/→ again keeps moving the same tab
+  }
+  let layoutCol = null;
+
+  // the tab in view was closed (here, by someone else, or by Claude): move to the nearest open tab
+  function afterTabsChange(remote) {
+    const g = cur && groupOf(cur), vis = visGroups();
+    if (!cur || vis.includes(g)) { renderAll(); return; }
+    const gs = groups(), i = gs.indexOf(g), next = vis.find((x) => gs.indexOf(x) > i) || vis[vis.length - 1];
+    if (remote) toast("“" + tabName(g) + "” is closed. Reopen it from Closed tabs.");
+    showImage(latestOf(next));
+  }
+
+  // ---------- drawing the marks (screen space: lines and numbers keep their size at every zoom) ----------
+  const HL = 'style="stroke:var(--accent)"';
+  function strokeSet(d, c, hl, hit, op) {
+    return `<g opacity="${op}">` + (hl ? `<path d="${d}" fill="none" ${HL} stroke-width="13" stroke-linecap="round" stroke-linejoin="round" opacity=".5"/>` : "")
+      + `<path d="${d}" fill="none" stroke="#fff" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" opacity=".92"/>`
+      + `<path d="${d}" fill="none" stroke="${c}" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></g>`
+      + (hit ? `<path class="hit" ${hit} d="${d}" fill="none" stroke="transparent" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>` : "");
+  }
+  function shapeSVG(it, c, hl, hit, op) {
+    if (it.kind === "arrow") {
+      const [ax, ay] = toS(it.x, it.y), [bx, by] = toS(it.x2, it.y2);
+      const L = Math.hypot(bx - ax, by - ay) || 1, ux = (bx - ax) / L, uy = (by - ay) / L, hlen = Math.min(20, L * 0.45), hw = hlen * 0.55;
+      const sx = bx - ux * hlen * 0.6, sy = by - uy * hlen * 0.6;
+      const p1x = bx - ux * hlen - uy * hw, p1y = by - uy * hlen + ux * hw, p2x = bx - ux * hlen + uy * hw, p2y = by - uy * hlen - ux * hw;
+      const shaft = `M${f(ax)} ${f(ay)}L${f(sx)} ${f(sy)}`, head = `M${f(bx)} ${f(by)}L${f(p1x)} ${f(p1y)}L${f(p2x)} ${f(p2y)}Z`;
+      return `<g opacity="${op}">` + (hl ? `<path d="${shaft}" fill="none" ${HL} stroke-width="13" stroke-linecap="round" opacity=".5"/>` : "")
+        + `<path d="${shaft}" fill="none" stroke="#fff" stroke-width="6.5" stroke-linecap="round" opacity=".92"/>`
+        + `<path d="${head}" fill="#fff" stroke="#fff" stroke-width="5" stroke-linejoin="round" opacity=".92"/>`
+        + `<path d="${shaft}" fill="none" stroke="${c}" stroke-width="3.5" stroke-linecap="round"/>`
+        + `<path d="${head}" fill="${c}" stroke="${c}" stroke-width="1.5" stroke-linejoin="round"/></g>`
+        + (hit ? `<path class="hit" ${hit} d="M${f(ax)} ${f(ay)}L${f(bx)} ${f(by)}" stroke="transparent" stroke-width="18" stroke-linecap="round"/>` : "");
+    }
+    if (it.kind === "box") {
+      const [ax, ay] = toS(Math.min(it.x, it.x2), Math.min(it.y, it.y2)), [bx, by] = toS(Math.max(it.x, it.x2), Math.max(it.y, it.y2));
+      return strokeSet(`M${f(ax)} ${f(ay)}H${f(bx)}V${f(by)}H${f(ax)}Z`, c, hl, hit, op);
+    }
+    if (it.kind === "pen") {
+      const s = it.p;
+      let d = "";
+      for (let i = 0; i < s.length; i += 2) { const [x, y] = toS(s[i], s[i + 1]); d += (i ? "L" : "M") + f(x) + " " + f(y); }
+      if (s.length === 2) { const [x, y] = toS(s[0], s[1]); d += "L" + f(x + 0.1) + " " + f(y); }
+      return strokeSet(d, c, hl, hit, op);
+    }
+    return "";
+  }
+  // every mark carries its note's number, so it's clear which marks belong together
+  function labelHTML(m, it, i, c, hl) {
+    const cls = (hl ? " sel" : "") + (m.id === pulseId ? " pulse" : "") + (m.status === "done" && !hl ? " done-mark" : "");
+    const at = `data-id="${esc(m.id)}" data-i="${i}"`;
+    if (it.kind === "pin") {
+      const [x, y] = toS(it.x, it.y);
+      return `<div class="pin${cls}" style="left:${f(x)}px;top:${f(y)}px;--c:${c}"><span class="stem"></span><span class="tip"></span><span class="head" ${at}>${m.n}</span></div>`;
+    }
+    if (it.kind === "text") {
+      const [x, y] = toS(it.x, it.y);
+      return `<div class="tlabel${cls}" ${at} style="left:${f(x)}px;top:${f(y)}px;--c:${c}"><span class="tnum">${m.n}</span>${esc(it.label)}</div>`;
+    }
+    const [x, y] = toS(...badgeI(it));
+    return `<span class="badge${cls}" ${at} style="left:${f(x)}px;top:${f(y)}px;--c:${c}">${m.n}</span>`;
+  }
+  const sorted = () => [...marks.values()].sort((a, b) => a.n - b.n);
+  const onImage = () => sorted().filter((m) => cur && m.img === cur.id);
+  // where each of a note's marks sits on screen (with its number), and all of them together, padded:
+  // the dashed frame, the Done button and the comment box go around these
+  function itemRects(m) {
+    return m.items.map((it, i) => {
+      if (it.kind === "pin") { const [x, y] = toS(it.x, it.y); return { x0: x - 14, y0: y - 42, x1: x + 14, y1: y + 4 }; }
+      if (it.kind === "text") {
+        const [x, y] = toS(it.x, it.y), el = labelsEl.querySelector(`.tlabel[data-id="${CSS.escape(m.id)}"][data-i="${i}"]`);
+        return { x0: x - 13, y0: y - 13, x1: x + (el ? el.offsetWidth : 120), y1: y + (el ? el.offsetHeight : 30) };
+      }
+      const b = itemBox(it), [ax, ay] = toS(b[0], b[1]), [bx, by] = toS(b[2], b[3]);
+      return { x0: ax - 11, y0: ay - 11, x1: bx + 11, y1: by + 11 };
+    });
+  }
+  const padRect = (r, p) => ({ x0: r.x0 - p, y0: r.y0 - p, x1: r.x1 + p, y1: r.y1 + p });
+  function bundleRect(m, rs = itemRects(m)) {
+    return padRect(rs.reduce((a, r) => ({ x0: Math.min(a.x0, r.x0), y0: Math.min(a.y0, r.y0), x1: Math.max(a.x1, r.x1), y1: Math.max(a.y1, r.y1) })), 6);
+  }
+  // put a floating box beside the note without covering its marks: try spots around the whole note, then around its
+  // newest mark, and take the first that is clear (or the least covered one)
+  function placeBeside(el, m, spots) {
+    const w = el.offsetWidth, h = el.offsetHeight, rs = itemRects(m);
+    const anchors = [bundleRect(m, rs), ...rs.slice().reverse().map((r) => padRect(r, 6))];
+    let best = null;
+    search: for (const r of anchors) for (const [x, y] of spots(r, w, h)) {
+      const cx = clamp(x, 8, vw - w - 8), cy = clamp(y, 8, vh - h - 8);
+      let cover = 0;
+      for (const q of rs) cover += Math.max(0, Math.min(cx + w, q.x1) - Math.max(cx, q.x0)) * Math.max(0, Math.min(cy + h, q.y1) - Math.max(cy, q.y0));
+      if (!best || cover < best.cover) best = { cx, cy, cover };
+      if (!cover) break search;
+    }
+    el.style.left = best.cx + "px"; el.style.top = best.cy + "px";
+  }
+  const DONE_SPOTS = (r, w, h) => [[r.x1 + 8, r.y1 + 8], [r.x1 - w, r.y1 + 8], [r.x1 + 8, r.y1 - h], [r.x1 - w, r.y0 - h - 8], [r.x0 - w - 8, r.y1 - h]];
+  const POP_SPOTS = (r, w, h) => [[r.x1 + 12, r.y0], [r.x0 - 12 - w, r.y0], [r.x0, r.y1 + 12], [r.x0, r.y0 - 12 - h]];
+  // on a video, a note's marks show on its frame (or range), and whenever the note is in hand, hovered or focused
+  function shownNow(m) {
+    if (!VID() || m.t == null || m.id === activeId || m.id === hoverId || m.id === focusId) return true;
+    const t = vid.currentTime || 0, half = 0.5 / fps();
+    return t >= m.t - half && t <= Math.max(m.t2 != null ? m.t2 : m.t, m.t + 0.4) + half;
+  }
+  function renderMarks() {
+    let s = "", h = "";
+    for (const m of onImage()) {
+      if (!shownNow(m)) continue;
+      const hl = m.id === activeId || m.id === hoverId || m.id === focusId, op = m.status === "done" && !hl ? 0.45 : 1;
+      m.items.forEach((it, i) => {
+        const c = COLORS[it.color] || COLORS.red;
+        s += shapeSVG(it, c, hl, `data-id="${esc(m.id)}" data-i="${i}"`, op);
+        if (!(tdraft && tdraft.id === m.id && tdraft.i === i)) h += labelHTML(m, it, i, c, hl);
+      });
+    }
+    if (draft) s += shapeSVG(draft, COLORS[draft.color], false, "", 1);
+    labelsEl.innerHTML = h;
+    const am = activeId && marks.get(activeId);
+    if (am && cur && am.img === cur.id && am.items.length) {      // a dashed frame shows which marks belong to the note in hand
+      const r = bundleRect(am), box = `x="${f(r.x0)}" y="${f(r.y0)}" width="${f(r.x1 - r.x0)}" height="${f(r.y1 - r.y0)}" rx="10" fill="none"`;
+      s = `<rect ${box} stroke="#fff" stroke-width="3.5" opacity=".55"/><rect ${box} ${HL} stroke-width="1.6" stroke-dasharray="6 5"/>` + s;
+    }
+    svg.innerHTML = s;
+  }
+
+  // ---------- minimap (wide strips only) ----------
+  const mini = $("#mini"), mview = $("#mview"), mdots = $("#mdots");
+  function updateMiniView() {
+    if (mini.hidden) return;
+    const x = -view.tx / view.z, y = -view.ty / view.z, w = vw / view.z, h = vh / view.z;
+    const l = Math.max(0, x), t = Math.max(0, y), r = Math.min(W, x + w), b = Math.min(H, y + h);
+    Object.assign(mview.style, { left: (l / W * 100) + "%", top: (t / H * 100) + "%", width: (Math.max(0, r - l) / W * 100) + "%", height: (Math.max(0, b - t) / H * 100) + "%" });
+  }
+  function renderMiniDots() {
+    mdots.innerHTML = onImage().map((m) => { const [x, y] = anchorI(m); return `<span class="mdot" style="left:${x / W * 100}%;top:${y / H * 100}%;--c:${noteColor(m)}"></span>`; }).join("");
+  }
+  let miniDrag = false;
+  const miniJump = (e) => { const r = mini.getBoundingClientRect(); centerOn((e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H); };
+  mini.addEventListener("pointerdown", (e) => { miniDrag = true; try { mini.setPointerCapture(e.pointerId); } catch (_) {} miniJump(e); });
+  mini.addEventListener("pointermove", (e) => { if (miniDrag) miniJump(e); });
+  mini.addEventListener("pointerup", () => { miniDrag = false; });
+  mini.addEventListener("pointercancel", () => { miniDrag = false; });
+
+  // ---------- notes: add marks / delete / undo ----------
+  const nextN = () => Math.max(0, ...[...marks.values()].map((m) => m.n || 0)) + 1;
+  const newId = () => "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  // a change after Claude's round: the note opens again and is flagged as edited
+  function touched(m) {
+    if (m.status === "done") { m.status = "open"; addPending(m.id, "status"); toast("#" + m.n + " is open again because it changed."); }
+    if (m.reply) { m.edited = new Date().toISOString(); addPending(m.id, "text"); }
+  }
+  // every new mark joins the active note; with none active it starts a new one
+  function addItem(it) {
+    roundItem(it);
+    let m = activeId && marks.get(activeId);
+    if (m && m.img !== cur.id) m = null;
+    if (m && VID() && m.t != null && !atNote(m)) { finish(); m = null; }   // the playhead moved: a mark here starts a new note
+    if (!m) {
+      m = newNote([it], "collect");
+      if (VID()) { draftId = m.id; popText.value = m.text; paintPopSw(m); }
+      if (!hinted) { hinted = true; toast(VID() ? "Everything you mark on this frame joins #" + m.n + ". Click Done beside it (or press Enter) and write the note on the right." : "Keep marking: everything joins #" + m.n + " until you click Done beside it."); }
+    } else {
+      m.items.push(it); undo.push({ t: "add", id: m.id, len: m.items.length });
+      touched(m); saveNow(m.id, "items");
+      if (ui === "edit" || VID()) paintPopSw(m);
+    }
+    renderAll();
+    return m;
+  }
+  function atNote(m) { const t = vid.currentTime || 0, half = 0.5 / fps(); return t >= m.t - half && t <= (m.t2 != null ? m.t2 : m.t) + half; }
+  function stampTime(m) {
+    const t = nowT();
+    if (rangeIn != null && Math.abs(rangeIn - t) > 0.5 / fps()) { m.t = Math.min(rangeIn, t); m.t2 = Math.max(rangeIn, t); }
+    else { m.t = rangeIn != null ? rangeIn : t; m.t2 = null; }
+    m.tc = tcOf(m.t);
+    setRange(null);
+  }
+  // a new note on the file in view, made the active one and saved; on a video it is stamped with the playhead (or the range)
+  function newNote(items, mode) {
+    const m = { id: newId(), n: nextN(), img: cur.id, items, text: "", status: "open", at: new Date().toISOString(), by: myId, reply: "", edited: "" };
+    if (VID()) stampTime(m);
+    marks.set(m.id, m); undo.push({ t: "create", id: m.id });
+    activeId = m.id; ui = mode;
+    saveNow(m.id, "all");
+    return m;
+  }
+  // a note written on the right without marking the frame (video tabs only)
+  function startTimedNote() {
+    const m = newNote([], "edit");
+    draftId = m.id; renderAll();
+    return m;
+  }
+  function removeNote(id) {
+    const m = marks.get(id); if (!m) return;
+    deleteNote(id); toast("Note #" + m.n + " deleted. Undo with ⌘Z / Ctrl+Z.");
+  }
+  function deleteNote(id, record = true) {
+    const m = marks.get(id); if (!m) return;
+    if (record) undo.push({ t: "delete", m: Object.assign({}, m, { items: cloneItems(m) }) });
+    if (tdraft && tdraft.id === id) cancelTextEdit();
+    marks.delete(id); tomb.add(id);
+    if (activeId === id) { activeId = null; ui = null; if (document.activeElement === popText) popText.blur(); }
+    if (draftId === id) draftId = null;
+    if (focusId === id) focusId = null;
+    removeNow(id);
+    renderAll();
+  }
+  function doUndo() {
+    if (tdraft) cancelTextEdit();
+    const op = undo.pop();
+    if (!op) { toast("Nothing to undo"); return; }
+    const m = op.id && marks.get(op.id);
+    if (op.t === "create") deleteNote(op.id, false);
+    else if (op.t === "delete") { tomb.delete(op.m.id); created.delete(op.m.id); marks.set(op.m.id, op.m); saveNow(op.m.id, "all"); if (op.m.img !== cur.id) showImage(imgById(op.m.img)); }
+    else if (op.t === "add" && m) {
+      if (m.items.length >= op.len) m.items.splice(op.len - 1, 1);
+      if (!m.items.length && m.t == null) deleteNote(m.id, false); else saveNow(m.id, "items");
+    } else if (op.t === "items" && m) { m.items = op.before; saveNow(m.id, "items"); }
+    renderAll();
+  }
+  function setText(m, value) { m.text = value; touched(m); saveSoon(m.id, "text"); }
+
+  // ---------- text written on the image ----------
+  function openTextEdit(t) {
+    if (tdraft) commitTextEdit();
+    tdraft = t;
+    tedit.value = t.label || "";
+    tedit.style.setProperty("--c", COLORS[t.color] || COLORS.red);
+    tedit.hidden = false; placeTextEdit(); fitTextEdit(); schedule();
+    tedit.focus({ preventScroll: true });
+  }
+  function placeTextEdit() { const [x, y] = toS(tdraft.x, tdraft.y); tedit.style.left = f(x) + "px"; tedit.style.top = f(y) + "px"; }
+  function fitTextEdit() { tedit.style.height = "auto"; tedit.style.height = tedit.scrollHeight + "px"; }
+  function commitTextEdit() {
+    const t = tdraft; if (!t) return;
+    tdraft = null; tedit.hidden = true;
+    const v = tedit.value.replace(/\s+$/, "");
+    if (t.id == null) { if (v.trim()) addItem({ kind: "text", color: t.color, x: t.x, y: t.y, label: v }); else schedule(); return; }
+    const m = marks.get(t.id), it = m && m.items[t.i];
+    if (!it || it.kind !== "text" || v === it.label) { schedule(); return; }
+    if (!v.trim() && m.items.length === 1) { removeNote(m.id); return; }
+    undo.push({ t: "items", id: m.id, before: cloneItems(m) });
+    if (v.trim()) it.label = v; else m.items.splice(t.i, 1);
+    touched(m); saveNow(m.id, "items"); renderAll();
+  }
+  function cancelTextEdit() { tdraft = null; tedit.hidden = true; schedule(); }
+  tedit.addEventListener("input", fitTextEdit);
+  tedit.addEventListener("blur", commitTextEdit);
+  tedit.addEventListener("keydown", (e) => {
+    if (e.isComposing) return;
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitTextEdit(); }
+    else if (e.key === "Escape") { e.preventDefault(); cancelTextEdit(); }
+  });
+
+  // ---------- the Done button and the comment box ----------
+  function paintPopSw(m) {
+    const c0 = m.items[0] && m.items[0].color, same = m.items.every((it) => it.color === c0);
+    paintSwatches($("#popSw"), same ? c0 : null, (k) => {
+      const mk = marks.get(m.id); if (!mk) return;
+      undo.push({ t: "items", id: mk.id, before: cloneItems(mk) });
+      for (const it of mk.items) it.color = k;
+      saveNow(mk.id, "items"); pickColor(k); paintPopSw(mk); renderAll();
+    });
+  }
+  function setHint() {
+    $("#popHint").textContent = document.activeElement === popText ? "Enter saves · Shift + Enter adds a line · paste or drop a picture to add it"
+      : VID() ? "Mark the frame to point at things; the marks join this note · C to type" : "Draw to add more marks to this note · Enter to finish";
+  }
+  // open a note's comment box. Focused, the reviewer types straight away; unfocused, new marks still join this note.
+  function openComment(id, focus) {
+    const m = marks.get(id); if (!m) return;
+    if (tdraft) commitTextEdit();
+    if (activeId && activeId !== id) finish();
+    activeId = id; ui = "edit";
+    popText.value = m.text; paintPopSw(m);
+    renderAll();
+    pop.hidden = false; positionUI();
+    if (focus && !RO) popText.focus({ preventScroll: true });
+    setHint();
+  }
+  // done with the note in hand: close its box and save it, so the next mark starts a new note
+  function finish() {
+    if (tdraft) commitTextEdit();
+    if (!activeId) return;
+    const id = activeId; activeId = null; ui = null;
+    if (draftId === id) draftId = null;                          // saved: the note joins the list now
+    if (document.activeElement === popText) popText.blur();
+    if (!VID()) pop.hidden = true;
+    doneBtn.hidden = true;
+    if (VID() && document.activeElement !== popText) popText.value = "";
+    if (marks.has(id)) flush(id);
+    renderAll();
+  }
+  // video: the comment box sits in the right panel, always ready. With no note in hand it starts one at the playhead.
+  function dockUI() {
+    pop.hidden = false;
+    if (tdraft) placeTextEdit();
+    const m = activeId && marks.get(activeId), on = !!(m && cur && m.img === cur.id);
+    const collect = on && ui === "collect" && m.items.length > 0 && !RO && atNote(m) && vid.paused;   // Done beside the marks
+    doneBtn.hidden = !collect;
+    if (collect) showDone(m);
+    pop.classList.toggle("is-new", !on);
+    if (on) {
+      fillPopHead(m);
+      $("#sideLbl").textContent = "Note #" + m.n;
+    } else {
+      const t = nowT();
+      $("#popKind").textContent = rangeIn != null ? "New note for a range" : "New note";
+      $("#popWhere").textContent = rangeIn != null ? tcOf(Math.min(rangeIn, t)) + " → " + tcOf(Math.max(rangeIn, t)) : tcOf(t);
+      $("#sideLbl").textContent = "Write a note";
+      if (document.activeElement !== popText && popText.value) popText.value = "";
+    }
+  }
+  function showDone(m) {                                       // the Done button beside a note's marks, with their count
+    const cnt = m.items.length > 1 ? m.items.length + " marks" : "", ce = $("#doneCnt");
+    if (ce.textContent !== cnt) ce.textContent = cnt;
+    placeBeside(doneBtn, m, DONE_SPOTS);
+  }
+  function fillPopHead(m) {
+    const num = $("#popNum"); num.textContent = m.n; num.style.setProperty("--c", noteColor(m));
+    $("#popKind").textContent = summary(m); $("#popWhere").textContent = whereText(m, false);
+  }
+  function positionUI() {
+    const m = activeId && marks.get(activeId);
+    paintPics($("#popPics"), (m && m.atts) || [], { note: m ? m.id : "" });
+    if (VID()) { dockUI(); return; }
+    const on = !!(m && cur && m.img === cur.id && m.items.length);
+    doneBtn.hidden = !(on && ui === "collect");
+    pop.hidden = !(on && ui === "edit");
+    if (tdraft) placeTextEdit();
+    if (!on) return;
+    if (ui === "collect") { showDone(m); return; }
+    fillPopHead(m);
+    placeBeside(pop, m, POP_SPOTS);
+  }
+  popText.addEventListener("input", () => {
+    let m = marks.get(activeId);
+    if (!m && VID() && !RO && popText.value.trim()) { const v = popText.value; m = startTimedNote(); popText.value = v; }
+    if (!m || RO) return;
+    setText(m, popText.value);
+    const ta = cardEls.get(m.id)?.querySelector("textarea"); if (ta) ta.value = m.text;
+    renderCards();
+  });
+  popText.addEventListener("keydown", (e) => {
+    if (e.isComposing) return;
+    if ((e.key === "Enter" && !e.shiftKey) || e.key === "Escape") { e.preventDefault(); finish(); if (VID()) popText.blur(); }
+  });
+  popText.addEventListener("focus", () => { if (VID() && activeId && ui === "collect") { ui = "edit"; positionUI(); } setHint(); });
+  popText.addEventListener("blur", setHint);
+  doneBtn.addEventListener("click", () => { if (activeId) openComment(activeId, true); });
+  $("#popSave").addEventListener("click", finish);
+  $("#popDel").addEventListener("click", () => removeNote(activeId));
+
+  // ---------- pictures in notes ----------
+  // Paste (⌘V) or drop a picture into any note box: it goes to the artifact's asset store (only editors of the board can
+  // add one) and the note keeps its asset id in `atts` (marks/<id>.atts, overall/<image id>.atts). Thumbnails sit under the
+  // box and a click shows the picture full size. Removing a thumbnail only takes it off the note; the stored file stays.
+  let assetsNs = null;
+  const assetUrls = new Map();                 // asset id -> the url its upload returned (this view only)
+  const PIC_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+  function picIds(v) { return Array.isArray(v) ? v.filter(isAssetId) : []; }
+  const picUrl = (id) => assetUrls.get(id) || "/_blob/" + id;
+  function paintPics(el, ids, owner) {
+    if (!el) return;
+    const key = JSON.stringify([ids, owner]);
+    if (el.dataset.key === key) return;
+    el.dataset.key = key; el.dataset.note = owner.note || ""; el.dataset.ov = owner.ov || "";
+    el.hidden = !ids.length;
+    el.innerHTML = ids.map((id) => `<span class="pic"><img src="${esc(picUrl(id))}" alt="Pasted picture" loading="lazy" data-pic="${esc(id)}">`
+      + (RO ? "" : `<button class="picx" data-unpic="${esc(id)}" aria-label="Remove this picture" title="Remove from this note">×</button>`) + `</span>`).join("");
+  }
+  function picFiles(dt) {
+    const out = [];
+    for (const it of (dt && dt.items) || []) if (it.kind === "file") { const f = it.getAsFile(); if (f) out.push(f); }
+    if (!out.length) for (const f of (dt && dt.files) || []) out.push(f);
+    return out.filter((f) => PIC_TYPES.includes(f.type));
+  }
+  // target: a function giving the note to attach to, or "overall" for the whole-image box of the file in view
+  function picDrop(el, target) {
+    const hasFiles = (e) => [...((e.dataTransfer && e.dataTransfer.types) || [])].includes("Files");
+    el.addEventListener("paste", (e) => { const fs = picFiles(e.clipboardData); if (!fs.length) return; e.preventDefault(); addPics(fs, target); });
+    el.addEventListener("dragover", (e) => { if (hasFiles(e) && !RO) { e.preventDefault(); el.classList.add("drop-on"); } });
+    el.addEventListener("dragleave", () => el.classList.remove("drop-on"));
+    el.addEventListener("drop", (e) => { el.classList.remove("drop-on"); const fs = picFiles(e.dataTransfer); if (!fs.length) return; e.preventDefault(); addPics(fs, target); });
+  }
+  async function addPics(files, target) {
+    if (RO) return;
+    if (mode !== "db") { toast("Pictures need the board's database, and this copy has none."); return; }
+    if (!assetsNs) { toast("Only editors of this board can add pictures, and only on a board published with its file store (assets)."); return; }
+    const ovId = target === "overall" ? cur && cur.id : null;
+    const note = ovId ? null : typeof target === "function" ? target() : null;
+    if (!ovId && !note) return;
+    toast("Adding " + (files.length > 1 ? files.length + " pictures" : "the picture") + "…");
+    const ids = [];
+    for (const f of files) {
+      try { const r = await assetsNs.upload(f, { type: f.type }); assetUrls.set(r.id, r.url); ids.push(r.id); }
+      catch (e) {
+        const c = e && e.code;
+        toast(c === "too_large" ? "That picture is over 20 MB, so it wasn't added." : c === "unsupported_type" ? "Only PNG, JPEG, GIF or WebP pictures can be added."
+          : c === "quota_or_state" ? "This board's file storage is full." : "Couldn't add the picture. Try again.");
+      }
+    }
+    if (!ids.length) return;
+    if (note) {
+      const m = marks.get(note.id); if (!m) return;
+      m.atts = (m.atts || []).concat(ids); touched(m); saveNow(m.id, "atts");
+      toast((ids.length > 1 ? ids.length + " pictures" : "Picture") + " added to #" + m.n + ".");
+      renderAll();
+    } else { setOverallPics(ovId, ((ovMeta.get(ovId) || {}).atts || []).concat(ids)); toast((ids.length > 1 ? ids.length + " pictures" : "Picture") + " added to the whole-file notes."); }
+  }
+  // saves fields of a file's whole-image note. Update, never set, once it exists: a set would wipe Claude's reply
+  function writeOverall(id, fields) {
+    const m = ovMeta.get(id) || {}; ovMeta.set(id, m);
+    const doc = Object.assign({ img: id }, fields, { at: new Date().toISOString() });
+    if (m.reply) { doc.edited = doc.at; doc.status = "open"; m.status = "open"; }      // changed after Claude's reply: open again
+    return enqueue("__overall_" + id, () => (m.exists ? ovCol.doc(id).update(doc) : ovCol.doc(id).set(Object.assign({ status: "open", text: overall.get(id) || "" }, doc))))
+      .then(() => { m.exists = true; });
+  }
+  function setOverallPics(id, atts) {
+    const m = ovMeta.get(id) || {}; m.atts = atts; ovMeta.set(id, m);
+    writeOverall(id, { atts });
+    renderOverallMeta();
+  }
+  document.addEventListener("click", (e) => {
+    const im = e.target.closest && e.target.closest("[data-pic]");
+    if (im) { $("#picViewImg").src = im.src; $("#picView").hidden = false; return; }
+    const x = e.target.closest && e.target.closest("[data-unpic]");
+    if (!x || RO) return;
+    const box = x.closest(".pics"), id = x.dataset.unpic;
+    if (box.dataset.note) { const m = marks.get(box.dataset.note); if (m) { m.atts = (m.atts || []).filter((a) => a !== id); touched(m); saveNow(m.id, "atts"); renderAll(); } }
+    else if (box.dataset.ov) setOverallPics(box.dataset.ov, ((ovMeta.get(box.dataset.ov) || {}).atts || []).filter((a) => a !== id));
+  });
+  $("#picView").addEventListener("click", () => { $("#picView").hidden = true; });
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#picView").hidden) { $("#picView").hidden = true; e.stopImmediatePropagation(); } }, true);
+  picDrop(popText, () => marks.get(activeId) || (VID() && !RO ? startTimedNote() : null));
+  picDrop(overallEl, "overall");
+
+  // ---------- note cards ----------
+  const cardEls = new Map();
+  let names = {};
+  function makeCard(m) {
+    const li = document.createElement("li");
+    li.className = "card"; li.dataset.id = m.id;
+    li.innerHTML = `<div class="card-head"><button class="num" title="Show on the image"></button><span class="kind"></span><span class="who"></span><span class="state"></span><span class="where"></span></div>
+      <div class="ontext" hidden></div>
+      <textarea rows="3" id="note-${esc(m.id)}" aria-label="Note" placeholder="What should change here?"></textarea>
+      <div class="pics" hidden></div>
+      <div class="reply" hidden><b>Claude</b><span></span></div>
+      <div class="card-foot"><button class="link show">Show on the image</button><span class="r"><button class="link toggle"></button><button class="link danger del">Delete</button></span></div>`;
+    const id = m.id, ta = li.querySelector("textarea");
+    ta.readOnly = RO;
+    picDrop(ta, () => marks.get(id));
+    const show = () => {
+      const mk = marks.get(id); if (!mk) return;
+      if (mk.img !== cur.id) showImage(imgById(mk.img));
+      if (mk.t != null && VID()) seekTo(mk.t);
+      if (view.z < fitZ()) view.z = fitZ();
+      const [x, y] = anchorI(mk); if (mk.items.length) centerOn(x, y);
+      openComment(id, false);
+      pulseId = id; renderAll();
+      setTimeout(() => { if (pulseId === id) { pulseId = null; schedule(); } }, 1300);
+      viewer.scrollIntoView({ block: "nearest", behavior: scrollMotion() });
+    };
+    li.querySelector(".num").addEventListener("click", show);
+    li.querySelector(".show").addEventListener("click", show);
+    li.querySelector(".del").addEventListener("click", () => removeNote(id));
+    li.querySelector(".toggle").addEventListener("click", () => {
+      const mk = marks.get(id); if (!mk) return;
+      mk.status = mk.status === "done" ? "open" : "done"; saveNow(id, "status"); renderAll();
+    });
+    ta.addEventListener("input", () => {
+      const mk = marks.get(id); if (!mk) return;
+      setText(mk, ta.value);
+      if (activeId === id && document.activeElement !== popText) popText.value = ta.value;
+      renderCards();
+    });
+    ta.addEventListener("keydown", (e) => { if (!e.isComposing && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ta.blur(); } });
+    ta.addEventListener("focus", () => { if (activeId && activeId !== id) finish(); focusId = id; renderAll(); });
+    ta.addEventListener("blur", () => { if (focusId === id) { focusId = null; renderAll(); } });
+    li.addEventListener("mouseenter", () => { hoverId = id; schedule(); });
+    li.addEventListener("mouseleave", () => { if (hoverId === id) { hoverId = null; schedule(); } });
+    return li;
+  }
+  let lastSelId = null;
+  function renderCards() {
+    for (const [id, el] of cardEls) if (!marks.has(id)) { el.remove(); cardEls.delete(id); }
+    const all = sorted().filter((m) => m.id !== draftId), inScope = all.filter((m) => scope === "all" ? tabShown(m.img) : IMAGES.length < 2 || (cur && m.img === cur.id));
+    const authors = new Set(all.map((m) => m.by).filter(Boolean));
+    let prev = null, shown = 0;
+    for (const m of all) {
+      let el = cardEls.get(m.id);
+      if (!el) { el = makeCard(m); cardEls.set(m.id, el); }
+      const want = prev ? prev.nextSibling : cardsEl.firstChild;
+      if (want !== el) cardsEl.insertBefore(el, want);
+      prev = el;
+      const num = el.querySelector(".num"), done = m.status === "done";
+      num.textContent = m.n; num.style.setProperty("--c", noteColor(m));
+      el.querySelector(".kind").textContent = summary(m);
+      el.querySelector(".who").textContent = authors.size > 1 && m.by ? "· " + ((names[m.by] && names[m.by].name) || "Someone") : "";
+      const st = el.querySelector(".state"); st.textContent = done ? "Done" : "Open"; st.classList.toggle("done", done);
+      el.querySelector(".where").textContent = whereText(m, scope === "all");
+      const words = textsOf(m), ot = el.querySelector(".ontext");
+      ot.hidden = !words.length; ot.textContent = words.length ? "On the image: " + words.map((w) => "“" + w + "”").join(", ") : "";
+      const ta = el.querySelector("textarea");
+      if (document.activeElement !== ta && ta.value !== m.text) ta.value = m.text;
+      const rep = el.querySelector(".reply"); rep.hidden = !m.reply; rep.querySelector("span").textContent = m.reply || "";
+      el.querySelector(".toggle").textContent = done ? "Reopen" : "Mark done";
+      el.querySelector(".show").textContent = isVid(imgById(m.img)) ? "Show on the video" : "Show on the image";
+      el.classList.toggle("sel", m.id === activeId || m.id === focusId);
+      el.classList.toggle("is-done", done);
+      paintPics(el.querySelector(".pics"), m.atts || [], { note: m.id });
+      const visible = inScope.includes(m) && (filter === "all" || (filter === "done") === done);
+      el.hidden = !visible; if (visible) shown++;
+    }
+    // a note picked on the frame scrolls its card into view in the panel (only the panel's own list scrolls, never the page)
+    const selId = activeId || focusId || null;
+    if (selId !== lastSelId) {
+      lastSelId = selId;
+      const el = selId && cardEls.get(selId), list = $("#notesList");
+      if (el && !el.hidden && list.scrollHeight > list.clientHeight && getComputedStyle(list).overflowY !== "visible") {
+        const lb = list.getBoundingClientRect(), cb = el.getBoundingClientRect();
+        if (cb.top < lb.top || cb.bottom > lb.bottom) list.scrollBy({ top: cb.top - lb.top - (lb.height - Math.min(cb.height, lb.height)) / 2,
+          behavior: scrollMotion() });
+      }
+    }
+    const open = inScope.filter((m) => m.status !== "done").length;
+    $("#nAll").textContent = inScope.length; $("#nOpen").textContent = open; $("#nDone").textContent = inScope.length - open;
+    renderSendBtn();
+    $("#count").textContent = all.length ? "(" + all.length + ")" : "";
+    const empty = $("#empty");
+    empty.hidden = shown > 0;
+    if (!shown) empty.innerHTML = inScope.length
+      ? "Nothing here with this filter. Switch to <b>All</b> to see every note."
+      : RO ? "<b>No notes on this image.</b>"
+      : VID() ? "<b>No notes on this video yet.</b> Pause on a frame and write a note on the right (C), then press Enter. To point at something, mark the frame with <b>Marker</b>, <b>Arrow</b>, <b>Box</b>, <b>Draw</b> or <b>Text</b>: the marks join the note. <b>Set in</b> (I) makes a note that covers a range."
+      : "<b>No notes" + (IMAGES.length > 1 && all.length ? " on this image" : "") + " yet.</b> Pick <b>Marker</b> (P), <b>Arrow</b> (A), <b>Box</b> (B), <b>Draw</b> (D) or <b>Text</b> (T) and mark the image."
+        + " Add as many marks as the note needs: they stay together until you click <b>Done</b> beside them, then write what should change and press Enter."
+        + " Click any mark later to reopen its note, and anything you draw then joins it.";
+    if (users && authors.size > 1) {
+      users.profiles([...authors]).then((ps) => {
+        let changed = false;
+        for (const id of authors) if (!names[id] || names[id].name !== ps[id].name) { names[id] = ps[id]; changed = true; }
+        if (changed) renderCards();
+      }, () => {});
+    }
+  }
+  function renderAll() { schedule(); renderCards(); renderMiniDots(); renderTabs(); if (VID()) renderPins(); }
+  document.querySelectorAll("[data-filter]").forEach((b) => b.addEventListener("click", () => {
+    filter = b.dataset.filter; document.querySelectorAll("[data-filter]").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); renderCards();
+  }));
+  document.querySelectorAll("[data-scope]").forEach((b) => b.addEventListener("click", () => {
+    scope = b.dataset.scope; document.querySelectorAll("[data-scope]").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); renderCards();
+  }));
+
+  // ---------- saving: the page writes only the fields it changed, so Claude's replies are never overwritten ----------
+  const GROUPS = { text: ["text", "edited"], items: ["items", "v"], status: ["status"], time: ["t", "t2", "tc"], atts: ["atts"] };
+  function itemDoc(it) {
+    const o = { kind: it.kind, color: it.color };
+    if (it.kind === "pen") o.p = it.p.map(Math.round);
+    else { o.x = Math.round(it.x); o.y = Math.round(it.y); }
+    if (it.x2 != null) { o.x2 = Math.round(it.x2); o.y2 = Math.round(it.y2); }
+    if (it.kind === "text") o.label = it.label || "";
+    return o;
+  }
+  function toDoc(m) {
+    const o = { v: 2, n: m.n, img: m.img, text: m.text || "", status: m.status || "open", at: m.at || new Date().toISOString(), items: m.items.map(itemDoc) };
+    if (m.by) o.by = m.by;
+    if (m.reply) o.reply = m.reply;
+    if (m.edited) o.edited = m.edited;
+    if (m.t != null) { o.t = +m.t.toFixed(3); o.tc = m.tc || tcOf(m.t, fpsOf(imgById(m.img))); }
+    if (m.t2 != null) o.t2 = +m.t2.toFixed(3);
+    o.atts = (m.atts || []).slice();
+    return o;
+  }
+  const okColor = (c) => (COLORS[c] ? c : "red");
+  const isNum = (v) => typeof v === "number" && isFinite(v);
+  function itemFrom(o) {
+    if (!o || !KIND[o.kind]) return null;
+    const it = { kind: o.kind, color: okColor(o.color) };
+    if (o.kind === "pen") { if (!Array.isArray(o.p) || o.p.length < 2) return null; it.p = o.p.slice(); return it; }
+    if (!isNum(o.x) || !isNum(o.y)) return null;
+    it.x = o.x; it.y = o.y;
+    if (o.kind === "arrow" || o.kind === "box") { if (!isNum(o.x2) || !isNum(o.y2)) return null; it.x2 = o.x2; it.y2 = o.y2; }
+    if (o.kind === "text") { it.label = String(o.label || ""); if (!it.label.trim()) return null; }
+    return it;
+  }
+  function fromDoc(id, d) {
+    const m = { id, n: d.n | 0, img: d.img || (IMAGES[0] && IMAGES[0].id), text: "", status: d.status === "done" ? "done" : "open", at: d.at || "",
+      by: d.by || null, reply: d.reply || "", edited: d.edited || "", items: [],
+      t: isNum(d.t) ? d.t : null, t2: isNum(d.t2) ? d.t2 : null, tc: d.tc || "", atts: picIds(d.atts) };
+    if (Array.isArray(d.items)) {
+      m.text = d.text || "";
+      for (const o of d.items) { const it = itemFrom(o); if (it) m.items.push(it); }
+    } else if (KIND[d.kind]) {                                // version 1: one mark per doc, and a text mark's words were its `text`
+      m.legacy = true;
+      const words = d.text || d.comment || "";
+      if (d.kind === "pen") {
+        for (const s of d.strokes || []) { const p = Array.isArray(s) ? s : s && s.p; if (Array.isArray(p) && p.length >= 2) m.items.push({ kind: "pen", color: okColor(d.color), p: p.slice() }); }
+      } else { const it = itemFrom(Object.assign({}, d, { label: words })); if (it) m.items.push(it); }
+      if (d.kind !== "text") m.text = words;
+    }
+    return m;
+  }
+  const SAVE_TEXT = { connecting: "Connecting…", saving: "Saving…", saved: "All notes saved", local: "Saved in this browser only", error: "Last change not saved. Check your connection and edit again." };
+  function setSave(state) {
+    const text = state === "snapshot" ? "Saved copy · " + (SNAP && SNAP.savedAt ? dateText(SNAP.savedAt) : "read-only") : SAVE_TEXT[state];
+    saveChip.dataset.state = state; saveChip.textContent = text; holdChip();
+  }
+  // The save chip only ever grows. "Saving…" is narrower than "All notes saved", and at some window widths that flipped the
+  // toolbar between one row and two on every save, so the whole page jumped while typing. sizeChip reserves the widest of the
+  // labels that come and go while typing before anything is saved.
+  let chipMin = 0;
+  function holdChip() { const w = Math.ceil(saveChip.getBoundingClientRect().width); if (w > chipMin) { chipMin = w; saveChip.style.minWidth = w + "px"; } }
+  function sizeChip() {
+    const st = saveChip.dataset.state, txt = saveChip.textContent;
+    for (const k of ["connecting", "saving", "saved"]) { saveChip.dataset.state = k; saveChip.textContent = SAVE_TEXT[k]; holdChip(); }
+    saveChip.dataset.state = st; saveChip.textContent = txt;
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function enqueue(key, fn) {
+    inflight++; setSave("saving");
+    const run = async () => { try { await fn(); } catch (e) { if (e && e.code === "unavailable") { await sleep(400 + Math.random() * 600); await fn(); } else throw e; } };
+    const p = (queues.get(key) || Promise.resolve()).then(run).then(() => { saveError = false; }, (e) => {
+      saveError = true; console.warn("save failed", e);
+      if (e && e.code === "quota_exceeded") toast("This board's note storage is full. Delete a few notes, then try again.");
+    }).finally(() => {
+      inflight--;
+      if (queues.get(key) === p) queues.delete(key);
+      if (!inflight) setSave(saveError ? "error" : mode === "db" ? "saved" : "local");
+    });
+    queues.set(key, p);
+    return p;
+  }
+  function addPending(id, group) { if (!pending.has(id)) pending.set(id, new Set()); pending.get(id).add(group); }
+  function saveSoon(id, group, ms = 600) { addPending(id, group); clearTimeout(timers.get(id)); timers.set(id, setTimeout(() => { timers.delete(id); flush(id); }, ms)); }
+  function saveNow(id, group) { addPending(id, group); clearTimeout(timers.get(id)); timers.delete(id); flush(id); }
+  function flush(id) {
+    clearTimeout(timers.get(id)); timers.delete(id);
+    const m = marks.get(id), groups = pending.get(id);
+    if (!m || !groups) return;
+    pending.delete(id);
+    if (mode === "local") { saveLocal(); return; }
+    if (mode !== "db") { pending.set(id, groups); return; }   // still connecting: flushed once the store is ready
+    if (!created.has(id)) { created.add(id); m.legacy = false; enqueue(id, () => col.doc(id).set(toDoc(m))); return; }
+    if (m.legacy) { groups.add("items"); groups.add("text"); m.legacy = false; }   // first change to a version-1 doc: store it in the note shape
+    const doc = toDoc(m), patch = {};
+    for (const g of groups) for (const k of GROUPS[g] || []) if (doc[k] !== undefined) patch[k] = doc[k];
+    if (Object.keys(patch).length) enqueue(id, () => col.doc(id).update(patch));
+  }
+  function removeNow(id) {
+    clearTimeout(timers.get(id)); timers.delete(id); pending.delete(id);
+    if (mode === "db") { if (created.has(id)) enqueue(id, () => col.doc(id).delete()); created.delete(id); }
+    else if (mode === "local") saveLocal();
+  }
+  function saveLocal() {
+    try {
+      localStorage.setItem(LOCAL_KEY, JSON.stringify({ marks: sorted().map((m) => Object.assign(toDoc(m), { id: m.id })), overall: Object.fromEntries(overall), tabs: Object.fromEntries(tabState), tabOrder }));
+    } catch (_) {}
+    setSave("local");
+  }
+  function loadLocal() {
+    try {
+      const d = JSON.parse(localStorage.getItem(LOCAL_KEY) || "null");
+      if (!d) return;
+      for (const o of d.marks || []) if (!marks.has(o.id)) { const m = fromDoc(o.id, o); if (m.items.length || m.t != null) marks.set(o.id, m); }
+      for (const [k, v] of Object.entries(d.overall || {})) overall.set(k, v);
+      for (const [k, v] of Object.entries(d.tabs || {})) tabState.set(k, v);
+      if (Array.isArray(d.tabOrder)) tabOrder = d.tabOrder.map(String);
+      if (cur) overallEl.value = overall.get(cur.id) || "";
+    } catch (_) {}
+    afterTabsChange(false);
+  }
+  let ovTimer = 0;
+  overallEl.addEventListener("input", () => {
+    if (!cur) return;
+    const id = cur.id; overall.set(id, overallEl.value);
+    clearTimeout(ovTimer);
+    renderOverallMeta("Saving…");
+    ovTimer = setTimeout(() => {
+      if (mode === "db") writeOverall(id, { text: overall.get(id) || "" })
+        .then(() => { if (cur && cur.id === id) renderOverallMeta("Saved · Claude reads it with the notes"); });
+      else if (mode === "local") { saveLocal(); renderOverallMeta("Saved in this browser only"); }
+    }, 600);
+  });
+  $("#ovToggle").addEventListener("click", () => {
+    if (!cur || mode !== "db") return;
+    const id = cur.id, m = ovMeta.get(id) || {};
+    m.status = m.status === "done" ? "open" : "done"; ovMeta.set(id, m); renderOverallMeta();
+    enqueue("__overall_" + id, () => ovCol.doc(id).update({ status: m.status }));
+  });
+
+  async function connect() {
+    if (SNAP) {
+      mode = "snapshot";
+      for (const d of SNAP.marks || []) { const m = d && fromDoc(d.id, d); if (m && (m.items.length || m.t != null)) marks.set(d.id, m); }
+      for (const [k, v] of Object.entries(SNAP.overall || {})) overall.set(k, v);
+      if (cur) overallEl.value = overall.get(cur.id) || "";
+      setSave("snapshot"); renderAll();
+      return;
+    }
+    let db = null;
+    const use = window.claude && window.claude.use ? (n) => window.claude.use(n).catch(() => null) : () => Promise.resolve(null);
+    [db, users] = await Promise.all([use("db"), use("user")]);
+    if (users) { try { myId = await users.id(); } catch (_) { myId = null; } for (const m of marks.values()) if (!m.by) m.by = myId; }
+    if (!db) {
+      mode = "local"; loadLocal(); if (pending.size) { pending.clear(); saveLocal(); } renderAll(); setSave("local");
+      toast("Notes are kept in this browser only here. Use Copy all notes to send them to Claude.");
+      return;
+    }
+    col = db.collection("marks"); ovCol = db.collection("overall"); tabCol = db.collection("tabs"); layoutCol = db.collection("layout");
+    use("comments").then((c) => { commentsNs = c; });           // Send to Claude; null where the board doesn't declare it
+    use("assets").then((a) => { assetsNs = a; });                // pictures in notes; null for viewers who can't edit, or a board without "assets"
+    mode = "db";
+    for (const id of [...pending.keys()]) flush(id);           // notes made while connecting
+    col.onSnapshot((snap) => {
+      let changed = false;
+      for (const ch of snap.docChanges()) {
+        const id = ch.doc.id;
+        if (ch.type === "removed") { if (marks.has(id) && !isDirty(id)) { marks.delete(id); created.delete(id); changed = true; } continue; }
+        if (tomb.has(id)) continue;
+        const d = ch.doc.data(); if (!d) continue;
+        const remote = fromDoc(id, d); if (!remote.items.length && remote.t == null) continue;     // not a note (a probe doc, say)
+        created.add(id);
+        const local = marks.get(id);
+        if (local && isDirty(id)) {
+          const groups = pending.get(id) || new Set();
+          for (const [g, keys] of Object.entries(GROUPS)) if (!groups.has(g) && !(g === "text" && timers.has(id))) for (const k of keys) local[k] = remote[k];
+          local.reply = remote.reply;
+          if (!remote.legacy) local.legacy = false;
+        } else marks.set(id, remote);
+        changed = true;
+      }
+      if (changed) renderAll();
+      if (!inflight) setSave(saveError ? "error" : "saved");
+    }, (e) => { console.warn(e); setSave("error"); });
+    ovCol.onSnapshot((snap) => {
+      for (const ch of snap.docChanges()) {
+        if (ch.type === "removed") { overall.delete(ch.doc.id); ovMeta.delete(ch.doc.id); continue; }
+        const d = ch.doc.data() || {};
+        overall.set(ch.doc.id, d.text || "");
+        ovMeta.set(ch.doc.id, { reply: d.reply || "", status: d.status || "open", exists: true, atts: picIds(d.atts) });
+      }
+      if (cur && document.activeElement !== overallEl) overallEl.value = overall.get(cur.id) || "";
+      renderOverallMeta();
+    }, () => {});
+    tabCol.onSnapshot((snap) => {
+      const first = !tabsSeen; tabsSeen = true;
+      for (const ch of snap.docChanges()) {
+        const d = (ch.doc.data && ch.doc.data()) || {};
+        const gid = d.id != null ? String(d.id) : groups().find((g) => tabDocId(g) === ch.doc.id)     // a doc written without `id`
+          || [...tabState.keys()].find((g) => tabState.get(g).src === ch.doc.id);
+        if (gid == null || queues.has("__tab_" + gid)) continue;                       // our own write in flight: the page already shows it
+        if (ch.type === "removed") { if ((tabState.get(gid) || {}).src === ch.doc.id) tabState.delete(gid); continue; }
+        const old = tabState.get(gid);
+        if (old && old.src !== ch.doc.id && old.at && d.at && d.at < old.at) continue;   // two docs for one tab: the later one wins
+        tabState.set(gid, { id: gid, label: d.label, hidden: !!d.hidden, at: d.at, by: d.by, src: ch.doc.id });
+      }
+      afterTabsChange(!first || (!!fromHash && cur === fromHash));      // say so when a link led to a closed tab
+    }, () => {});
+    layoutCol.onSnapshot((snap) => {
+      for (const ch of snap.docChanges()) {
+        if (ch.doc.id !== "tabs" || queues.has("__taborder") || tabDrag.on) continue;     // our own move in flight, or mid-drag
+        const d = (ch.type !== "removed" && ch.doc.data && ch.doc.data()) || {};
+        tabOrder = Array.isArray(d.order) ? d.order.map(String) : null;
+        renderTabs();
+      }
+    }, () => {});
+    db.collection("rounds").onSnapshot(onRounds, () => {});
+  }
+  let tabsSeen = false;
+
+  // ---------- live rounds: a new render added without republishing the page ----------
+  // rounds/<image id> = { id, label, src, w, h, added, group?, type?: "video", poster?, fps?, dur?, beats? }. src and poster
+  // are asset ids (the artifact's asset store serves them at /_blob/<id>) or paths. Claude adds a round by uploading the
+  // file to the asset store and writing this doc: the page is not republished, so nothing reloads and no one is taken off
+  // the note they are typing. An open view switches to the new round (after the note in progress); a fresh visit opens on it.
+  const SEEN_LIVE_KEY = LOCAL_KEY + ":seen-live";
+  const blobUrl = (v) => (isAssetId(v) ? "/_blob/" + v : String(v || ""));
+  function roundFrom(id, d) {
+    const w = +d.w, h = +d.h;
+    if (!d.src || !(w > 0) || !(h > 0)) return null;
+    const im = { id, label: String(d.label || id), src: blobUrl(d.src), w, h, added: String(d.added || ""), live: true };
+    if (d.group) im.group = String(d.group);
+    if (d.type === "video") Object.assign(im, { type: "video", poster: blobUrl(d.poster), fps: +d.fps || 25, dur: +d.dur || 0 }, Array.isArray(d.beats) ? { beats: d.beats } : {});
+    return im;
+  }
+  const busy = () => !!(activeId || tdraft || (document.activeElement && /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement.tagName)));
+  let roundsSeen = false, nrFor = null;
+  function onRounds(snap) {
+    const first = !roundsSeen; roundsSeen = true;
+    const fresh = [];
+    for (const ch of snap.docChanges()) {
+      const id = ch.doc.id, i = IMAGES.findIndex((im) => im.id === id);
+      if (ch.type === "removed") {
+        if (i < 0 || !IMAGES[i].live || IMAGES.length < 2) continue;
+        const g = groupOf(IMAGES[i]); IMAGES.splice(i, 1);
+        if (cur && cur.id === id) showImage(latestOf(g) || IMAGES[IMAGES.length - 1]);
+        continue;
+      }
+      const im = roundFrom(id, (ch.doc.data && ch.doc.data()) || {});
+      if (!im) continue;
+      if (i >= 0) { if (IMAGES[i].live) Object.assign(IMAGES[i], im); continue; }   // a round already baked into the page keeps its own entry
+      IMAGES.push(im); fresh.push(im);
+    }
+    if (!fresh.length) { renderAll(); return; }
+    const top = fresh.reduce((a, b) => ((b.added || "") >= (a.added || "") ? b : a));
+    let seenLive = null; try { seenLive = localStorage.getItem(SEEN_LIVE_KEY); } catch (_) {}
+    if (first) {
+      // opening the board: land on the newest round (or the round in the link), unless the viewer has already started on something
+      const linked = fresh.find((im) => im.id === START_HASH);
+      if (linked && !busy()) showImage(linked);
+      else if (seenLive !== top.id && (top.added || "") > ((NEWEST && NEWEST.added) || "") && !RO) {
+        if (busy()) newRound(top); else { markSeenLive(top); showImage(top); }
+      }
+    } else newRound(top);
+    renderAll();
+  }
+  function markSeenLive(im) { try { localStorage.setItem(SEEN_LIVE_KEY, im.id); } catch (_) {} }
+  // A new round opens by itself on every open view. Only a note being made or edited (or a field being typed in) holds it
+  // back: the notice says so, and the round opens as soon as that note is saved or closed. Once it has opened, the notice
+  // offers Back to what was on screen before.
+  let nrMode = null, nrBack = null, nrWait = 0, nrHide = 0;
+  const roundName = (im) => im.label + (im.group && im.group !== im.label ? " in “" + im.group + "”" : "");
+  function goTo(im) { if (cur && groupOf(cur) === groupOf(im)) switchVersion(im); else showImage(im); }
+  function hideNewRound() { $("#newRound").hidden = true; nrFor = nrBack = nrMode = null; clearInterval(nrWait); clearTimeout(nrHide); nrWait = nrHide = 0; }
+  function newRound(im) {
+    hideNewRound();
+    nrFor = im;
+    if (busy()) {
+      nrMode = "wait";
+      $("#nrText").textContent = "New round: " + roundName(im) + ". It opens when you finish this note.";
+      $("#nrOpen").textContent = "Open now"; $("#nrOpen").hidden = false; $("#nrClose").textContent = "Not now";
+      $("#newRound").hidden = false;
+      nrWait = setInterval(() => { if (nrMode === "wait" && !busy()) landOn(nrFor); }, 500);
+    } else landOn(im);
+  }
+  function landOn(im) {
+    const from = cur;
+    hideNewRound();
+    markSeenLive(im); goTo(im);
+    nrFor = im; nrMode = "landed"; nrBack = from && from.id !== im.id ? from : null;
+    $("#nrText").textContent = "Now showing the new round: " + roundName(im) + ".";
+    $("#nrOpen").textContent = "Back"; $("#nrOpen").hidden = !nrBack; $("#nrClose").textContent = "Dismiss";
+    $("#newRound").hidden = false;
+    nrHide = setTimeout(hideNewRound, 12000);
+  }
+  $("#nrOpen").addEventListener("click", () => {
+    const im = nrFor, back = nrBack, mode = nrMode;
+    if (mode === "wait" && im) landOn(im);
+    else { hideNewRound(); if (back && IMAGES.includes(back)) goTo(back); }
+  });
+  $("#nrClose").addEventListener("click", () => { if (nrFor) markSeenLive(nrFor); hideNewRound(); });
+
+  // ---------- pointer input on the viewer ----------
+  const ptrs = new Map();
+  let act = null;
+  const loc = (e) => { const r = viewer.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+  viewer.addEventListener("pointerdown", (e) => {
+    if (!cur || e.target.closest("#pop, #doneBtn, #tedit") || e.button === 2) return;
+    const p = loc(e);
+    ptrs.set(e.pointerId, p);
+    try { viewer.setPointerCapture(e.pointerId); } catch (_) {}
+    if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; act = { type: "pinch", d: dist(a, b), m: mid(a, b) }; draft = null; schedule(); return; }
+    if (ptrs.size > 2) return;
+    act = null;
+    if (e.button === 1 || spaceDown) { e.preventDefault(); act = { type: "pan", last: p }; viewer.classList.add("panning"); return; }
+    const typing = document.activeElement === popText;
+    if (VID() && tool !== "move") vid.pause();                   // marking happens on a still frame
+    if (tdraft) commitTextEdit();                                 // typed text is kept, and this click still counts
+    const hitEl = e.target.closest("[data-id]"), hitId = hitEl && hitEl.dataset.id, m = hitId && marks.get(hitId);
+    const onLabel = hitEl && labelsEl.contains(hitEl);
+    if (m && (tool === "move" || onLabel || RO)) {
+      const i = +hitEl.dataset.i || 0, now = performance.now();
+      const again = lastDown && now - lastDown.t < 450 && dist(p, lastDown.p) < 6 && lastDown.id === hitId && lastDown.i === i;
+      lastDown = { t: now, p, id: hitId, i };
+      if (again && !RO && m.items[i] && m.items[i].kind === "text") { act = { type: "retext", id: hitId, i }; return; }   // double-click: edit the words
+      const was = hitId === activeId;
+      if (!was) openComment(hitId, false);
+      act = { type: "drag", id: hitId, i, one: e.altKey, start: p, last: p, before: cloneItems(m), moved: false, was };
+      return;
+    }
+    if (activeId && typing && !VID()) { finish(); return; }       // a click outside the comment box only closes it (on video the box is docked)
+    if (tool === "move" || RO) { if (activeId) finish(); act = { type: "pan", last: p }; viewer.classList.add("panning"); return; }
+    const [ix, iy] = toI(p.x, p.y);
+    if (tool === "pin" || tool === "text") { act = { type: "place", kind: tool, start: p }; return; }
+    if (tool === "arrow" || tool === "box") { draft = { kind: tool, color, x: ix, y: iy, x2: ix, y2: iy }; act = { type: "draw", last: p }; schedule(); return; }
+    if (tool === "pen") { draft = { kind: "pen", color, p: [ix, iy] }; act = { type: "draw", last: p }; schedule(); }
+  });
+
+  viewer.addEventListener("pointermove", (e) => {
+    const p = loc(e);
+    readout(p);
+    if (!ptrs.has(e.pointerId)) return;
+    ptrs.set(e.pointerId, p);
+    if (!act) return;
+    if (act.type === "pinch") {
+      if (ptrs.size < 2) return;
+      const [a, b] = [...ptrs.values()], d = dist(a, b), m = mid(a, b);
+      view.tx += m.x - act.m.x; view.ty += m.y - act.m.y;
+      zoomAt(m.x, m.y, d / act.d); act.d = d; act.m = m; return;
+    }
+    if (act.type === "pan") { autoFit = false; view.tx += p.x - act.last.x; view.ty += p.y - act.last.y; act.last = p; clampView(); schedule(); return; }
+    if (act.type === "drag") {
+      const m = marks.get(act.id); if (!m || RO) return;
+      if (!act.moved && dist(p, act.start) < 4) return;
+      if (!act.moved) { act.moved = true; addPending(act.id, "items"); }   // keeps an incoming copy from snapping it back mid-drag
+      const dx = (p.x - act.last.x) / view.z, dy = (p.y - act.last.y) / view.z;
+      if (act.one && m.items[act.i]) translateItem(m.items[act.i], dx, dy);  // Alt/Option-drag moves one mark; a plain drag moves the whole note
+      else for (const it of m.items) translateItem(it, dx, dy);
+      act.last = p; schedule(); return;
+    }
+    if (act.type === "draw" && draft) {
+      const [ix, iy] = toI(p.x, p.y);
+      if (draft.kind === "pen") { if (dist(p, act.last) >= 2.5) { draft.p.push(ix, iy); act.last = p; } }
+      else { draft.x2 = ix; draft.y2 = iy; }
+      schedule();
+    }
+  });
+
+  function pointerEnd(e) {
+    if (!ptrs.has(e.pointerId)) return;
+    ptrs.delete(e.pointerId);
+    if (act && act.type === "pinch") { act = ptrs.size ? { type: "pan", last: [...ptrs.values()][0] } : null; return; }
+    if (ptrs.size) return;
+    viewer.classList.remove("panning");
+    const a = act; act = null;
+    if (!a) return;
+    if (e.type === "pointercancel") { draft = null; schedule(); return; }
+    const p = loc(e);
+    if (a.type === "drag") {
+      const m = marks.get(a.id); if (!m) return;
+      if (a.moved) { m.items.forEach(roundItem); undo.push({ t: "items", id: a.id, before: a.before }); saveNow(a.id, "items"); renderAll(); }
+      else if (a.was && !RO) openComment(a.id, true);            // a second click on the note in hand: type its comment
+      return;
+    }
+    if (a.type === "retext") {
+      const m = marks.get(a.id), it = m && m.items[a.i];
+      if (it && it.kind === "text") { if (activeId !== m.id) openComment(m.id, false); openTextEdit({ id: m.id, i: a.i, x: it.x, y: it.y, color: it.color, label: it.label }); }
+      return;
+    }
+    if (a.type === "place") {
+      if (dist(p, a.start) > 6) return;
+      const [ix, iy] = toI(a.start.x, a.start.y);
+      if (a.kind === "text") openTextEdit({ id: null, i: -1, x: ix, y: iy, color });
+      else addItem({ kind: "pin", color, x: ix, y: iy });
+      return;
+    }
+    if (a.type === "draw" && draft) {
+      const d = draft; draft = null;
+      if (d.kind === "pen") { if (d.p.length >= 4) addItem(d); else schedule(); return; }
+      if (Math.hypot((d.x2 - d.x) * view.z, (d.y2 - d.y) * view.z) < 10) { schedule(); return; }
+      if (d.kind === "box") { const x0 = Math.min(d.x, d.x2), x1 = Math.max(d.x, d.x2), y0 = Math.min(d.y, d.y2), y1 = Math.max(d.y, d.y2); Object.assign(d, { x: x0, y: y0, x2: x1, y2: y1 }); }
+      addItem(d);
+    }
+  }
+  viewer.addEventListener("pointerup", pointerEnd);
+  viewer.addEventListener("pointercancel", pointerEnd);
+  viewer.addEventListener("pointerleave", () => { if (!act) $("#readout").textContent = "Point at the image to read its pixel position."; });
+  // clicking anywhere else on the page finishes the note in hand
+  document.addEventListener("pointerdown", (e) => {
+    if ((activeId || tdraft) && !e.target.closest(".viewer, .vbar, .cards, .imgtabs, .tabpop, .mini, .copybox, #compose, .transport, .picview")) finish();
+  });
+
+  viewer.addEventListener("wheel", (e) => {
+    if (e.target.closest("#pop")) return;
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? vh : 1;
+    let dx = e.deltaX * unit, dy = e.deltaY * unit;
+    if (e.ctrlKey || e.metaKey) { const p = loc(e); zoomAt(p.x, p.y, Math.exp(-dy * 0.0022)); return; }
+    if (e.shiftKey && !dx) { dx = dy; dy = 0; }
+    if (H * view.z <= vh + 1 && W * view.z > vw && Math.abs(dy) > Math.abs(dx)) { dx = dy; dy = 0; }   // nothing to scroll vertically: move sideways
+    autoFit = false; view.tx -= dx; view.ty -= dy; clampView(); schedule();
+  }, { passive: false });
+
+  function readout(p) {
+    const [ix, iy] = toI(p.x, p.y);
+    if (ix < 0 || ix > W || iy < 0 || iy > H) { $("#readout").textContent = "Off the image"; return; }
+    $("#readout").innerHTML = "Pointer at <b>x " + Math.round(ix) + ", y " + Math.round(iy) + "</b> of " + W + " × " + H + (VID() ? " · frame " + tcOf(vid.currentTime || 0) : wide() ? " · " + Math.round(ix / W * 100) + "% along" : "");
+  }
+
+  // ---------- instant hover hints, everywhere on the board ----------
+  // A title moves to data-tip the moment the pointer (or keyboard focus) reaches it, so the browser's slow tooltip never
+  // shows; ours appears at once under the element (above it near the bottom of the screen) and goes as soon as it's left.
+  // A title the page sets again later (the Send button's, say) is picked up fresh on the next hover. Nothing shows while a
+  // button is held, so scrubbing the timeline or dragging a tab doesn't flash hints.
+  const tipEl = $("#tip"), TIP_SEL = "[title], [data-tip]";
+  let tipFor = null;
+  function showTip(el) {
+    if (el.hasAttribute("title")) { el.dataset.tip = el.getAttribute("title"); el.removeAttribute("title"); }
+    const text = el.dataset.tip; if (!text) return;
+    tipFor = el; tipEl.textContent = text; tipEl.hidden = false;
+    const r = el.getBoundingClientRect(), w = tipEl.offsetWidth, h = tipEl.offsetHeight, cw = document.documentElement.clientWidth;
+    tipEl.style.left = clamp(r.left + r.width / 2 - w / 2, 8, cw - w - 8) + "px";
+    tipEl.style.top = (r.bottom + 8 + h > window.innerHeight - 8 ? r.top - 8 - h : r.bottom + 8) + "px";
+  }
+  function hideTip() { tipFor = null; tipEl.hidden = true; }
+  document.addEventListener("pointerover", (e) => {
+    const el = e.target.closest && e.target.closest(TIP_SEL);
+    if (el && !e.buttons && !tabDrag.on) { if (el !== tipFor) showTip(el); } else if (tipFor) hideTip();
+  });
+  document.addEventListener("pointerout", (e) => { if (tipFor && !(e.relatedTarget && tipFor.contains(e.relatedTarget))) hideTip(); });
+  document.addEventListener("focusin", (e) => { const el = e.target.closest && e.target.closest(TIP_SEL); if (el && el.matches(":focus-visible")) showTip(el); });
+  document.addEventListener("focusout", () => { if (tipFor) hideTip(); });
+  for (const ev of ["pointerdown", "wheel", "keydown"]) window.addEventListener(ev, () => { if (tipFor) hideTip(); }, true);
+  window.addEventListener("scroll", () => { if (tipFor) hideTip(); }, true);
+
+  // ---------- toolbar ----------
+  function setTool(t) {
+    tool = t;
+    for (const b of document.querySelectorAll("[data-tool]")) b.setAttribute("aria-pressed", String(b.dataset.tool === t));
+    viewer.className = viewer.className.replace(/\bt-\w+/g, "").trim() + " t-" + t;
+    toolCursor();
+  }
+  // each drawing tool has its own pointer: a crosshair (the exact point is its centre) with the tool's sign beside it, drawn
+  // in the colour that's picked, all with a white edge so it reads on any image. Move keeps the hand, Text the text bar.
+  const CURSOR_SIGN = {
+    pin: '<circle cx="18.5" cy="16.5" r="2.6"/><path d="M18.5 19v3.5"/>',
+    arrow: '<path d="M15 22.5l7-7M17.5 15.5h4.5v4.5"/>',
+    box: '<rect x="15" y="15.5" width="7.5" height="6" rx=".8"/>',
+    pen: '<path d="M14.5 21.5c1.6-.8 2-3.6 3.6-3.6s1.3 2.6 2.9 2.1 1.3-3 1.8-3.5"/>',
+  };
+  function toolCursor() {
+    const sign = CURSOR_SIGN[tool];
+    if (!sign) { viewer.style.removeProperty("--tool-cursor"); return; }
+    const cross = '<path d="M12 2.5v6.5M12 15v6.5M2.5 12H9M15 12h6.5"/>';
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round">`
+      + `<g stroke="#fff" stroke-width="3.6">${cross}${sign}</g><g stroke="#1F1C1A" stroke-width="1.5">${cross}</g>`
+      + `<g stroke="${COLORS[color] || "#1F1C1A"}" stroke-width="1.7">${sign}</g></svg>`;
+    viewer.style.setProperty("--tool-cursor", `url("data:image/svg+xml,${encodeURIComponent(svg)}") 12 12, crosshair`);
+  }
+  document.querySelectorAll("[data-tool]").forEach((b) => b.addEventListener("click", () => setTool(b.dataset.tool)));
+  function paintSwatches(el, current, onPick) {
+    el.innerHTML = Object.keys(COLORS).map((k, i) => `<button class="sw" data-c="${k}" style="--c:${COLORS[k]}" aria-pressed="${k === current}" aria-label="${COLOR_NAMES[k]}" title="${COLOR_NAMES[k]} (${i + 1})"></button>`).join("");
+    el.querySelectorAll(".sw").forEach((b) => b.addEventListener("click", () => onPick(b.dataset.c)));
+  }
+  const pickColor = (k) => { color = k; paintSwatches($("#swatches"), color, pickColor); toolCursor(); };
+  pickColor("red");
+  $("#undo").addEventListener("click", doUndo);
+  $("#hide").addEventListener("click", (e) => { const on = viewer.classList.toggle("hide-marks"); e.currentTarget.setAttribute("aria-pressed", String(on)); });
+  $("#zin").addEventListener("click", () => zoomAt(vw / 2, vh / 2, 1.3));
+  $("#zout").addEventListener("click", () => zoomAt(vw / 2, vh / 2, 1 / 1.3));
+  $("#fit").addEventListener("click", () => { view.z = fitZ(); autoFit = true; clampView(); schedule(); });
+  $("#fill").addEventListener("click", () => setZoomKeepCenter(fillZ()));
+  $("#actual").addEventListener("click", () => setZoomKeepCenter(1));
+
+  window.addEventListener("keydown", (e) => {
+    const typing = e.target.closest && e.target.closest("textarea, input");
+    if (typing) { if (e.key === "Escape" && e.target !== popText && e.target !== tedit) e.target.blur(); return; }   // those two handle their own keys
+    if (e.key === "Escape") { if (activeId) finish(); else if (app.classList.contains("full")) setFull(false); return; }
+    if (VID() && e.key === "Enter" && !(e.target.closest && e.target.closest("button")) && !RO) { e.preventDefault(); popText.focus(); return; }   // video: Enter goes to the note box
+    if (e.key === "Enter" && activeId && !(e.target.closest && e.target.closest("button"))) {                // Enter: Done, then Enter again finishes
+      e.preventDefault();
+      if (ui === "collect" && !RO) openComment(activeId, true); else finish();
+      return;
+    }
+    if (RO && (e.key === "Delete" || e.key === "Backspace" || /^[vhpmabdt1-4]$/i.test(e.key) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z"))) return;
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); doUndo(); return; }
+    // Alt + ← / → anywhere on the board moves the open tab one place along the row (a focused tab handles its own)
+    if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      if (RO || !cur) return;
+      moveTab(groupOf(cur), e.key === "ArrowRight" ? 1 : -1);
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (VID()) {                                                  // video keys: Space / K play, arrows step, I range, C type
+      const vk = e.key.toLowerCase();
+      if (e.key === " " || vk === "k") { e.preventDefault(); togglePlay(); return; }
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); seekTo((vid.currentTime || 0) + (e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 1 : 1 / fps())); return; }
+      if (vk === "i") { toggleRange(); return; }
+      if (vk === "c") { e.preventDefault(); if (!RO) popText.focus(); return; }
+    }
+    if (e.key === " ") { e.preventDefault(); if (!spaceDown) { spaceDown = true; viewer.classList.add("grab"); } return; }
+    if ((e.key === "Delete" || e.key === "Backspace") && activeId) {
+      e.preventDefault(); removeNote(activeId); return;
+    }
+    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && e.shiftKey && IMAGES.length > 1 && !VID()) {
+      const gs = visGroups(), i = gs.indexOf(groupOf(cur)) + (e.key === "ArrowRight" ? 1 : -1); if (gs[i]) showImage(latestOf(gs[i])); return;
+    }
+    const k = e.key.toLowerCase();
+    if (k === "f") { setFull(!app.classList.contains("full")); return; }                 // full screen, on image and video tabs alike
+    const tools = { v: "move", h: "move", p: "pin", m: "pin", a: "arrow", b: "box", d: "pen", t: "text" };
+    if (tools[k]) { setTool(tools[k]); return; }
+    const zoomKey = { "+": "#zin", "=": "#zin", "-": "#zout", "_": "#zout", "0": "#fit", l: "#fill" }[k];
+    if (zoomKey) $(zoomKey).click();
+    else if (["1", "2", "3", "4"].includes(k)) pickColor(Object.keys(COLORS)[+k - 1]);
+  });
+  window.addEventListener("keyup", (e) => { if (e.key === " ") { spaceDown = false; viewer.classList.remove("grab"); } });
+  window.addEventListener("blur", () => { spaceDown = false; viewer.classList.remove("grab"); });
+
+  // ---------- copy all ----------
+  function notesText() {
+    const lines = [(CFG.title || "MarkRoom") + " · notes", ""];
+    for (const im of IMAGES) {
+      const list = sorted().filter((m) => m.img === im.id), ov = (overall.get(im.id) || "").trim();
+      if ((!list.length && !ov) || !tabShown(im.id)) continue;                   // closed tabs are listed at the end instead
+      if (IMAGES.length > 1) lines.push("## " + im.label);
+      if (ov) lines.push("Whole image: " + ov + picsNote((ovMeta.get(im.id) || {}).atts));
+      for (const m of list) {
+        const [ax, ay] = anchorI(m), words = textsOf(m);
+        lines.push("#" + m.n + " " + summary(m) + " (" + m.status + ") at " + whereText(m, false) + (m.t != null && m.items.length ? ", x " + Math.round(ax) + ", y " + Math.round(ay) : "")
+          + " · note: " + (m.text.trim() || "(no note)") + picsNote(m.atts) + (words.length ? " · text on image: " + words.map((w) => "“" + w + "”").join(", ") : "")
+          + (m.reply ? "\n   Claude: " + m.reply : ""));
+      }
+      lines.push("");
+    }
+    const closed = closedGroups();
+    if (closed.length) lines.push("Closed tabs, not included: " + closed.map(tabName).join(", "));
+    return lines.join("\n").trim();
+  }
+  // copy text to the clipboard, or show it in a box to copy by hand when the clipboard is blocked
+  function copyText(text, done, title = "Copy these notes") {
+    const fallback = () => {
+      const box = document.createElement("div"); box.className = "copybox";
+      box.innerHTML = `<div><b></b><textarea readonly></textarea><div style="display:flex;justify-content:flex-end"><button class="btn primary">Close</button></div></div>`;
+      box.querySelector("b").textContent = title;
+      document.body.appendChild(box);
+      const ta = box.querySelector("textarea"); ta.value = text; ta.focus(); ta.select();
+      box.querySelector("button").addEventListener("click", () => box.remove());
+    };
+    try { navigator.clipboard.writeText(text).then(() => toast(done), fallback); }
+    catch (_) { fallback(); }
+  }
+  $("#copyAll").addEventListener("click", () => copyText(notesText(), "Copied " + marks.size + " note" + (marks.size === 1 ? "" : "s")));
+
+  // ---------- send the open notes to Claude ----------
+  // The button beside This file / All files posts ONE comment on the artifact with the comments capability's sendToClaude:
+  // it names the board, the tab(s) and every open note, and the Claude session watching this board starts on them.
+  // This file: the open notes (and the whole-image box) of the round in view. All files: every open note on the board,
+  // closed tabs left out. Where sending can't go through (no Claude session watching, not an editor of the artifact, a
+  // local copy) the same text is copied to paste into the Claude chat instead.
+  const sendBtn = $("#sendClaude");
+  let commentsNs = null;
+  const allScope = () => scope === "all" && !$("#scopeSeg").hidden;
+  const tabTitle = (im) => (im.group && im.group !== im.label ? im.group + " · " + im.label : im.label);
+  function openSet(all) {
+    const ims = all ? IMAGES.filter((im) => tabShown(im.id)) : cur ? [cur] : [];
+    const ids = ims.map((im) => im.id);
+    const notes = sorted().filter((m) => m.id !== draftId && m.status !== "done" && ids.includes(m.img));
+    const ovs = ims.filter((im) => ((overall.get(im.id) || "").trim() || ((ovMeta.get(im.id) || {}).atts || []).length) && (ovMeta.get(im.id) || {}).status !== "done");
+    return { ims, notes, ovs };
+  }
+  function renderSendBtn() {
+    const all = allScope(), { notes, ovs } = openSet(all), n = notes.length + ovs.length;
+    $("#sendLbl").textContent = all ? "Send all open comments" : "Send notes to Claude";
+    $("#sendCnt").textContent = n ? String(n) : "";
+    sendBtn.disabled = !n || RO;
+    sendBtn.title = !n ? "No open notes " + (all ? "on this board" : "here") : "Tell Claude to start on " + (all ? "every open note on this board" : "the open notes on this file");
+  }
+  const clip = (t, k) => { t = String(t || "").replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim(); return t.length > k ? t.slice(0, k - 1) + "…" : t; };
+  const bytes = (t) => new TextEncoder().encode(t).length;
+  const picsNote = (a) => (a && a.length ? " [+" + a.length + (a.length > 1 ? " pictures" : " picture") + "]" : "");
+  function sendText(all) {
+    const { ims, notes, ovs } = openSet(all);
+    const out = ["MarkRoom: please start working on the open notes " + (all ? "across this board" : "on this file") + ".",
+      "Board: " + (CFG.title || "MarkRoom") + (CFG.url ? " · " + CFG.url : ""),
+      all ? "Files: every open tab (closed tabs left out)" : "File: " + tabTitle(cur) + " (id " + cur.id + ")",
+      "Open notes: " + notes.length + (ovs.length ? ", plus " + ovs.length + " whole-" + (ovs.length > 1 ? "file notes" : "file note") : ""), ""];
+    const tail = ["", "Read the marks from the board's database (markroom skill, Read the feedback), work on these notes only, then reply to and resolve each one when its change is made."];
+    const body = [];
+    for (const im of ims) {
+      const list = notes.filter((m) => m.img === im.id), ov = ovs.includes(im);
+      if (!list.length && !ov) continue;
+      if (all) body.push("— " + tabTitle(im) + " (id " + im.id + ")");
+      if (ov) body.push("Whole " + (isVid(im) ? "video" : "image") + ": " + clip(overall.get(im.id) || "(pictures only)", 220) + picsNote((ovMeta.get(im.id) || {}).atts));
+      for (const m of list) body.push("#" + m.n + " at " + whereText(m, false) + ": " + clip(m.text || "(no comment, marks only)", 180) + picsNote(m.atts));
+    }
+    const LIMIT = 3900;                                          // a comment holds 4 KiB
+    let kept = body.length;
+    const build = (k) => out.concat(body.slice(0, k), k < body.length ? ["…and " + (body.length - k) + " more lines: read them from the board's database."] : [], tail).join("\n");
+    while (kept > 0 && bytes(build(kept)) > LIMIT) kept--;
+    return build(kept);
+  }
+  // "undeclared": the board was published without the comments capability (use("comments") gave null), so the page has
+  // no way to send; a republish with the full capability set fixes it. Watching sessions are learned asynchronously, so a
+  // "no_session" answer is checked once more before falling back to copying.
+  async function sendState() {
+    if (mode !== "db") return "off";
+    if (!commentsNs || !("sendToClaude" in commentsNs)) return "undeclared";
+    const ask = async () => { try { return await commentsNs.canSendToClaude(); } catch (_) { return "off"; } };
+    let st = await ask();
+    if (st === "no_session") { await sleep(1500); st = await ask(); }
+    return st;
+  }
+  const NO_SEND = { writers_only: "Only editors of this board can send notes to Claude",
+    no_session: "No Claude chat is watching this board right now (the chat that works on it may be closed, or was stopped)",
+    undeclared: "This board was published without its Send to Claude setting (ask Claude to republish it with all its capabilities)",
+    off: "Sending to Claude isn't available here" };
+  sendBtn.addEventListener("click", async () => {
+    if (tabPopFor === "send") { closeTabPop(); return; }
+    const all = allScope(), { notes, ovs } = openSet(all), n = notes.length + ovs.length;
+    if (!n) return;
+    sendBtn.disabled = true; $("#sendLbl").textContent = "Checking…";
+    const state = await sendState(), live = state === "available";
+    renderSendBtn();
+    if (live && (await commentsPerm()) === "denied") { askAllowComments(all); return; }   // a "no" given earlier: offer the way back first
+    const what = n + " open " + (n > 1 ? "notes" : "note") + (all ? " on this board" : " on “" + tabTitle(cur) + "”");
+    popDialog("send", live ? "Send notes to Claude?" : "Copy notes for Claude?",
+      `<b>${live ? "Send " + esc(what) + " to Claude?" : "Copy " + esc(what) + " for Claude?"}</b>`
+      + `<p>${live ? "Claude starts working on them, replies on each note and marks it done. This goes as one comment on the board."
+        : esc(NO_SEND[state] || NO_SEND.off) + ", so the list will be copied for you to paste into your Claude chat."}</p>`,
+      [{ act: "cancel", text: "Cancel" }, { act: "go", text: live ? "Send" : "Copy", primary: true, run: () => (live ? doSend(all) : copyForClaude(all, state)) }], sendBtn);
+  });
+  function copyForClaude(all, state) {
+    copyText(sendText(all), "Copied for Claude. Paste it into your Claude chat.", (NO_SEND[state] || NO_SEND.off) + ". Paste this into your Claude chat:");
+  }
+  async function doSend(all) {
+    const text = sendText(all);
+    sendBtn.disabled = true; $("#sendLbl").textContent = "Sending…";
+    try {
+      const anchor = await commentsNs.anchorFor(sendBtn);
+      await commentsNs.sendToClaude({ anchor, text });
+      toast("Sent to Claude. Its replies will show on each note.");
+    } catch (e) {
+      const code = e && e.code;
+      // a dismissed prompt doesn't come back this page load, and "forbidden" is a standing no: offer the Permissions panel
+      if (code === "consent_required" || code === "forbidden") askAllowComments(all);
+      else if (code === "rate_limited") toast("Sent very recently. Wait a moment, then try again.");
+      else if (code === "unavailable" || code === "upstream_error") toast("Couldn't send right now. Try again in a moment.");
+      else copyForClaude(all, code === "claude_unavailable" ? "no_session" : "off");   // claude_unavailable, not_granted, …
+    } finally { renderSendBtn(); }
+  }
+  // Send was refused because commenting isn't allowed (a "no" to the first prompt holds for this page load; one kept from an
+  // earlier visit holds until it's lifted). The page's Permissions panel turns it back on without a reload; the notes are
+  // already saved on the board either way. Sending needs a fresh press, so once it's on, Send asks for one more click.
+  const permsNs = () => (window.claude && window.claude.use ? window.claude.use("permissions").catch(() => null) : Promise.resolve(null));
+  async function commentsPerm() { const p = await permsNs(); return p ? p.state("comments").catch(() => "unavailable") : "unavailable"; }
+  function askSendNow(all) {
+    popDialog("send", "Send notes to Claude", `<b>Commenting is on</b><p>Press Send to post your notes to Claude.</p>`,
+      [{ act: "cancel", text: "Cancel" }, { act: "go", text: "Send", primary: true, run: () => doSend(all) }], sendBtn);
+  }
+  function askAllowComments(all) {
+    popDialog("allow", "Allow this board to comment for you", `<b>Allow this board to comment for you</b>`
+      + `<p>Sending to Claude posts one comment as you, so the board needs your permission. Your notes are saved either way.</p>`,
+      [{ act: "copy", text: "Copy instead", run: () => copyForClaude(all, "off") },
+       { act: "allow", text: "Open permissions", primary: true, run: () => openPermissions(all) }], sendBtn);
+  }
+  async function openPermissions(all) {
+    const perms = await permsNs();
+    try { if (!perms) throw 0; await perms.manage(); }
+    catch (_) { toast("Open this board's Permissions menu at the top of the page, allow comments, then press Send again."); return; }
+    const st = await perms.state("comments").catch(() => "unavailable");
+    if (st === "granted") askSendNow(all);
+    else if (st === "prompt") toast("Commenting can be allowed again: press Send and choose Allow when asked.");
+    else toast("Commenting is still off for this board. Allow it in the Permissions panel, then press Send again.");
+  }
+
+  let toastTimer = 0;
+  function toast(msg) {
+    const t = $("#toast"); t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 3400);
+  }
+
+  // ---------- video transport ----------
+  const vtrack = $("#vtrack");
+  function togglePlay() { if (!VID()) return; if (vid.paused) { if (vid.currentTime >= vdur() - 0.05) vid.currentTime = 0; vid.play().catch(() => {}); } else vid.pause(); }
+  // onto the frame at t, kept inside the video (just past the frame's start, so the browser shows that frame)
+  function setVideoTime(t) { vid.currentTime = clamp(snapT(t), 0, Math.max(0, vdur() - 1 / fps())) + 0.0005; }
+  function seekTo(t) { if (!VID()) return; vid.pause(); setVideoTime(t); tickVideo(); }
+  function setRange(t) {
+    rangeIn = t;
+    $("#vsetin").classList.toggle("primary", t != null);
+    const msg = $("#vinmsg"); msg.hidden = t == null; if (t != null) msg.textContent = "Range from " + tcOf(t) + ": move to its end, then write or mark";
+    tickVideo();
+  }
+  function toggleRange() { if (!VID() || RO) return; setRange(rangeIn == null ? nowT() : null); }
+  function buildTrack() {
+    const d = cur.dur || vdur() || 1, ticks = $("#vticks");
+    const step = d > 120 ? 30 : d > 40 ? 10 : d > 12 ? 2 : 1;
+    let h = "";
+    for (let s = 0; s <= d + 1e-6; s += step) h += `<span class="tick" style="left:${s / d * 100}%"></span>` + (s > 0 && s < d - step / 2 ? `<span class="tlab" style="left:${s / d * 100}%">${s}s</span>` : "");
+    ticks.innerHTML = h;
+    const beats = cur.beats || [], bl = $("#vbeats");
+    bl.hidden = !beats.length;
+    bl.innerHTML = beats.map((b, i) => `<span class="vbeat" data-i="${i}" title="${esc(b.label)}" style="left:${b.a / d * 100}%;width:${(b.b - b.a) / d * 100}%">${esc(b.label)}</span>`).join("");
+    bl.querySelectorAll(".vbeat").forEach((el) => el.addEventListener("click", () => seekTo(beats[+el.dataset.i].a)));
+    renderPins();
+  }
+  function renderPins() {
+    if (!VID()) return;
+    const d = cur.dur || vdur() || 1;
+    let p = "", r = "";
+    for (const m of onImage()) {
+      if (m.t == null) continue;
+      const c = noteColor(m), cls = (m.status === "done" ? " done" : "") + (m.id === activeId || m.id === focusId ? " sel" : "");
+      if (m.t2 != null) r += `<span class="vrng" style="left:${m.t / d * 100}%;width:${(m.t2 - m.t) / d * 100}%;--c:${c}"></span>`;
+      p += `<span class="vpin${cls}" data-id="${esc(m.id)}" title="#${m.n} · ${esc(whereText(m, false))}${m.text ? " · " + esc(m.text.slice(0, 80)) : ""}" style="left:${m.t / d * 100}%;--c:${c}"></span>`;
+    }
+    $("#vranges").innerHTML = r; $("#vpins").innerHTML = p;
+  }
+  let vraf = 0;
+  function tickVideo() {
+    if (!VID()) return;
+    const t = vid.currentTime || 0, d = vdur() || cur.dur || 1;
+    $("#vtc").innerHTML = tcOf(t) + " <small>/ " + tcOf(d) + "</small>";
+    $("#vhead").style.left = (clamp(t / d, 0, 1) * 100) + "%";
+    const vin = $("#vin"); vin.hidden = rangeIn == null; if (rangeIn != null) vin.style.left = (rangeIn / d * 100) + "%";
+    const playing = !vid.paused && !vid.ended;
+    $("#vplay").querySelector(".lbl").textContent = playing ? "Pause" : "Play";
+    $("#vplay").querySelector("svg").innerHTML = playing ? '<path d="M8 5v14M16 5v14"/>' : '<path d="M8 5l11 7-11 7z"/>';
+    const beats = cur.beats || [];
+    $("#vbeats").querySelectorAll(".vbeat").forEach((el) => { const b = beats[+el.dataset.i]; el.classList.toggle("cur", t >= b.a && t < b.b); });
+    schedule();
+  }
+  function loopVideo() { tickVideo(); vraf = !vid.paused && !vid.ended ? requestAnimationFrame(loopVideo) : 0; }
+  vid.addEventListener("play", () => { if (!vraf) vraf = requestAnimationFrame(loopVideo); });
+  ["pause", "seeked", "ended", "durationchange"].forEach((ev) => vid.addEventListener(ev, () => { if (ev === "durationchange" && VID()) buildTrack(); tickVideo(); }));
+  let vdrag = false;
+  const trackSeek = (e) => { const r = vtrack.getBoundingClientRect(); seekTo(clamp((e.clientX - r.left) / r.width, 0, 1) * (cur.dur || vdur())); };
+  vtrack.addEventListener("pointerdown", (e) => {
+    const pin = e.target.closest(".vpin");
+    if (pin) { const m = marks.get(pin.dataset.id); if (m) { seekTo(m.t); openComment(m.id, false); } return; }
+    vdrag = true; try { vtrack.setPointerCapture(e.pointerId); } catch (_) {} trackSeek(e);
+  });
+  vtrack.addEventListener("pointermove", (e) => { if (vdrag) trackSeek(e); });
+  vtrack.addEventListener("pointerup", () => { vdrag = false; });
+  vtrack.addEventListener("pointercancel", () => { vdrag = false; });
+  $("#vplay").addEventListener("click", togglePlay);
+  $("#vback").addEventListener("click", () => seekTo((vid.currentTime || 0) - 1 / fps()));
+  $("#vfwd").addEventListener("click", () => seekTo((vid.currentTime || 0) + 1 / fps()));
+  const timed = () => onImage().filter((m) => m.t != null).sort((a, b) => a.t - b.t);
+  $("#vprev").addEventListener("click", () => { const t = vid.currentTime || 0, p = timed().filter((m) => m.t < t - 0.02).pop(); if (p) { seekTo(p.t); openComment(p.id, false); } else seekTo(0); });
+  $("#vnext").addEventListener("click", () => { const t = vid.currentTime || 0, n = timed().find((m) => m.t > t + 0.02); if (n) { seekTo(n.t); openComment(n.id, false); } });
+  $("#vsetin").addEventListener("click", toggleRange);
+  // full screen, for image and video tabs: the frame and the notes panel take the whole screen (the status line steps aside;
+  // the slim header stays, so the tabs still switch files without leaving full screen)
+  function setFull(on) {
+    if (on === app.classList.contains("full")) return;
+    app.classList.toggle("full", on);
+    const fb = $("#fullBtn"); fb.setAttribute("aria-pressed", String(on)); fb.setAttribute("aria-label", on ? "Exit full screen" : "Full screen");
+    fb.removeAttribute("data-tip"); fb.title = on ? "Exit full screen (F or Esc)" : "Full screen (F)";
+    try {
+      // the whole page, not just .app: the Send and Copy pop-ups, messages and the picture viewer sit outside it
+      const root = document.documentElement;
+      if (on && !document.fullscreenElement && root.requestFullscreen) root.requestFullscreen().catch(() => {});
+      else if (!on && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    } catch (_) {}
+    autoFit = true;
+    requestAnimationFrame(() => { measure(); if (vw && vh) { view.z = fitZ(); clampView(); } schedule(); });
+  }
+  document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && app.classList.contains("full")) setFull(false); });
+  $("#fullBtn").addEventListener("click", () => setFull(!app.classList.contains("full")));
+
+  // ---------- start ----------
+  sizeChip(); if (document.fonts && document.fonts.ready) document.fonts.ready.then(sizeChip, () => {});   // again once the web font is in
+  if (!cur) { $("#loading").textContent = "This board has no images yet."; setSave("local"); return; }
+  if (RO) {
+    document.body.classList.add("ro");
+    popText.readOnly = true; overallEl.readOnly = true; $("#popSave").textContent = "Close";
+    $(".notes-head p").textContent = "A saved copy of this board's marks and notes. It is read-only: pan, zoom and click any number to read its note.";
+  }
+  const START_HASH = location.hash.slice(1);                  // a live round in the link arrives later, from the database
+  const fromHash = IMAGES.find((i) => i.id === START_HASH);
+  measure();
+  new ResizeObserver(() => {
+    measure();
+    if (!vw || !vh) return;
+    if (!viewReady) { viewReady = true; initialView(); } else if (autoFit) { view.z = fitZ(); clampView(); } else clampView();
+    schedule();
+  }).observe(viewer);
+  // a new round since this viewer last opened the board opens on that round, whatever the link's anchor says (the anchor
+  // keeps your place on a plain reload, but a republish reloads the page with the old round's anchor)
+  let seen = null; try { seen = localStorage.getItem(SEEN_KEY); } catch (_) {}
+  const fresh = !RO && !!NEWEST && seen !== NEWEST.id;
+  try { if (NEWEST && !RO) localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {}
+  showImage(fresh ? NEWEST : (fromHash || cur));
+  connect();
+})();
+</script>

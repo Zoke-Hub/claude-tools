@@ -1,0 +1,12 @@
+{
+  "name": "markroom",
+  "version": "1.0.0",
+  "description": "MarkRoom — your review room: mark it, note it, and Claude changes it.",
+  "author": {
+    "name": "Zoke"
+  },
+  "homepage": "https://github.com/Zoke-Hub/claude-tools",
+  "repository": "https://github.com/Zoke-Hub/claude-tools",
+  "license": "SEE LICENSE IN LICENSE",
+  "keywords": ["review", "feedback", "annotation", "markup", "video review", "artifact"]
+}

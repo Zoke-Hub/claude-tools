@@ -1,0 +1,26 @@
+{
+  "name": "zoke",
+  "owner": {
+    "name": "Zoke"
+  },
+  "metadata": {
+    "description": "Folio, PulseWise and MarkRoom: three tools for Claude Code, by Zoke."
+  },
+  "plugins": [
+    {
+      "name": "folio",
+      "source": "./plugins/folio",
+      "description": "Folio — a quiet archive that keeps long chats light."
+    },
+    {
+      "name": "pulsewise",
+      "source": "./plugins/pulsewise",
+      "description": "PulseWise — a live bar for everything Claude is doing. A progress bar under the task list: one beat per point sized by time, a track for each background job, and the project's other chats, filled by real work."
+    },
+    {
+      "name": "markroom",
+      "source": "./plugins/markroom",
+      "description": "MarkRoom — your review room: mark it, note it, and Claude changes it."
+    }
+  ]
+}

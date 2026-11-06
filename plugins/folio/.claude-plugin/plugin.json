@@ -1,0 +1,20 @@
+{
+  "name": "folio",
+  "version": "1.0.0",
+  "description": "Folio — a quiet archive that keeps long chats light.",
+  "author": {
+    "name": "Zoke"
+  },
+  "homepage": "https://github.com/Zoke-Hub/claude-tools",
+  "repository": "https://github.com/Zoke-Hub/claude-tools",
+  "license": "SEE LICENSE IN LICENSE",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "shortenOutputs": {
+      "type": "boolean",
+      "title": "Shorten long shell outputs",
+      "description": "A shell command's output over 8,000 characters reaches Claude as its start, its end and a note. Folio saves the whole output first, and recall gives back any of it word for word. On by default; turn it off to keep every output whole in the chat.",
+      "default": true
+    }
+  }
+}

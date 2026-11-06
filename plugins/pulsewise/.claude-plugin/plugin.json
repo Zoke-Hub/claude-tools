@@ -1,0 +1,20 @@
+{
+  "name": "pulsewise",
+  "version": "1.0.0",
+  "description": "PulseWise — a live bar for everything Claude is doing. A progress bar under the task list: one beat per point sized by time, a track for each background job, and the project's other chats, filled by real work.",
+  "author": {
+    "name": "Zoke"
+  },
+  "homepage": "https://github.com/Zoke-Hub/claude-tools",
+  "repository": "https://github.com/Zoke-Hub/claude-tools",
+  "license": "SEE LICENSE IN LICENSE",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "sideBySide": {
+      "type": "boolean",
+      "title": "Plan side-by-side work",
+      "description": "When Claude writes a new task list (or adds points to one), PulseWise asks it to start the points that need nothing from each other side by side, as background agents or commands, without being asked. On by default; turn it off to have Claude work through the list one point at a time.",
+      "default": true
+    }
+  }
+}
