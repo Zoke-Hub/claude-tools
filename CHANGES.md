@@ -3,6 +3,13 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-07, later · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom:** dragging the playhead on a video's timeline shows the frames as it goes (one seek at a time, always to
+  the newest spot), and so do held arrow keys and the −1f / +1f buttons. Clicking, double-clicking or dragging on the
+  timeline, or dragging a tab, never selects text. New boards keep a keyframe every half second in their review videos
+  (a render's own copy is re-encoded when its keyframes are further apart than a second), so the preview keeps up.
+
 ## 2026-11-07 · Folio 1.0.0, PulseWise 1.0.0, MarkRoom 1.0.0 (numbers unchanged)
 
 - **MarkRoom:** a link Claude sends ends in `#open-<file id>` and opens that file directly, even when a newer round is

@@ -77,13 +77,24 @@ function probeVideo(file) {
   const st = j.streams[0], [a, b] = String(st.r_frame_rate || "25/1").split("/").map(Number);
   return { w: st.width, h: st.height, fps: +(a / (b || 1)).toFixed(3), dur: +(+j.format.duration).toFixed(3), codec: st.codec_name };
 }
+// Dragging the playhead shows a frame only once the browser has decoded from the keyframe before it. Renders often have
+// one every 10 s, so a seek decoded up to 250 frames and the picture trailed the drag by seconds. Review copies keep a
+// keyframe at least every KEY_GAP seconds, written every half second when re-encoded.
+const KEY_GAP = 1;
+function keyGap(file, dur) {   // the longest stretch between keyframes, in seconds
+  const keys = execFileSync(FFPROBE, ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", file],
+    { maxBuffer: 256 * 1024 * 1024 }).toString().split(/\r?\n/).filter((l) => /,K/.test(l)).map((l) => +l.split(",")[0]).filter(Number.isFinite).sort((a, b) => a - b);
+  return Math.max(0, ...[...keys, dur].map((t, i, a) => (i ? t - a[i - 1] : t)));
+}
 function prepVideo(src, id) {
   const dst = path.join(out, "img", id + ".mp4"), info = probeVideo(src);
   const enc = (crf) => execFileSync(FFMPEG, ["-v", "error", "-y", "-i", src, "-vf", "scale='min(1920,iw)':-2", "-c:v", "libx264", "-preset", "slow", "-crf", String(crf),
-    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", dst]);
-  if (info.codec === "h264" && info.w <= 1920 && fs.statSync(src).size <= MAX_BYTES) {
+    "-g", String(Math.max(1, Math.round(info.fps / 2))), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", dst]);
+  const gap = info.codec === "h264" && info.w <= 1920 && fs.statSync(src).size <= MAX_BYTES ? keyGap(src, info.dur) : Infinity;
+  if (gap <= KEY_GAP) {
     execFileSync(FFMPEG, ["-v", "error", "-y", "-i", src, "-c", "copy", "-movflags", "+faststart", dst]);
   } else {
+    if (Number.isFinite(gap)) console.log(`  ${path.basename(src)}: keyframes up to ${gap.toFixed(1)} s apart, re-encoding with one every half second so the preview follows the playhead`);
     for (const crf of [23, 26, 29, 32]) { enc(crf); if (fs.statSync(dst).size <= MAX_BYTES) break; }
   }
   const o = probeVideo(dst);

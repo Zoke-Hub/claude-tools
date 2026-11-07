@@ -147,7 +147,8 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
   drawn or typed. It is still stored as you go, so nothing is lost on a reload.
 - Under the frame, a transport: previous / next note, −1 / +1 frame, play, timecode MM:SS:FF, **Set in (I)** for a note that
   covers a range, an optional lane of named beats (scene sections), and the scrub track with a pin per note
-  (and a bar for a range). Click a pin to open its note.
+  (and a bar for a range). Click a pin to open its note. Dragging the playhead shows the frames as it goes (one seek at a
+  time, always to the newest spot) and never selects text.
 - The notes panel on the right holds the cards, the same as images (timecode instead of x/y; **Show on the video** seeks to the note).
 - A note's marks show on its frame (or across its range, and 0.4 s after a single frame), and whenever the note is selected.
   Moving the playhead and marking again starts a new note.
@@ -162,8 +163,11 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
    node "${CLAUDE_SKILL_DIR}/scripts/build_board.mjs" --out <project>/review/<name>-markroom --title "<Name> MarkRoom" \
      [--group "<tab name>"] <image|video>[=<label>] [<image|video>[=<label>] ...]
    ```
-   - Images and videos mix freely. Video files (.mp4 .mov .m4v .webm .mkv) are remuxed with faststart, or re-encoded to H.264
-     (max 1920 px wide, CRF 23 → 32) until they fit under 15 MB; a poster frame is made for the tab; fps and duration are stored.
+   - Images and videos mix freely. Video files (.mp4 .mov .m4v .webm .mkv) are remuxed with faststart when they are already
+     H.264, at most 1920 px wide, under 15 MB and have a keyframe at least every second; otherwise they are re-encoded to
+     H.264 (max 1920 px wide, CRF 23 → 32 until they fit under 15 MB) with a keyframe every half second, so dragging the
+     playhead shows each frame as it goes (renders often have one every 10 s, which made the picture trail the drag by
+     seconds). A poster frame is made for the tab; fps and duration are stored.
      ffmpeg comes from the PATH; Homebrew's `ffmpeg-full` is tried first when it's installed.
    - Optional beats lane for a video: put `<video>.beats.json` next to it, `[{"label": "Title in", "a": 2.2, "b": 3.9}, ...]`.
    - `--group` puts the files of this call into one tab as rounds (the dropdown). Use it for every round of a preview.

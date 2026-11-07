@@ -93,7 +93,9 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(-
 .tabw .imgtab { padding-right: 32px; }
 .tabw.dragging { z-index: 2; opacity: .9; }
 .tabw.dragging .imgtab { cursor: grabbing; background: var(--surface); border-color: var(--accent); box-shadow: 0 6px 16px rgba(0,0,0,.22); }
-.imgtabs.reordering, .imgtabs.reordering * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+.imgtabs.reordering, .imgtabs.reordering * { cursor: grabbing !important; }
+/* while a tab or the playhead is dragged, no text anywhere on the page gets selected */
+html.drag-lock, html.drag-lock * { user-select: none !important; -webkit-user-select: none !important; }
 .tabw.solo .imgtab { padding-right: 12px; }
 .tabx { appearance: none; position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 22px; height: 22px; padding: 0; border: 0;
   border-radius: 6px; background: transparent; color: var(--muted); font: 16px/1 var(--f-ui); cursor: pointer; display: grid; place-items: center; }
@@ -298,6 +300,8 @@ textarea::placeholder { color: var(--muted); }
   font: 11px/15px var(--f-ui); padding: 0 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
 .vbeat.cur { color: var(--fg); border-color: var(--accent); }
 .vtrack { position: relative; height: 32px; border-radius: 7px; background: var(--chip); cursor: pointer; touch-action: none; }
+/* clicking or double-clicking the timeline never selects its labels (and html.drag-lock covers the page while dragging) */
+.vtrack, .vbeats { user-select: none; -webkit-user-select: none; }
 .vtrack .tick { position: absolute; top: 0; height: 6px; border-left: 1px solid var(--line); }
 .vtrack .tlab { position: absolute; bottom: 1px; transform: translateX(-50%); font: 10px var(--f-mono); color: var(--muted); pointer-events: none; }
 .vpin { position: absolute; top: 6px; width: 13px; height: 13px; margin-left: -6.5px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: var(--c);
@@ -522,7 +526,14 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   const fps = () => fpsOf(cur);
   const snapT = (t, f = fps()) => Math.round(t * f) / f;
   function tcOf(t, f = fps()) { const fr = Math.round((t || 0) * f), p = (k) => String(k).padStart(2, "0"); return p(Math.floor(fr / f / 60)) + ":" + p(Math.floor(fr / f) % 60) + ":" + p(fr % f); }
-  const nowT = () => snapT(vid.currentTime || 0);
+  // A seek asked for while another is still loading cancels it, so a steady drag (or a held arrow key) used to land almost
+  // none and the frame lagged. Scrubbing runs one seek at a time: the newest spot waits in scrubWant and goes as soon as
+  // the running one lands. shownT is where the playhead is on screen, waiting or not; nowT is that frame.
+  let scrubWant = null;
+  const shownT = () => scrubWant ?? (vid.currentTime || 0);
+  const nowT = () => snapT(shownT());
+  // one page-wide switch that stops text selection while something is dragged (a tab, the playhead)
+  const dragLock = (on) => document.documentElement.classList.toggle("drag-lock", on);
   const vdur = () => (isFinite(vid.duration) && vid.duration) || (cur && cur.dur) || 0;
   let rangeIn = null;
   const cardsEl = $("#cards"), overallEl = $("#overall"), saveChip = $("#save");
@@ -900,14 +911,14 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   }
   function startTabDrag() {
     if (!tabDrag.el || tabDrag.on) return;
-    tabDrag.on = true; tabDrag.el.classList.add("dragging"); $("#imgtabs").classList.add("reordering");
+    tabDrag.on = true; tabDrag.el.classList.add("dragging"); $("#imgtabs").classList.add("reordering"); dragLock(true);
     if (navigator.vibrate && tabDrag.touch) try { navigator.vibrate(10); } catch (_) {}
   }
   function endTabDrag(cancel) {
     clearTimeout(tabDrag.timer);
     const { el, gid, on, before } = tabDrag; tabDrag.el = null; tabDrag.on = false;
     if (!el) return;
-    el.classList.remove("dragging"); $("#imgtabs").classList.remove("reordering");
+    el.classList.remove("dragging"); $("#imgtabs").classList.remove("reordering"); dragLock(false);
     if (!on) return;
     tabDrag.justDropped = true; setTimeout(() => { tabDrag.justDropped = false; }, 0);    // the click that follows a drop isn't a tab switch
     const after = [...$("#imgtabs").querySelectorAll(".tabw")].map((w) => w.dataset.group);
@@ -2024,7 +2035,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (VID()) {                                                  // video keys: Space / K play, arrows step, I range, C type
       const vk = e.key.toLowerCase();
       if (e.key === " " || vk === "k") { e.preventDefault(); togglePlay(); return; }
-      if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); seekTo((vid.currentTime || 0) + (e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 1 : 1 / fps())); return; }
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); scrubTo(shownT() + (e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 1 : 1 / fps())); return; }
       if (vk === "i") { toggleRange(); return; }
       if (vk === "c") { e.preventDefault(); if (!RO) popText.focus(); return; }
     }
@@ -2214,7 +2225,14 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   function togglePlay() { if (!VID()) return; if (vid.paused) { if (vid.currentTime >= vdur() - 0.05) vid.currentTime = 0; vid.play().catch(() => {}); } else vid.pause(); }
   // onto the frame at t, kept inside the video (just past the frame's start, so the browser shows that frame)
   function setVideoTime(t) { vid.currentTime = clamp(snapT(t), 0, Math.max(0, vdur() - 1 / fps())) + 0.0005; }
-  function seekTo(t) { if (!VID()) return; vid.pause(); setVideoTime(t); tickVideo(); }
+  function seekTo(t) { if (!VID()) return; vid.pause(); scrubWant = null; setVideoTime(t); tickVideo(); }
+  function scrubTo(t) {
+    if (!VID()) return;
+    if (vid.seeking) { scrubWant = t; tickVideo(); return; }      // the playhead follows now, the frame when it lands
+    seekTo(t);
+  }
+  vid.addEventListener("seeked", () => { if (scrubWant != null) seekTo(scrubWant); });
+  vid.addEventListener("emptied", () => { scrubWant = null; });   // another file: nothing of the old one waits
   function setRange(t) {
     rangeIn = t;
     $("#vsetin").classList.toggle("primary", t != null);
@@ -2249,7 +2267,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   let vraf = 0;
   function tickVideo() {
     if (!VID()) return;
-    const t = vid.currentTime || 0, d = vdur() || cur.dur || 1;
+    const t = shownT(), d = vdur() || cur.dur || 1;
     $("#vtc").innerHTML = tcOf(t) + " <small>/ " + tcOf(d) + "</small>";
     $("#vhead").style.left = (clamp(t / d, 0, 1) * 100) + "%";
     const vin = $("#vin"); vin.hidden = rangeIn == null; if (rangeIn != null) vin.style.left = (rangeIn / d * 100) + "%";
@@ -2264,21 +2282,24 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   vid.addEventListener("play", () => { if (!vraf) vraf = requestAnimationFrame(loopVideo); });
   ["pause", "seeked", "ended", "durationchange"].forEach((ev) => vid.addEventListener(ev, () => { if (ev === "durationchange" && VID()) buildTrack(); tickVideo(); }));
   let vdrag = false;
-  const trackSeek = (e) => { const r = vtrack.getBoundingClientRect(); seekTo(clamp((e.clientX - r.left) / r.width, 0, 1) * (cur.dur || vdur())); };
+  const trackSeek = (e) => { const r = vtrack.getBoundingClientRect(); scrubTo(clamp((e.clientX - r.left) / r.width, 0, 1) * (cur.dur || vdur())); };
+  const endScrub = () => { vdrag = false; dragLock(false); };
   vtrack.addEventListener("pointerdown", (e) => {
     const pin = e.target.closest(".vpin");
     if (pin) { const m = marks.get(pin.dataset.id); if (m) { seekTo(m.t); openComment(m.id, false); } return; }
-    vdrag = true; try { vtrack.setPointerCapture(e.pointerId); } catch (_) {} trackSeek(e);
+    getSelection()?.removeAllRanges();                             // a selection made before goes too
+    vdrag = true; dragLock(true);
+    try { vtrack.setPointerCapture(e.pointerId); } catch (_) {} trackSeek(e);
   });
   vtrack.addEventListener("pointermove", (e) => { if (vdrag) trackSeek(e); });
-  vtrack.addEventListener("pointerup", () => { vdrag = false; });
-  vtrack.addEventListener("pointercancel", () => { vdrag = false; });
+  vtrack.addEventListener("pointerup", endScrub);
+  vtrack.addEventListener("pointercancel", endScrub);
   $("#vplay").addEventListener("click", togglePlay);
-  $("#vback").addEventListener("click", () => seekTo((vid.currentTime || 0) - 1 / fps()));
-  $("#vfwd").addEventListener("click", () => seekTo((vid.currentTime || 0) + 1 / fps()));
+  $("#vback").addEventListener("click", () => scrubTo(shownT() - 1 / fps()));
+  $("#vfwd").addEventListener("click", () => scrubTo(shownT() + 1 / fps()));
   const timed = () => onImage().filter((m) => m.t != null).sort((a, b) => a.t - b.t);
-  $("#vprev").addEventListener("click", () => { const t = vid.currentTime || 0, p = timed().filter((m) => m.t < t - 0.02).pop(); if (p) { seekTo(p.t); openComment(p.id, false); } else seekTo(0); });
-  $("#vnext").addEventListener("click", () => { const t = vid.currentTime || 0, n = timed().find((m) => m.t > t + 0.02); if (n) { seekTo(n.t); openComment(n.id, false); } });
+  $("#vprev").addEventListener("click", () => { const t = shownT(), p = timed().filter((m) => m.t < t - 0.02).pop(); if (p) { seekTo(p.t); openComment(p.id, false); } else seekTo(0); });
+  $("#vnext").addEventListener("click", () => { const t = shownT(), n = timed().find((m) => m.t > t + 0.02); if (n) { seekTo(n.t); openComment(n.id, false); } });
   $("#vsetin").addEventListener("click", toggleRange);
   // full screen, for image and video tabs: the frame and the notes panel take the whole screen (the status line steps aside;
   // the slim header stays, so the tabs still switch files without leaving full screen)
