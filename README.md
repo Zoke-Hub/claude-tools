@@ -20,11 +20,11 @@ claude plugin install markroom --marketplace Zoke-Hub/claude-tools
 
 Or in a chat: `/plugin marketplace add Zoke-Hub/claude-tools` once, then `/plugin install <tool>@zoke` for each.
 
-Open a new chat afterwards. To update a tool: `claude plugin marketplace update zoke`, then
-`claude plugin update <tool>@zoke`, then restart the app. [CHANGES.md](CHANGES.md) lists what each update brings, by date.
-When an update keeps a tool's version number, `plugin update` keeps the copy you have: uninstall the tool and install it
-again (`claude plugin uninstall <tool>@zoke --keep-data`, then `claude plugin install <tool>@zoke`); its settings and data stay. Each
-tool's README says what it needs and where it keeps its data.
+Open a new chat afterwards. Each tool's README says what it needs and where it keeps its data.
+
+**Updating:** send Claude "Update Folio, PulseWise and MarkRoom from https://github.com/Zoke-Hub/claude-tools: read its
+UPDATE.md and follow it." It updates only the tools whose files changed, also when an update keeps the version number,
+and says what's new from [CHANGES.md](CHANGES.md).
 
 ## Licence
 
