@@ -32,11 +32,34 @@ type StubOptions = {
   model?: (prompt: string) => string | null | Promise<string | null>
 }
 
+// A path from a file event in the form the test wrote it, on any system. The
+// engine hands hooks the system's own form: on Windows, backslashes, and a drive
+// letter put before a path that starts at the root, so "/tmp/x" arrives as
+// "D:\tmp\x". A test of a Windows computer writes drive letters of its own, so
+// `isWindows` keeps them.
+const pathOf = (path: string, isWindows = false) => {
+  const slashed = path.replace(/\\/g, '/')
+
+  return isWindows ? slashed : slashed.replace(/^[A-Za-z]:(?=\/)/, '')
+}
+
+// Whether the test describes a Windows computer: Windows says so in OS, and a
+// home folder on a drive letter says so too.
+const describesWindows = (env: Record<string, string>) => env.OS === 'Windows_NT' || /^[A-Za-z]:/.test(env.HOME ?? env.USERPROFILE ?? '')
+
 // The engine beneath Folio: a disk in memory, the chat, a clock that moves only
 // when the test moves it, and the light model. What Folio shows, runs and asks
 // comes back for the test to check.
 export function stubEngine(on: On, o: StubOptions = {}) {
   const files = o.files ?? new Map<string, string>()
+  const env = o.env ?? { HOME }
+  const isWindows = describesWindows(env)
+  // The ways the test may have written an event's path: as the engine gives it;
+  // and, on a Windows computer, a path the test wrote from the root (a project
+  // folder such as /w) without the drive letter the engine put before it.
+  const formsOf = (path: string) => [...new Set([pathOf(path, isWindows), pathOf(path)])]
+  // The key the test's disk holds an event's path under, or the one it gets.
+  const keyOf = (path: string) => formsOf(path).find(p => files.has(p)) ?? pathOf(path, isWindows)
   const toasts: string[] = []
   const commands: string[] = []
   const prompts: string[] = []
@@ -49,18 +72,24 @@ export function stubEngine(on: On, o: StubOptions = {}) {
     const messages = o.messages
     on('session.messages', () => ({ value: messages }))
   }
-  on('fs.exists', (_, e) => ({ value: o.exists?.(e.path) ?? (files.has(e.path) || [...files.keys()].some(k => k.startsWith(`${e.path}/`))) }))
-  on('fs.read', (_, e) => {
-    if (!files.has(e.path)) throw new Error(`no file ${e.path}`)
+  on('fs.exists', (_, e) => {
+    const forms = formsOf(e.path)
+    const isThere = (path: string) => o.exists?.(path) ?? (files.has(path) || [...files.keys()].some(k => k.startsWith(`${path}/`)))
 
-    return { value: files.get(e.path)! }
+    return { value: forms.some(isThere) }
+  })
+  on('fs.read', (_, e) => {
+    const key = keyOf(e.path)
+    if (!files.has(key)) throw new Error(`no file ${e.path}`)
+
+    return { value: files.get(key)! }
   })
   on('fs.write', (_, e) => {
-    files.set(e.path, e.text)
+    files.set(keyOf(e.path), e.text)
 
     return { value: undefined }
   })
-  on('fs.list', (_, e) => ({ value: o.tree?.[e.path] ?? [] }))
+  on('fs.list', (_, e) => ({ value: formsOf(e.path).map(path => o.tree?.[path]).find(entries => entries !== undefined) ?? [] }))
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', (_, e) => {
     opened.push(e.id)
@@ -85,7 +114,7 @@ export function stubEngine(on: On, o: StubOptions = {}) {
 
     return { value: text === null ? { isAnswered: false, reason: 'empty-reply', text: '', usage: NO_USAGE } : { isAnswered: true, text, usage: NO_USAGE } }
   })
-  mock.env(on, o.env ?? { HOME })
+  mock.env(on, env)
 
   return { files, clock: mock.clock(on), toasts, commands, prompts, opened }
 }

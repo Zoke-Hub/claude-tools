@@ -26,6 +26,16 @@ adding a round. Actions use the same words: open the MarkRoom, post it to the Ma
 "MarkRoom" only in titles and headers ("MarkRoom · by Zoke"). When the user says "the dashboard", "the board" or "the
 review page" for a board in play, they mean the MarkRoom: answer with "the MarkRoom" without remarking on the wording.
 
+**Link to the file that changed (Claude only, every time).** Whenever Claude changes anything in a MarkRoom (makes a
+board, adds a round or a file, replies to notes or marks them done, closes or reopens tabs), its final message that turn
+links to it so that one click opens the changed file: the board's url with `#open-<file id>` on the end, written "in the
+[MarkRoom](<board url>#open-<file id>)". The file id is that image's or round's `id` in `board.json` (for a live round,
+its round id). The page opens that file even when a round the user hasn't seen yet is newer (§1). Several files changed:
+one link each, named by the file's label. Notes answered across many files: link the file with the most replies and say
+how many other files have replies. Tabs closed: link the file left in view. Link only a file whose tab is open, and never
+a bare board link when a file changed. The link goes in the turn's final message even when the change came earlier in
+the turn, and in a short message too. Never open the board for the user: the link is how they get there.
+
 | File | What it is |
 |---|---|
 | `assets/board.html` | The page template. The design and all behaviour live here; the build script fills in the title and the image/video list. |
@@ -95,7 +105,7 @@ review page" for a board in play, they mean the MarkRoom: answer with "the MarkR
   ends with "…and N more lines: read them from the board's database".
 
 **Several images, and rounds.** A board can hold several images and videos and shows them as tabs. Shift + ←/→ switches
-between tabs (on an image tab), and `#<id>` in the link opens one directly. Numbers run across the whole board, so "#7" is unambiguous.
+between tabs (on an image tab), and a link ending in `#open-<id>` (the links Claude sends) opens one file directly. Numbers run across the whole board, so "#7" is unambiguous.
 Rounds of the same thing (built with `--group`) share **one tab**: the tab opens the latest round, and a **Version** dropdown
 beside the tabs opens an older one (each option shows its open-note count). Notes stay on the round they were written on.
 Switching versions keeps your place, so the same part can be compared round to round: the other round opens at the same
@@ -111,7 +121,9 @@ switching versions), and a notice in the corner says "Now showing the new round:
 before) and **Dismiss**. Only a note being made or edited, or a field being typed in, holds it back: the notice then says
 "New round: … It opens when you finish this note", with **Open now** and **Not now**; the note stays exactly as it is,
 and the round opens by itself once the note is saved or closed. On opening, a newer round than you last saw beats the `#<id>` anchor, which the
-page keeps in the link to remember your place. A plain reload with no new round keeps your place. The newest render is
+page keeps in the link to remember your place. A plain reload with no new round keeps your place. A link sent to open one
+file (`#open-<id>`) always opens that file, even over a newer round, which then opens on the next plain visit; followed
+while the board is already open, it switches to that file (or, while a note is being typed, says to finish the note first). The newest render is
 the last one added (`newest` in the page config, from each image's `added` time in `board.json`, or the newest doc in
 the `rounds` collection). If its tab had been closed before it was added, the tab opens again for everyone;
 a tab the reviewer closes after that stays closed. The page remembers per browser (local storage) which newest render
@@ -177,7 +189,7 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
 4. **Save the URL** into `board.json` (`"url": …`) and into the project notes, then refresh the page once with
    `build_board.mjs --append --out <board>` and republish, so the Send button's message carries the board's url.
    **Watch the board** from the session that will do the work (the publishing session watches automatically; another session
-   uses `ArtifactComments` to watch it): a Send reaches only sessions watching the artifact. Give the user the link, with three lines on how to use it:
+   uses `ArtifactComments` to watch it): a Send reaches only sessions watching the artifact. Give the user the link (opening the file to look at first, `#open-<file id>`), with three lines on how to use it:
    mark the image with as many markers, arrows, boxes, drawings and text as a point needs, click Done beside them and write
    the note, and tell me when you're done.
 
@@ -251,8 +263,8 @@ bring the board to the front, so the user isn't pulled off another board or chat
    node "${CLAUDE_SKILL_DIR}/scripts/build_board.mjs" --out <board> --asset <round id>=<file asset id>[,<poster asset id>]
    ```
 4. `ArtifactData` `set` on `rounds`, `doc_id` the round id, `file_path` that JSON (the script prints the exact call).
-5. In the chat's finishing message, give the board link (it is the button the user clicks to go there) and say which
-   round is new; never open the board for them.
+5. In the chat's finishing message, give the link to the new round (the board's url with `#open-<round id>`; it is the
+   button the user clicks to go there) and say which round is new; never open the board for them.
 
 If the upload is refused because the board doesn't declare `assets`, the board needs ONE republish with the full set
 (below), at a moment the user agrees to, since that republish opens the board on their screen. Every live round after that

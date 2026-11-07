@@ -30,6 +30,15 @@ const inProject = (on: On) => {
 
 const drawnText = async (ui: { drawn: () => Promise<unknown> }) => JSON.stringify(await ui.drawn())
 
+/**
+ * A file event's path as the test wrote it, on any system. The engine hands hooks the system's own form: on Windows,
+ * backslashes, and a drive letter before a path that starts at the root, so "/home/me/x" arrives as "D:\home\me\x".
+ */
+const pathOf = (e: unknown) =>
+  String((e as { path?: unknown }).path ?? '')
+    .replace(/\\/g, '/')
+    .replace(/^[A-Za-z]:(?=\/)/, '')
+
 test('the band follows the task list and its background work, on desktop and terminal', async ($, on) => {
   inProject(on)
   on('tool.call', (_, e) =>
@@ -151,7 +160,7 @@ test('on Windows the jobs folder is found through USERPROFILE', async ($, on) =>
     steps: [{ name: 'Cut pieces', state: 'running', done: 40, total: 100, unit: null, weight: null, est_ms: null, started: now, ended: null }],
   }
   on('fs.list', (_, e) => {
-    listed.push(String((e as { path?: string }).path))
+    listed.push(pathOf(e))
     return { value: [{ name: 'j1.json', kind: 'file', size: 10, mtimeMs: 1, isLink: false }] }
   })
   on('fs.read', () => ({ value: JSON.stringify(job) }))
@@ -159,7 +168,8 @@ test('on Windows the jobs folder is found through USERPROFILE', async ($, on) =>
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1100)
 
-  expect(listed.some(path => path.endsWith('C:/Users/me/.claude/progress/jobs'))).toBe(true)
+  // USERPROFILE gave the folder (no HOME is set); pathOf drops the drive letter, so this reads the same everywhere.
+  expect(listed.some(path => path.endsWith('/Users/me/.claude/progress/jobs'))).toBe(true)
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await drawnText(ui)).toContain('Rig build')
   await ui.unmount()
@@ -316,11 +326,11 @@ test("other chats in the same project show behind their toggle, even with nothin
     'b.json': chat('chat-3', '/projects/elsewhere', 'Chat in another project'),
   }
   on('fs.list', (_, e) => {
-    const path = JSON.stringify(e)
+    const path = pathOf(e)
     return { value: path.includes('/chats') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: 1, isLink: false })) : [] }
   })
   on('fs.read', (_, e) => {
-    const path = JSON.stringify(e)
+    const path = pathOf(e)
     const name = Object.keys(files).find(one => path.includes(one))
     return { value: JSON.stringify(name ? files[name] : {}) }
   })
@@ -359,9 +369,9 @@ test('other chats keep the spot they took when first listed, oldest on top, howe
   })
   const files: Record<string, unknown> = { 'a.json': chat('chat-2', 'First listed', true, now) }
   let mtime = 1
-  on('fs.list', (_, e) => ({ value: JSON.stringify(e).includes('/chats') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: mtime, isLink: false })) : [] }))
+  on('fs.list', (_, e) => ({ value: pathOf(e).includes('/chats') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: mtime, isLink: false })) : [] }))
   on('fs.read', (_, e) => {
-    const name = Object.keys(files).find(one => JSON.stringify(e).includes(one))
+    const name = Object.keys(files).find(one => pathOf(e).includes(one))
     return { value: JSON.stringify(name ? files[name] : {}) }
   })
   on('fs.write', () => ({ value: undefined }))
@@ -526,7 +536,7 @@ test("a background agent's named step-by-step job shows on the agent's own bar",
       { name: 'Render', state: 'pending', done: null, total: null, unit: null, weight: null, est_ms: null, started: null, ended: null },
     ],
   }
-  on('fs.list', (_, e) => ({ value: JSON.stringify(e).includes('/jobs') ? [{ name: 'j9.json', kind: 'file', size: 10, mtimeMs: 1, isLink: false }] : [] }))
+  on('fs.list', (_, e) => ({ value: pathOf(e).includes('/jobs') ? [{ name: 'j9.json', kind: 'file', size: 10, mtimeMs: 1, isLink: false }] : [] }))
   on('fs.read', () => ({ value: JSON.stringify(job) }))
   on('fs.write', () => ({ value: undefined }))
 
@@ -611,9 +621,9 @@ test('a finished other chat stays until opened; one opened since it finished is 
     'a.json': done('chat-2', 'Finished, not opened yet', now - 120_000),
     'b.json': done('chat-3', 'Finished and opened since', now - 30_000),
   }
-  on('fs.list', (_, e) => ({ value: JSON.stringify(e).includes('/chats') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: 1, isLink: false })) : [] }))
+  on('fs.list', (_, e) => ({ value: pathOf(e).includes('/chats') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: 1, isLink: false })) : [] }))
   on('fs.read', (_, e) => {
-    const name = Object.keys(files).find(one => JSON.stringify(e).includes(one))
+    const name = Object.keys(files).find(one => pathOf(e).includes(one))
     return { value: JSON.stringify(name ? files[name] : {}) }
   })
   on('fs.write', () => ({ value: undefined }))
@@ -650,9 +660,9 @@ test('a redo takes the place of the job that stopped, named outright or clearly 
     '3.json': job('old-2', 'Cut out the 4 fills', 'failed'),
     '4.json': job('new-2', 'Cut out the 151 legs fill', 'running', { started: now - 5000 }),
   }
-  on('fs.list', (_, e) => ({ value: JSON.stringify(e).includes('/jobs') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: 1, isLink: false })) : [] }))
+  on('fs.list', (_, e) => ({ value: pathOf(e).includes('/jobs') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: 1, isLink: false })) : [] }))
   on('fs.read', (_, e) => {
-    const name = Object.keys(files).find(one => JSON.stringify(e).includes(`/${one}`))
+    const name = Object.keys(files).find(one => pathOf(e).includes(`/${one}`))
     return { value: JSON.stringify(name ? files[name] : {}) }
   })
   on('fs.write', () => ({ value: undefined }))
@@ -723,7 +733,7 @@ test('another chat waiting on the person shows "needs input" and stays; this cha
     updated: now - 90_000, finishedAt: null, focusedAt: null, segs: [{ name: 'Plan', fill: 1, state: 'done', weight: 10000 }, { name: 'Ask', fill: 0, state: 'running', weight: 20000 }],
   }
   const writes: string[] = []
-  on('fs.list', (_, e) => ({ value: JSON.stringify(e).includes('/chats') ? [{ name: 'w.json', kind: 'file', size: 10, mtimeMs: 1, isLink: false }] : [] }))
+  on('fs.list', (_, e) => ({ value: pathOf(e).includes('/chats') ? [{ name: 'w.json', kind: 'file', size: 10, mtimeMs: 1, isLink: false }] : [] }))
   on('fs.read', () => ({ value: JSON.stringify(waiting) }))
   on('fs.write', (_, e) => {
     writes.push(JSON.stringify(e))
@@ -789,10 +799,10 @@ test('an idle other chat never shows; a finished one seen before a restart stays
     '.seen.json': { 'chat-3': { finished: now - 60_000, at: now - 50_000 } },
   }
   const writes: string[] = []
-  on('fs.list', (_, e) => ({ value: JSON.stringify(e).includes('/chats') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: 1, isLink: false })) : [] }))
+  on('fs.list', (_, e) => ({ value: pathOf(e).includes('/chats') ? Object.keys(files).map(name => ({ name, kind: 'file', size: 10, mtimeMs: 1, isLink: false })) : [] }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_, e) => {
-    const name = Object.keys(files).find(one => JSON.stringify(e).includes(`/${one}`))
+    const name = Object.keys(files).find(one => pathOf(e).includes(`/${one}`))
     return { value: JSON.stringify(name ? files[name] : {}) }
   })
   on('fs.write', (_, e) => {
@@ -827,7 +837,7 @@ test('a counted job shows its time left on its bar and, when all the work left c
     script: 'build.py', argv: 'build.py', started: now - 30_000, updated: now, ended: null, state: 'running', message: null,
     steps: [{ name: 'Cut pieces', state: 'running', done: 40, total: 100, unit: null, weight: null, est_ms: null, started: now - 30_000, ended: null }],
   }
-  on('fs.list', (_, e) => ({ value: JSON.stringify(e).includes('/jobs') ? [{ name: 'j1.json', kind: 'file', size: 10, mtimeMs: 1, isLink: false }] : [] }))
+  on('fs.list', (_, e) => ({ value: pathOf(e).includes('/jobs') ? [{ name: 'j1.json', kind: 'file', size: 10, mtimeMs: 1, isLink: false }] : [] }))
   on('fs.read', () => ({ value: JSON.stringify(job) }))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -949,16 +959,17 @@ test('the bundled helper is put in ~/.claude/progress when the copy there is old
   const files = new Map<string, string>([['/home/me/.claude/progress/progress.py', 'HELPER_VERSION = 1\n']])
   const writes: string[] = []
   on('fs.read', (_, e) => {
-    const path = String((e as { path: string }).path)
+    const path = pathOf(e)
     if (path.endsWith('/progress/progress.py') && !path.startsWith('/home/me/')) return { value: '#!/usr/bin/env python3\nHELPER_VERSION = 2\n' }
     if (path.endsWith('/progress/demo.py') && !path.startsWith('/home/me/')) return { value: 'demo' }
     const known = files.get(path)
     if (known === undefined) throw new Error('missing')
     return { value: known }
   })
-  on('fs.exists', (_, e) => ({ value: files.has(String((e as { path: string }).path)) }))
+  on('fs.exists', (_, e) => ({ value: files.has(pathOf(e)) }))
   on('fs.write', (_, e) => {
-    const { path, text } = e as { path: string; text: string }
+    const path = pathOf(e)
+    const { text } = e as { text: string }
     writes.push(path)
     files.set(path, text)
     return { value: undefined }
@@ -977,16 +988,17 @@ test('an up-to-date helper in ~/.claude/progress is left alone', async ($, on) =
   const files = new Map<string, string>([['/home/me/.claude/progress/progress.py', 'HELPER_VERSION = 2\n']])
   const writes: string[] = []
   on('fs.read', (_, e) => {
-    const path = String((e as { path: string }).path)
+    const path = pathOf(e)
     if (path.endsWith('/progress/progress.py') && !path.startsWith('/home/me/')) return { value: '#!/usr/bin/env python3\nHELPER_VERSION = 2\n' }
     if (path.endsWith('/progress/demo.py') && !path.startsWith('/home/me/')) return { value: 'demo' }
     const known = files.get(path)
     if (known === undefined) throw new Error('missing')
     return { value: known }
   })
-  on('fs.exists', (_, e) => ({ value: files.has(String((e as { path: string }).path)) }))
+  on('fs.exists', (_, e) => ({ value: files.has(pathOf(e)) }))
   on('fs.write', (_, e) => {
-    const { path, text } = e as { path: string; text: string }
+    const path = pathOf(e)
+    const { text } = e as { text: string }
     writes.push(path)
     files.set(path, text)
     return { value: undefined }
@@ -1041,4 +1053,238 @@ test('Stop freezes Claude\'s own part of the pulse; its next turn moves it again
   const resumed = await $.ui.mount({ ...BAND, surface: 'terminal', isWorking: true } as never)
   expect(await drawnText(resumed)).not.toContain('stopped')
   await resumed.unmount()
+})
+
+/** A Bash call answered as a background command, each with its own task id. */
+const backgroundBash = (on: On) => {
+  let n = 0
+  on('tool.call', (_, e) =>
+    e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: `bg-late-${(n += 1)}` } } : { result: {} },
+  )
+}
+
+/** The render list: point 2 running, point 3 named for the range the job renders. */
+const RENDER_LIST = [
+  { content: 'Set up the scene', status: 'completed' },
+  { content: 'Test render and check', status: 'in_progress' },
+  { content: 'Render A17–A30 and check', status: 'pending' },
+]
+
+/**
+ * A helper job's file, which the bar can read once `job.written` is set: started at `started()` (the test clock moves
+ * timers, not Date.now, so each test gives its job the start it needs), running until `job.ended` is set (its file
+ * changes then), and always fresh, as a running job's file is. `flashes()` gives the scripts the bar ran in PowerShell,
+ * decoded.
+ */
+const helperJob = (on: On, o: { id: string; name: string; started: () => number; env?: Record<string, string> }) => {
+  const job = { written: false, ended: false }
+  const runs: string[][] = []
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x', ...o.env })
+  on('process.run', (_, e) => {
+    runs.push((e as { argv: string[] }).argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.list', (_, e) => ({ value: job.written && pathOf(e).includes('/jobs') ? [{ name: `${o.id}.json`, kind: 'file', size: 10, mtimeMs: job.ended ? 2 : 1, isLink: false }] : [] }))
+  on('fs.read', () => {
+    const at = o.started()
+    const isEnded = job.ended
+    return {
+      value: JSON.stringify({
+        id: o.id, name: o.name, point: null, session: 'chat-1', host_session: 'local_x', pid: 1, heartbeat: true, script: 'render.py',
+        argv: 'render.py', started: at, updated: Date.now(), ended: isEnded ? Date.now() : null, state: isEnded ? 'done' : 'running', message: null,
+        steps: [{ name: 'Frames', state: isEnded ? 'done' : 'running', done: isEnded ? 14 : 4, total: 14, unit: null, weight: null, est_ms: null, started: at, ended: null }],
+      }),
+    }
+  })
+  const flashes = () =>
+    runs
+      .filter(argv => argv[0] === 'powershell.exe')
+      .map(argv => [...atob(argv[argv.indexOf('-EncodedCommand') + 1] ?? '')].filter((_, i) => i % 2 === 0).join(''))
+  return { job, flashes }
+}
+
+/** The render job the late-tick tests file: "Render A17–A30". */
+const renderJob = (on: On, id: string, started: () => number) => helperJob(on, { id, name: 'Render A17–A30', started }).job
+
+/** A real moment between a job's start and the tick: the tick comes after the start, as it does in the app. */
+const aMomentLater = () => {
+  const until = Date.now() + 3
+  while (Date.now() < until);
+}
+
+test('a job started a second before the list ticks over to its point moves there, and the point before reads done', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  let at = 0
+  const job = renderJob(on, 'j-late', () => at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: RENDER_LIST })
+  // Point 3's job starts while point 2 is still the running one, and the bar files it there…
+  at = Date.now()
+  job.written = true
+  await clock.advance(1100)
+  // …then the list ticks over to point 3 a moment later.
+  aMomentLater()
+  await $.tool.call({ tool: PLAN, advance: true })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Test render and check: done')
+  expect(drawn).toContain('Render A17–A30 and check: Render A17–A30 · 4 / 14')
+  await ui.press({ key: 'open-p:1' })
+  // Point 2 is full, not held near 95 % by a job that isn't its own.
+  expect(await drawnText(ui)).toContain('Test render and check 100%')
+  await ui.unmount()
+})
+
+test('a job started well before the list ticks over stays under the point it started in', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const job = renderJob(on, 'j-early', () => Date.now() - 30_000)
+  job.written = true
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: RENDER_LIST })
+  await clock.advance(1100)
+  // The list ticks over 30 s after the job started: it is point 2's own job, still running.
+  await $.tool.call({ tool: PLAN, advance: true })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Test render and check: Render A17–A30 · 4 / 14')
+  expect(drawn).not.toContain('Render A17–A30 and check: Render A17–A30')
+  await ui.unmount()
+})
+
+test('a helper job the bar first reads after the late tick joins the point it was started for', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  let at = 0
+  const job = renderJob(on, 'j-unseen', () => at)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: RENDER_LIST })
+  at = Date.now()
+  aMomentLater()
+  await $.tool.call({ tool: PLAN, advance: true })
+  // Only now does the bar read the job's file: it started while point 2 still ran, a moment before the tick.
+  job.written = true
+  await clock.advance(1100)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Test render and check: done')
+  expect(drawn).toContain('Render A17–A30 and check: Render A17–A30 · 4 / 14')
+  await ui.unmount()
+})
+
+test('a background command started just before the tick moves too, when its name fits the new point as well', async ($, on) => {
+  inProject(on)
+  backgroundBash(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: PLAN,
+    scope: 'first_task',
+    items: [
+      { content: 'Set up the scene', status: 'completed' },
+      { content: 'Test render and check', status: 'in_progress' },
+      { content: 'Render the rest and check', status: 'pending' },
+    ],
+  })
+  // "Render A17–A30" fits both points by one word, so at its start it goes to the running point 2…
+  await $.tool.call({ tool: 'Bash', command: 'python3 render.py --from A17 --to A30', description: 'Render A17–A30', run_in_background: true })
+  // …and the list ticks over to point 3 a moment later.
+  await $.tool.call({ tool: PLAN, advance: true })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Test render and check: done')
+  expect(drawn).toContain('Render the rest and check: Render A17–A30 · running')
+  await ui.unmount()
+})
+
+test('a job joins a point by a range or code written with any dash, and one shared word only joins a running point', async ($, on) => {
+  inProject(on)
+  backgroundBash(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // Started before any list, so they run as other work until a list names them.
+  await $.tool.call({ tool: 'Bash', command: 'python3 render.py', description: 'Render A17–A30', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'python3 export.py', description: 'Export r18', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'python3 bg.py', description: 'Render the backgrounds', run_in_background: true })
+  await $.tool.call({
+    tool: PLAN,
+    scope: 'first_task',
+    items: [
+      { content: 'Render and grade the sky', status: 'in_progress' },
+      { content: 'Test render A17-A30', status: 'pending' },
+      { content: 'Check frames r18', status: 'pending' },
+      { content: 'Render the intro', status: 'pending' },
+    ],
+  })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  // The en dash in the job and the hyphen in the point name are the same range.
+  expect(drawn).toContain('Test render A17-A30: Render A17–A30 · running')
+  // One shared code is enough.
+  expect(drawn).toContain('Check frames r18: Export r18 · running')
+  // "render" alone joins the running point, not the first waiting point with "render" in its name.
+  expect(drawn).toContain('Render and grade the sky: Render the backgrounds · running')
+  expect(drawn).toContain('Render the intro: not started')
+  await ui.unmount()
+})
+
+/** A helper job "Render the intro", already listed, that started `ranMs` ago, on a host with `env`. */
+const finishingJob = (on: On, env: Record<string, string>, ranMs: number) => {
+  const began = Date.now() - ranMs
+  const made = helperJob(on, { id: 'j-intro', name: 'Render the intro', started: () => began, env })
+  made.job.written = true
+  return made
+}
+
+test("a long job finishing on Windows flashes the Claude app's taskbar button, unless the app is in front", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { job, flashes } = finishingJob(on, { APPDATA: 'C:/Users/me/AppData/Roaming' }, 60_000)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the intro', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
+  await clock.advance(1100)
+  expect(flashes()).toEqual([])
+  job.ended = true
+  await clock.advance(1100)
+  const sent = flashes()
+  expect(sent.length).toBe(1)
+  // The script skips the flash while the app is in front, and flashes only the taskbar button until it comes forward.
+  expect(sent[0]).toContain('GetForegroundWindow')
+  expect(sent[0]).toContain('if ($apps.Id -contains $owner) { exit 0 }')
+  expect(sent[0]).toContain('$f.dwFlags = 14')
+})
+
+test('off Windows, or for a short job, nothing flashes', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  // A Mac or Linux host: no APPDATA.
+  const { job, flashes } = finishingJob(on, {}, 60_000)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the intro', status: 'in_progress' }] })
+  await clock.advance(1100)
+  job.ended = true
+  await clock.advance(1100)
+  expect(flashes()).toEqual([])
+})
+
+test('on Windows a job that took only seconds ends without a flash', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { job, flashes } = finishingJob(on, { APPDATA: 'C:/Users/me/AppData/Roaming' }, 5_000)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the intro', status: 'in_progress' }] })
+  await clock.advance(1100)
+  job.ended = true
+  await clock.advance(1100)
+  expect(flashes()).toEqual([])
 })

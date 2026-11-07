@@ -20,7 +20,10 @@ claude plugin install markroom --marketplace Zoke-Hub/claude-tools
 
 Or in a chat: `/plugin marketplace add Zoke-Hub/claude-tools` once, then `/plugin install <tool>@zoke` for each.
 
-Open a new chat afterwards. To update a tool: `claude plugin update <tool>@zoke`, then restart the app. Each
+Open a new chat afterwards. To update a tool: `claude plugin marketplace update zoke`, then
+`claude plugin update <tool>@zoke`, then restart the app. [CHANGES.md](CHANGES.md) lists what each update brings, by date.
+When an update keeps a tool's version number, `plugin update` keeps the copy you have: uninstall the tool and install it
+again (`claude plugin uninstall <tool>@zoke --keep-data`, then `claude plugin install <tool>@zoke`); its settings and data stay. Each
 tool's README says what it needs and where it keeps its data.
 
 ## Licence

@@ -1710,7 +1710,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
         if (old && old.src !== ch.doc.id && old.at && d.at && d.at < old.at) continue;   // two docs for one tab: the later one wins
         tabState.set(gid, { id: gid, label: d.label, hidden: !!d.hidden, at: d.at, by: d.by, src: ch.doc.id });
       }
-      afterTabsChange(!first || (!!fromHash && cur === fromHash));      // say so when a link led to a closed tab
+      afterTabsChange(!first || (!!fromAnchor && cur === fromAnchor));  // say so when a link led to a closed tab
     }, () => {});
     layoutCol.onSnapshot((snap) => {
       for (const ch of snap.docChanges()) {
@@ -1762,7 +1762,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     let seenLive = null; try { seenLive = localStorage.getItem(SEEN_LIVE_KEY); } catch (_) {}
     if (first) {
       // opening the board: land on the newest round (or the round in the link), unless the viewer has already started on something
-      const linked = fresh.find((im) => im.id === START_HASH);
+      const linked = anchored(START_HASH, fresh);
       if (linked && !busy()) showImage(linked);
       else if (seenLive !== top.id && (top.added || "") > ((NEWEST && NEWEST.added) || "") && !RO) {
         if (busy()) newRound(top); else { markSeenLive(top); showImage(top); }
@@ -2307,8 +2307,14 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     popText.readOnly = true; overallEl.readOnly = true; $("#popSave").textContent = "Close";
     $(".notes-head p").textContent = "A saved copy of this board's marks and notes. It is read-only: pan, zoom and click any number to read its note.";
   }
+  // A link sent to open one file names it as #open-<file id> (claude.ai passes an anchor of letters, digits and hyphens
+  // only); the page's own #<file id> keeps your place.
+  function linkedFile(hash) { const m = /^open-([a-z0-9-]+)$/.exec(hash || ""); return m ? m[1] : ""; }
+  // The file an anchor names (a link's or the page's own), among IMAGES or among rounds just arrived.
+  function anchored(hash, list) { const id = linkedFile(hash) || hash; return id ? (list || IMAGES).find((i) => i.id === id) : undefined; }
   const START_HASH = location.hash.slice(1);                  // a live round in the link arrives later, from the database
-  const fromHash = IMAGES.find((i) => i.id === START_HASH);
+  const isLink = !!linkedFile(START_HASH), fromAnchor = anchored(START_HASH);
+  const fromLink = isLink ? fromAnchor : undefined;
   measure();
   new ResizeObserver(() => {
     measure();
@@ -2316,12 +2322,19 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (!viewReady) { viewReady = true; initialView(); } else if (autoFit) { view.z = fitZ(); clampView(); } else clampView();
     schedule();
   }).observe(viewer);
-  // a new round since this viewer last opened the board opens on that round, whatever the link's anchor says (the anchor
-  // keeps your place on a plain reload, but a republish reloads the page with the old round's anchor)
+  // A link to one file opens that file, whatever else is new; a newer round it passes over still opens on the next plain
+  // visit. Otherwise a new round since this viewer last opened the board opens on that round, whatever the anchor says
+  // (the anchor keeps your place on a plain reload, but a republish reloads the page with the old round's anchor).
   let seen = null; try { seen = localStorage.getItem(SEEN_KEY); } catch (_) {}
   const fresh = !RO && !!NEWEST && seen !== NEWEST.id;
-  try { if (NEWEST && !RO) localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {}
-  showImage(fresh ? NEWEST : (fromHash || cur));
+  try { if (NEWEST && !RO && (!fromLink || fromLink === NEWEST)) localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {}
+  showImage(fromLink || (fresh ? NEWEST : (fromAnchor || cur)));
+  // a link followed while the board is already open can arrive as a new anchor, without a reload
+  addEventListener("hashchange", () => {
+    const im = anchored(location.hash.slice(1));
+    if (!im || im === cur) return;
+    if (busy()) toast("Save or close this note, then follow the link again."); else showImage(im);
+  });
   connect();
 })();
 </script>

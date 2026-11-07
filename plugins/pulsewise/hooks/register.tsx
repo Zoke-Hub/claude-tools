@@ -83,6 +83,8 @@ const TICK_MS = 3_000
 // The status line moves to the next running thing every this many ticks.
 const TICKS_PER_LINE = 1
 const TOAST_AFTER_MS = 30_000
+// At most one taskbar flash in this long, however much finishes at once.
+const ATTENTION_GAP_MS = 10_000
 const OTHER = 'Other work'
 
 // The mod's name and its author's credit: a small dim caption at the right end of the band's button row, nowhere else.
@@ -887,6 +889,7 @@ function mutate($: Api, fn: (m: Model, now: number) => boolean) {
     const now = Date.now()
     if (!fn(next, now)) return m
     settle(next, now)
+    if (m.finishedAt === null && next.finishedAt !== null && isLongFinish(next, now)) drawAttention($, now)
     return next
   })
 }
@@ -896,6 +899,42 @@ function settle(m: Model, now: number) {
   if (isBusy(m)) m.finishedAt = null
   else if (m.finishedAt === null && (m.points.length || m.tasks.length)) m.finishedAt = now
   m.log = m.log.slice(-60)
+}
+
+/** When the work began: the list's first point to start, or with no list, the first task. */
+const pulseStart = (m: Model, now: number) =>
+  m.points.length ? Math.min(...m.points.map(p => p.started ?? now)) : Math.min(...m.tasks.map(t => t.started))
+
+/** Whether everything just finished after a long stretch: something ended moments ago, and the work began over TOAST_AFTER_MS earlier. */
+function isLongFinish(m: Model, now: number): boolean {
+  const ends = [...m.points.map(p => p.ended), ...m.tasks.map(t => t.ended)].filter((at): at is number => at != null)
+  return ends.some(at => now - at < 5000) && now - pulseStart(m, now) > TOAST_AFTER_MS
+}
+
+/**
+ * Windows: flashes the Claude app's taskbar button until the app is brought to the front, unless it is in front
+ * already. A Mac has no way for another program to bounce the app's Dock icon: there the app's own "Draw attention on
+ * notifications" setting does it for the app's notifications.
+ */
+const FLASH_IF_BEHIND = [
+  `Add-Type -Namespace PulseWise -Name Win -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [StructLayout(LayoutKind.Sequential)] public struct FLASHWINFO { public uint cbSize; public IntPtr hwnd; public uint dwFlags; public uint uCount; public uint dwTimeout; } [DllImport("user32.dll")] public static extern bool FlashWindowEx(ref FLASHWINFO fi);'`,
+  '$apps = @(Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })',
+  'if (-not $apps.Count) { exit 0 }',
+  '$owner = [uint32]0',
+  '[void][PulseWise.Win]::GetWindowThreadProcessId([PulseWise.Win]::GetForegroundWindow(), [ref]$owner)',
+  'if ($apps.Id -contains $owner) { exit 0 }',
+  // 14: the taskbar button (2), flashing until the window comes to the front (12)
+  'foreach ($a in $apps) { $f = New-Object PulseWise.Win+FLASHWINFO; $f.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($f); $f.hwnd = $a.MainWindowHandle; $f.dwFlags = 14; [void][PulseWise.Win]::FlashWindowEx([ref]$f) }',
+].join('; ')
+// PowerShell's -EncodedCommand takes the script as UTF-16LE in base64, so no quoting can break it.
+const FLASH_ENCODED = btoa([...FLASH_IF_BEHIND].map(c => String.fromCharCode(c.charCodeAt(0) & 0xff, c.charCodeAt(0) >> 8)).join(''))
+let attentionAt = 0
+
+/** Asks for the person's eye when work finishes while the Claude app isn't in front (Windows; see FLASH_IF_BEHIND). */
+function drawAttention($: Api, now: number) {
+  if (!appData || now - attentionAt < ATTENTION_GAP_MS) return
+  attentionAt = now
+  void $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', FLASH_ENCODED], { timeoutMs: 20_000 }).catch(() => {})
 }
 
 function logLine(m: Model, entry: LogEntry) {
@@ -910,13 +949,20 @@ const runningPoint = (m: Model) => {
 // Words too common to tie a task to a point.
 const COMMON_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'into', 'this', 'that', 'then', 'its', 'all', 'out', 'agent', 'parallel'])
 
+/** A code mixes letters and digits ("a1", "v2", "r12"): specific enough to tie a job to a point on its own. */
+const isCode = (word: string) => /[a-z]/.test(word) && /\d/.test(word)
+
+/**
+ * A name's telling words. Dashes of every kind split a range, so "A1–A9" and "A1-A9" both give "a1" and "a9";
+ * a code is kept even at two characters ("a7").
+ */
 const nameWords = (text: string) =>
   new Set(
     text
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, ' ')
       .split(/\s+/)
-      .filter(word => word.length >= 3 && !COMMON_WORDS.has(word))
+      .filter(word => (word.length >= 3 || (word.length === 2 && isCode(word))) && !COMMON_WORDS.has(word))
       .map(word => (word.length > 3 && word.endsWith('s') ? word.slice(0, -1) : word)),
   )
 
@@ -930,19 +976,41 @@ const sharedWords = (a: string, b: string) => commonWords(nameWords(a), nameWord
 const isNamedLike = (mine: Set<string>, theirs: Set<string>) =>
   commonWords(mine, theirs).length >= Math.max(1, Math.min(2, mine.size, theirs.size))
 
+/** A task's telling words: an agent's name without its "Agent:" label. */
+const taskWords = (name: string) => nameWords(name.replace(/^Agent:\s*/, ''))
+
+/** A word that ties a job to a point on its own: six letters or more (as Claude's steps do), or a code. */
+const isTellingWord = (word: string) => word.length >= 6 || isCode(word)
+
 /**
- * The point a new background task belongs to: the unfinished point whose name it shares the most words with
- * (several points can run at once), else the point running now.
+ * How well a task's name fits a point's, 0 when it doesn't. Named like it: 1 + the share of the shorter name's words
+ * they have in common, so a close match always beats a one-word one. One telling word in common: that share alone.
+ */
+function nameFit(mine: Set<string>, theirs: Set<string>): number {
+  const shared = commonWords(mine, theirs)
+  const share = shared.length / Math.max(1, Math.min(mine.size, theirs.size))
+  if (isNamedLike(mine, theirs)) return 1 + share
+  return shared.some(isTellingWord) ? share : 0
+}
+
+/**
+ * The point a new background task belongs to: the unfinished point whose name fits it best (several points can run at
+ * once), else the point running now. A close match ranks as before (by its share, a running point winning a tie). One
+ * shared word ties a task only to a running point, or to any point through a code ("a1"), and a running point comes
+ * first: a job must not land on the first waiting point that happens to share one common word with it.
  */
 function matchingPoint(m: Model, name: string, fallback = true): number {
-  const mine = nameWords(name.replace(/^Agent:\s*/, ''))
+  const mine = taskWords(name)
   let best = -1
   let bestScore = 0
   m.points.forEach((p, i) => {
     if (p.state === 'done') return
     const theirs = nameWords(p.name)
-    const score = commonWords(mine, theirs).length / Math.max(1, Math.min(mine.size, theirs.size)) + (p.state === 'running' ? 0.01 : 0)
-    if (isNamedLike(mine, theirs) && score > bestScore) {
+    const fit = nameFit(mine, theirs)
+    const isRunning = p.state === 'running'
+    if (!fit || (fit <= 1 && !isRunning && !commonWords(mine, theirs).some(isCode))) return
+    const score = fit > 1 ? 100 + fit + (isRunning ? 0.01 : 0) : fit + (isRunning ? 10 : 0)
+    if (score > bestScore) {
       best = i
       bestScore = score
     }
@@ -952,7 +1020,7 @@ function matchingPoint(m: Model, name: string, fallback = true): number {
 
 /**
  * The unfinished points one of Claude's own steps belongs to, by its description: two telling words shared with the
- * point's name, or one long one (six letters or more). Several can match when one step does several points' work.
+ * point's name, or one that ties on its own (isTellingWord). Several can match when one step does several points' work.
  */
 function stepPoints(m: Model, text: string): number[] {
   const mine = nameWords(text)
@@ -961,7 +1029,7 @@ function stepPoints(m: Model, text: string): number[] {
   m.points.forEach((p, i) => {
     if (p.state === 'done') return
     const shared = commonWords(mine, nameWords(p.name))
-    if (shared.length >= 2 || shared.some(word => word.length >= 6)) found.push(i)
+    if (shared.length >= 2 || shared.some(isTellingWord)) found.push(i)
   })
   return found
 }
@@ -992,18 +1060,61 @@ function claudePoint(m: Model, now: number): number {
   return best >= 0 ? best : runningPoint(m)
 }
 
-/** The point a job belongs to: the one it names, else the one running when it started. */
-function pointFor(m: Model, name: string | null, at: number): number {
+/**
+ * Claude often starts a point's job a second or two before ticking the list over to that point: a job started at most
+ * this long before a point did was started for it (a late tick).
+ */
+const LATE_TICK_MS = 5000
+
+/** Whether a job's own point name (a helper job's `point`) names this point. */
+const namesPoint = (wanted: string, p: Point | undefined) =>
+  !!p && (p.name.toLowerCase().includes(wanted.toLowerCase()) || wanted.toLowerCase().includes(p.name.toLowerCase()))
+
+/**
+ * Whether a job started at `started` belongs to point `to`, ticked over to at `tick`, rather than to point `from`: started
+ * at most LATE_TICK_MS before the tick, and its name fits `to` at least as well as `from` (or fits neither).
+ */
+function isLateTicked(m: Model, name: string, started: number, from: number, to: number, tick: number | null): boolean {
+  const p = m.points[to]
+  if (!p || to === from || tick === null || started > tick || tick - started > LATE_TICK_MS) return false
+  const mine = taskWords(name)
+  const here = from >= 0 ? nameFit(mine, nameWords(m.points[from]?.name ?? '')) : 0
+  return nameFit(mine, nameWords(p.name)) >= here
+}
+
+/**
+ * The point a job belongs to: the one it names, else the one running when it started, or the point the list ticked over
+ * to just after that (a late tick).
+ */
+function pointFor(m: Model, name: string | null, at: number, job: string): number {
   if (name) {
-    const wanted = name.toLowerCase()
-    const found = m.points.findIndex(p => p.name.toLowerCase().includes(wanted) || wanted.includes(p.name.toLowerCase()))
+    const found = m.points.findIndex(p => namesPoint(name, p))
     if (found >= 0) return found
   }
+  let running = runningPoint(m)
   for (let i = m.points.length - 1; i >= 0; i -= 1) {
     const p = m.points[i]
-    if (p && p.started !== null && p.started <= at && (p.ended === null || p.ended >= at)) return i
+    if (p && p.started !== null && p.started <= at && (p.ended === null || p.ended >= at)) {
+      running = i
+      break
+    }
   }
-  return runningPoint(m)
+  // A point started after `at` was ticked over to then (one whose matched steps came earlier counts as running at `at`).
+  const late = m.points.findIndex((p, i) => isLateTicked(m, job, at, running, i, p.started))
+  return late >= 0 ? late : running
+}
+
+/**
+ * A late tick: the jobs started just before point `i` was ticked over to (at `now`) move to it, unless their name fits
+ * the point they are under better. Jobs an agent owns stay with it, a covered one goes with the job covering it, and a
+ * job that named its point stays there.
+ */
+function fileLateJobs(m: Model, i: number, now: number) {
+  for (const t of m.tasks) {
+    if (t.state !== 'running' || t.owner || t.coveredBy) continue
+    if (t.pointName && namesPoint(t.pointName, m.points[t.point])) continue
+    if (isLateTicked(m, t.name, t.started, t.point, i, now)) t.point = i
+  }
 }
 
 function endPoint(m: Model, i: number, now: number) {
@@ -1022,6 +1133,7 @@ function startPoint(m: Model, i: number, now: number) {
   p.state = 'running'
   p.started = Math.min(now, p.seenAt ?? now)
   p.ended = null
+  fileLateJobs(m, i, now)
 }
 
 /**
@@ -1138,7 +1250,10 @@ function endTask($: Api, m: Model, t: Task, ok: boolean, now: number, message?: 
     for (const job of m.tasks.filter(o => o.owner === t.id && o.state === 'running' && o.pid === null)) endTask($, m, job, ok, now, message)
   if (t.coveredBy || t.owner) return
   logLine(m, { text: `${t.name} · ${ok ? fmt(now - t.started) : (message ?? 'stopped')}`, ok, at: now })
-  if (now - t.started > TOAST_AFTER_MS) $.ui.toast(`${ok ? 'Finished' : 'Stopped'}: ${t.name} · ${fmt(now - t.started)}`)
+  if (now - t.started > TOAST_AFTER_MS) {
+    $.ui.toast(`${ok ? 'Finished' : 'Stopped'}: ${t.name} · ${fmt(now - t.started)}`)
+    drawAttention($, now)
+  }
 }
 
 /** Reads a background task's end from its notification text. */
@@ -1185,7 +1300,7 @@ function jobToTask(m: Model, d: JobFile, existing: Task | undefined): Task {
     id: d.id,
     kind: 'job',
     name: d.name,
-    point: existing?.point ?? pointFor(m, d.point, d.started),
+    point: existing?.point ?? pointFor(m, d.point, d.started, d.name),
     pointName: d.point,
     started: d.started,
     ended: d.ended,
@@ -1209,7 +1324,7 @@ function linkToAgent(m: Model, job: Task) {
   const mine = nameWords(job.name)
   for (const agent of m.tasks) {
     if (agent.kind !== 'agent' || agent.state !== 'running') continue
-    const isNamed = isNamedLike(mine, nameWords(agent.name.replace(/^Agent:\s*/, '')))
+    const isNamed = isNamedLike(mine, taskWords(agent.name))
     const isStartedByIt = (agent.commands ?? []).some(command => command.includes(job.name) || (!!job.script && job.script !== 'progress.py' && command.includes(job.script)))
     if (!isNamed && !isStartedByIt) continue
     job.owner = agent.id
@@ -2033,9 +2148,7 @@ export const register: Register = (on, options) => {
       // The terminal's status line: what runs now, one thing at a time; how long it all took once done.
       const items = lineItems(m, now, e.props.isWorking, allLanes.length > 0)
       const finished = !isBusy(m)
-      const totalMs = m.points.length
-        ? Math.max(...m.points.map(p => p.ended ?? ownNow(m, now))) - Math.min(...m.points.map(p => p.started ?? now))
-        : Math.max(...m.tasks.map(t => t.ended ?? now)) - Math.min(...m.tasks.map(t => t.started))
+      const totalMs = (m.points.length ? Math.max(...m.points.map(p => p.ended ?? ownNow(m, now))) : Math.max(...m.tasks.map(t => t.ended ?? now))) - pulseStart(m, now)
       const quiet = hasList ? 'Claude stopped here and is waiting for your reply' : ''
       const shownItem = finished ? undefined : items[Math.floor(tickNow / TICKS_PER_LINE) % Math.max(1, items.length)]
       const line = finished ? `${isStoppedByPerson(m) ? 'Stopped' : 'Done'} · ${fmt(totalMs)}` : (shownItem?.text ?? quiet)

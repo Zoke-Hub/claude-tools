@@ -58,20 +58,27 @@ export function contextParts(v: PickerView): Array<BarPart | BarMark> {
   const ceiling = settings.ceiling
   // How much of [from, to) falls in [lo, hi).
   const within = (from: number, to: number, lo: number, hi: number) => Math.max(0, Math.min(to, hi) - Math.max(from, lo))
+  // A work span's figure: its piece before the fold-back mark gives how much of that kind sits below the fold-back
+  // line; its piece after the mark gives how much sits above the line in all, past the ceiling included, so the two
+  // add up to the span's whole size.
+  const backLine = `the fold-back line (${shortTokens(target)})`
+  const below = (n: number) => `${shortTokens(Math.round(n))} below ${backLine}`
+  const above = (from: number, to: number) => `${shortTokens(Math.round(within(from, to, target, Infinity)))} above ${backLine}`
+  const amount = (from: number, to: number, n: number, region: 0 | 1) => (region === 0 ? below(n) : above(from, to))
+  const roomLeft = `${shortTokens(Math.max(0, ceiling - work))} left before the fold at ${shortTokens(ceiling)}`
   const spans: Array<{ key: string; from: number; to: number; color: string; tip: (n: number, region: 0 | 1) => string }> = [
-    { key: 'work', from: 0, to: plain, color: FULL, tip: (n: number) => `Work, word for word · ${shortTokens(Math.round(n))} · counts toward the fold` },
-    { key: 'trim', from: plain, to: plain + trimmed, color: TRIMMED, tip: (n: number) => `Old tool output, trimmed · ${shortTokens(Math.round(n))} · counts toward the fold` },
-    { key: 'fine', from: plain + trimmed, to: work, color: FINE, tip: (n: number) => `Fine to fold · ${shortTokens(Math.round(n))} · goes with the next fold` },
-    // The room is named for the line it runs to: the fold-back line, then the ceiling.
+    { key: 'work', from: 0, to: plain, color: FULL, tip: (n, region) => `Work, word for word · ${amount(0, plain, n, region)} · counts toward the fold` },
+    { key: 'trim', from: plain, to: plain + trimmed, color: TRIMMED, tip: (n, region) => `Old tool output, trimmed · ${amount(plain, plain + trimmed, n, region)} · counts toward the fold` },
+    { key: 'fine', from: plain + trimmed, to: work, color: FINE, tip: (n, region) => `Fine to fold · ${amount(plain + trimmed, work, n, region)} · goes with the next fold` },
+    // The room, from the end of the work to the fold: both of its pieces lead with the whole room left (the ceiling
+    // minus the work); the piece before the fold-back mark adds how much of it lies before the fold-back line.
     {
       key: 'room',
       from: work,
       to: Math.max(work, ceiling),
       color: ROOM,
-      tip: (n: number, region: 0 | 1) =>
-        region === 0
-          ? `Room · ${shortTokens(Math.round(n))} to the fold-back line (${shortTokens(target)}) · ${shortTokens(Math.max(0, ceiling - work))} before the fold at ${shortTokens(ceiling)}`
-          : `Room · ${shortTokens(Math.round(n))} more to the fold at ${shortTokens(ceiling)}`,
+      tip: (n, region) =>
+        region === 0 ? `Room · ${roomLeft} · ${shortTokens(Math.round(n))} of it before ${backLine}` : `Room · ${roomLeft}`,
     },
   ]
   // Each span's piece before the fold-back mark, between the marks, and (for
