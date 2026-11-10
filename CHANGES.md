@@ -3,6 +3,17 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-09 · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom:** a board you come back to opens where you left it. The Claude app reloads a board when you return to its
+  chat, and that reload used to land on the first file baked into the page; now each viewer's browser keeps the file
+  they were on, its zoom and spot, and a video's moment (paused), live rounds included. A round that arrived meanwhile
+  opens instead, keeping your place when it is a newer version of the same tab, with **Back** in the corner notice.
+- **MarkRoom:** switching versions of a video keeps the playhead whenever the two renders have the same length and frame
+  rate; a change in the beat labels no longer sends the other version back to the start.
+- **MarkRoom:** a `#open-<file id>` link opens its file the first time it is followed in a browser, even over a newer
+  live round; the same link brought back by a later reload counts as a plain visit.
+
 ## 2026-11-07, later · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom:** dragging the playhead on a video's timeline shows the frames as it goes (one seek at a time, always to

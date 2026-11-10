@@ -111,8 +111,16 @@ beside the tabs opens an older one (each option shows its open-note count). Note
 Switching versions keeps your place, so the same part can be compared round to round: the other round opens at the same
 zoom and on the same spot (mapped by proportion when the two are different sizes; an untouched, fitted view stays fitted).
 A video also keeps the same moment, playing or paused, when the two renders are timed the same: the same length within a
-frame, the same fps, and the same beats where both have them. If the timing differs (something was cut or added), the
-other round starts from the beginning and a short notice says why.
+frame and the same fps. Beats don't count (rounds rename and re-time their beats as the work changes, at the same
+length). If the length or fps differs (something was cut or added), the other round starts from the beginning and a
+short notice says why.
+
+**Your place is kept in your browser.** The Claude app reloads the board whenever you come back to its chat, and that
+reload keeps neither the page's own `#<id>` anchor nor your zoom, so each viewer's browser (local storage) remembers the
+file they were on and, for each file, its zoom, its spot and a video's moment. A reload or a return to the chat opens
+where you left off (a video paused at that moment), on a live round too, once the rounds arrive. If a newer round came
+in meanwhile, it opens instead, as when it arrives while the board is open: from an older version of the same tab it
+keeps your place, and the corner notice offers **Back**.
 
 **The newest render is always selected.** Opening the board lands on the newest round: its tab, with "· latest" in the
 Version dropdown, scrolled into view in the tab row. A round added while the board is open (a live round, §5) opens by
@@ -120,14 +128,17 @@ itself on every open view, from whichever tab is showing (an older version of th
 switching versions), and a notice in the corner says "Now showing the new round: …" with **Back** (to what was on screen
 before) and **Dismiss**. Only a note being made or edited, or a field being typed in, holds it back: the notice then says
 "New round: … It opens when you finish this note", with **Open now** and **Not now**; the note stays exactly as it is,
-and the round opens by itself once the note is saved or closed. On opening, a newer round than you last saw beats the `#<id>` anchor, which the
-page keeps in the link to remember your place. A plain reload with no new round keeps your place. A link sent to open one
-file (`#open-<id>`) always opens that file, even over a newer round, which then opens on the next plain visit; followed
-while the board is already open, it switches to that file (or, while a note is being typed, says to finish the note first). The newest render is
+and the round opens by itself once the note is saved or closed. On opening, a newer round than you last saw beats the
+`#<id>` anchor and the kept place. A plain reload with no new round keeps your place. A link sent to open one file
+(`#open-<id>`) opens that file the first time this browser follows it, even over a newer round, which then opens on the
+next plain visit; the app brings the same link back whenever it reloads the board, and from then on that counts as a
+plain visit (your kept place). Followed while the board is already open, a link switches to that file (or, while a note
+is being typed, says to finish the note first). The newest render is
 the last one added (`newest` in the page config, from each image's `added` time in `board.json`, or the newest doc in
 the `rounds` collection). If its tab had been closed before it was added, the tab opens again for everyone;
 a tab the reviewer closes after that stays closed. The page remembers per browser (local storage) which newest render
-it last opened; where storage is blocked, the board always opens on the newest render.
+it last showed, the place above and the last link followed; where storage is blocked, the board always opens on the
+newest render.
 
 **Closing tabs.** Each tab has a small × at its right edge. Clicking it asks inside the page ("Close “Intro Preview”? … Its notes stay
 saved") and, on **Close tab**, hides that tab, with every version in its dropdown, for everyone on the board. Nothing is deleted:

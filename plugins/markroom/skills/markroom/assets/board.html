@@ -660,15 +660,17 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     stage.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.z})`;
     renderMarks(); positionUI(); updateMiniView();
     $("#zoomval").textContent = Math.round(view.z * 100) + "%";
+    savePlaceSoon();                                           // zooms, pans and the playhead, kept for the next visit
   }
 
   // ---------- image switching ----------
-  // keepView: a carry object (from switchVersion) takes the previous round's place with it; otherwise a file seen before
-  // returns to the view it was left at
+  // keepView: a carry object (from switchVersion, or a kept place) takes that place with it; otherwise a file seen before
+  // returns to the view it was left at (in this visit, or kept from an earlier one)
   function showImage(im, keepView) {
     if (!im) return;
     const carry = keepView && typeof keepView === "object" ? keepView : null;
-    if (cur && started) views.set(cur.id, { z: view.z, tx: view.tx, ty: view.ty });
+    if (cur && started) { views.set(cur.id, { z: view.z, tx: view.tx, ty: view.ty }); notePlace(); }
+    if (started) placeWait = "";                               // moved on: a kept live round no longer opens by itself
     started = true;
     finish(); draft = null;
     cur = im; W = im.w; H = im.h;
@@ -698,26 +700,31 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     viewer.setAttribute("aria-label", (v ? "Video" : "Image") + " under review. Scroll to move, pinch or ⌘/Ctrl + scroll to zoom.");
     const mini = $("#mini"); mini.hidden = v || !wide(); mini.style.aspectRatio = W + " / " + H;
     measure();
-    const sv = views.get(im.id);
+    const sv = views.get(im.id), kept = !carry && !sv && place.files[im.id] ? place.files[im.id].view : null;
     viewReady = vw > 0 && vh > 0;                              // no size yet: the resize observer sets the first view
+    pendingView = viewReady ? null : (carry ? carry.view : kept) || null;
     if (viewReady) {
       if (carry && carry.view) applyRelView(carry.view);
       else if (carry) initialView();
-      else if (sv) { Object.assign(view, sv); clampView(); } else initialView();
+      else if (sv) { Object.assign(view, sv); clampView(); } else if (kept) applyRelView(kept); else initialView();
     }
     if (carry && carry.mismatch) toast(carry.mismatch);
     overallEl.value = overall.get(im.id) || ""; renderOverallMeta();
     for (const t of document.querySelectorAll(".imgtab")) t.setAttribute("aria-current", String(t.dataset.group === groupOf(im)));
     if (location.hash.slice(1) !== im.id && IMAGES.length > 1) { try { history.replaceState(null, "", "#" + im.id); } catch (_) {} }
     renderAll();
+    writePlace();
+    // the newest render, or a live round newer than it, is on screen: the next visit needn't bring the viewer to it
+    if (NEWEST && !RO && (im === NEWEST || (im.added || "") > (NEWEST.added || ""))) try { localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {}
   }
   img.addEventListener("load", () => { if (!VID()) $("#loading").hidden = true; });
   vid.addEventListener("loadeddata", () => { if (VID()) { $("#loading").hidden = true; tickVideo(); } });
   // ---------- switching versions keeps your place ----------
   // Another round of the same tab opens at the same zoom and the same spot on the frame (mapped by proportion when the
-  // sizes differ), and a video at the same moment when the two renders' timing matches: the same length (within a frame),
-  // the same fps, and the same beats where both have them. Otherwise the video starts from the beginning and says why.
-  let pendingSeek = null;
+  // sizes differ), and a video at the same moment when the two renders' timing matches: the same length (within a frame)
+  // and the same fps. Beats don't count: rounds rename and re-time their beats as the work changes, at the same length.
+  // Otherwise the video starts from the beginning and says why.
+  let pendingSeek = null, pendingView = null;     // pendingView: a kept view waiting for the viewer's first size
   function relView() { return { nx: (vw / 2 - view.tx) / view.z / W, ny: (vh / 2 - view.ty) / view.z / H, zr: view.z / fitZ() }; }
   function applyRelView(r) {
     autoFit = false;
@@ -729,16 +736,16 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const fa = fpsOf(a), fb = fpsOf(b), tol = 1 / Math.max(fa, fb) + 1e-3;
     if (Math.abs(fa - fb) > 0.01) return fa + " fps vs " + fb + " fps";
     if (Math.abs((a.dur || 0) - (b.dur || 0)) > tol) return (a.dur || 0).toFixed(2) + " s vs " + (b.dur || 0).toFixed(2) + " s";
-    const ba = a.beats || [], bb = b.beats || [];
-    if (ba.length && bb.length && (ba.length !== bb.length || ba.some((x, i) => Math.abs(x.a - bb[i].a) > tol || Math.abs(x.b - bb[i].b) > tol))) return "the sections are timed differently";
     return "";
   }
+  // where the playhead is on screen: a seek still waiting for the video to load, a drag still landing, or the frame shown
+  const placeT = () => (pendingSeek ? pendingSeek.t : shownT());
   function switchVersion(im) {
     if (!im || !cur || im === cur) return;
-    const carry = { view: autoFit ? null : relView(), t: null, play: false };
+    const carry = { view: !viewReady ? pendingView : autoFit ? null : relView(), t: null, play: false };
     if (isVid(cur) && isVid(im)) {
       const why = timingDiff(cur, im);
-      if (!why) { carry.t = vid.currentTime || 0; carry.play = !vid.paused && !vid.ended; }
+      if (!why) { carry.t = placeT(); carry.play = pendingSeek ? pendingSeek.play : !vid.paused && !vid.ended; }
       else carry.mismatch = cur.label + " and " + im.label + " are timed differently (" + why + "), so " + im.label + " starts from the beginning.";
     }
     showImage(im, carry);
@@ -751,6 +758,33 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     tickVideo();
   }
   vid.addEventListener("loadedmetadata", () => { if (pendingSeek && VID()) applySeek(); });
+  // ---------- your place, kept in this browser ----------
+  // The Claude app reloads the board when you come back to its chat, and that reload doesn't keep the page's #<file id>
+  // anchor (it may bring back an old #open-<id> link instead). So each viewer's browser remembers the file they were on and,
+  // for each file, its zoom and spot and a video's moment: a reload or a return to the chat opens where they left off.
+  const PLACE_KEY = LOCAL_KEY + ":place";
+  const place = (() => { try { const p = JSON.parse(localStorage.getItem(PLACE_KEY) || "null"); if (p && typeof p === "object") return p; } catch (_) {} return {}; })();
+  if (!place.files || typeof place.files !== "object") place.files = {};
+  let placeTimer = 0;
+  let placeWait = "";                                        // the kept file is a live round: it opens when the rounds arrive
+  function notePlace() {                                     // the file on screen, and how it is shown, into `place`
+    if (!cur || !started || RO) return;
+    const was = place.files[cur.id] || {}, f = { view: viewReady && vw && vh ? (autoFit ? null : relView()) : was.view || null };
+    if (VID()) f.t = placeT();
+    delete place.files[cur.id]; place.files[cur.id] = f;      // the newest last; the oldest go past 40 files
+    const ids = Object.keys(place.files); for (const id of ids.slice(0, Math.max(0, ids.length - 40))) delete place.files[id];
+    place.id = placeWait || cur.id;
+  }
+  function writePlace() {
+    clearTimeout(placeTimer); placeTimer = 0;
+    notePlace(); if (RO || !place.id) return;
+    try { localStorage.setItem(PLACE_KEY, JSON.stringify({ id: place.id, files: place.files })); } catch (_) {}
+  }
+  const savePlaceSoon = () => { if (!placeTimer && !RO) placeTimer = setTimeout(writePlace, 500); };
+  addEventListener("pagehide", writePlace);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") writePlace(); });
+  // a file's kept place, to open it with (showImage's carry): its view and, for a video, its moment, paused
+  function keptPlace(im) { const f = im && place.files[im.id]; return f ? { view: f.view || null, t: isVid(im) && f.t != null ? f.t : null, play: false } : undefined; }
   vid.addEventListener("error", () => { if (VID()) { $("#loading").hidden = false; $("#loading").textContent = "This video did not load. Reload the page to try again."; } });
   img.addEventListener("error", () => { $("#loading").hidden = false; $("#loading").textContent = "This image did not load. Reload the page to try again."; });
   // tabs: one per group. Rounds of the same thing (build_board --group) share a tab; the tab opens the latest round and
@@ -1772,11 +1806,21 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const top = fresh.reduce((a, b) => ((b.added || "") >= (a.added || "") ? b : a));
     let seenLive = null; try { seenLive = localStorage.getItem(SEEN_LIVE_KEY); } catch (_) {}
     if (first) {
-      // opening the board: land on the newest round (or the round in the link), unless the viewer has already started on something
-      const linked = anchored(START_HASH, fresh);
+      // opening the board: land on the newest round (or the round in a new link, or the live round the viewer was on, as they
+      // left it), unless the viewer has already started on something
+      const linked = newLink ? anchored(START_HASH, fresh) : undefined;
+      const back = placeWait && !busy() ? fresh.find((im) => im.id === placeWait) : undefined;
+      placeWait = "";
       if (linked && !busy()) showImage(linked);
-      else if (seenLive !== top.id && (top.added || "") > ((NEWEST && NEWEST.added) || "") && !RO) {
-        if (busy()) newRound(top); else { markSeenLive(top); showImage(top); }
+      else if (!fromLink) {                                    // a new link to a file in the page holds, over newer rounds too
+        if (back) showImage(back, keptPlace(back));
+        const from = back || (cur === keptStart ? keptStart : undefined);    // the place the viewer came back to
+        if (seenLive !== top.id && (top.added || "") > ((NEWEST && NEWEST.added) || "") && !RO) {
+          if (busy()) newRound(top);
+          else if (from === top) markSeenLive(top);
+          else if (from) landOn(top);                          // with the notice and Back, as when it arrives while open
+          else { markSeenLive(top); showImage(top); }
+        }
       }
     } else newRound(top);
     renderAll();
@@ -2334,25 +2378,39 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // The file an anchor names (a link's or the page's own), among IMAGES or among rounds just arrived.
   function anchored(hash, list) { const id = linkedFile(hash) || hash; return id ? (list || IMAGES).find((i) => i.id === id) : undefined; }
   const START_HASH = location.hash.slice(1);                  // a live round in the link arrives later, from the database
-  const isLink = !!linkedFile(START_HASH), fromAnchor = anchored(START_HASH);
-  const fromLink = isLink ? fromAnchor : undefined;
+  // A link opens its file once in each browser: the Claude app brings the same #open-<id> back whenever it reloads the board
+  // (coming back to the chat), and that reload is a plain visit, which goes back to where the viewer left off.
+  const LINK_KEY = LOCAL_KEY + ":link";
+  let lastLink = null; try { lastLink = localStorage.getItem(LINK_KEY); } catch (_) {}
+  const isLink = !!linkedFile(START_HASH), newLink = isLink && (RO || START_HASH !== lastLink), fromAnchor = anchored(START_HASH);
+  const fromLink = newLink ? fromAnchor : undefined, ownAnchor = isLink ? undefined : fromAnchor;
+  const noteLink = (h) => { if (linkedFile(h) && !RO) try { localStorage.setItem(LINK_KEY, h); } catch (_) {} };
+  if (newLink) noteLink(START_HASH);
   measure();
   new ResizeObserver(() => {
     measure();
     if (!vw || !vh) return;
-    if (!viewReady) { viewReady = true; initialView(); } else if (autoFit) { view.z = fitZ(); clampView(); } else clampView();
+    if (!viewReady) { viewReady = true; if (pendingView) applyRelView(pendingView); else initialView(); pendingView = null; } else if (autoFit) { view.z = fitZ(); clampView(); } else clampView();
     schedule();
   }).observe(viewer);
-  // A link to one file opens that file, whatever else is new; a newer round it passes over still opens on the next plain
+  // A new link to one file opens that file, whatever else is new; a newer round it passes over still opens on the next plain
   // visit. Otherwise a new round since this viewer last opened the board opens on that round, whatever the anchor says
-  // (the anchor keeps your place on a plain reload, but a republish reloads the page with the old round's anchor).
+  // (a republish reloads the page with the old round's anchor), with the notice and Back to where they were. Otherwise the
+  // page's own anchor (a plain reload in a browser), else the place this browser kept, opens as it was left: the same
+  // zoom and spot, a video at the same moment, paused. A kept live round opens when the rounds arrive (onRounds).
   let seen = null; try { seen = localStorage.getItem(SEEN_KEY); } catch (_) {}
   const fresh = !RO && !!NEWEST && seen !== NEWEST.id;
   try { if (NEWEST && !RO && (!fromLink || fromLink === NEWEST)) localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {}
-  showImage(fromLink || (fresh ? NEWEST : (fromAnchor || cur)));
+  const keptFile = !RO && place.id ? IMAGES.find((i) => i.id === place.id) : undefined;
+  if (!RO && place.id && !keptFile && !fromLink && !fresh && !ownAnchor) placeWait = place.id;
+  const startAt = fromLink || (fresh ? NEWEST : (ownAnchor || keptFile || cur));
+  const keptStart = fromLink ? undefined : fresh ? keptFile : startAt === keptFile || startAt === ownAnchor ? startAt : undefined;
+  showImage(fresh && keptStart ? keptStart : startAt, fromLink ? undefined : keptPlace(fresh && keptStart ? keptStart : startAt));
+  if (fresh && keptStart && keptStart !== NEWEST) landOn(NEWEST);
   // a link followed while the board is already open can arrive as a new anchor, without a reload
   addEventListener("hashchange", () => {
     const im = anchored(location.hash.slice(1));
+    noteLink(location.hash.slice(1));
     if (!im || im === cur) return;
     if (busy()) toast("Save or close this note, then follow the link again."); else showImage(im);
   });
