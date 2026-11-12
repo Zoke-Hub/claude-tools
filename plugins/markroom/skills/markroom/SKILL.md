@@ -104,10 +104,13 @@ the turn, and in a short message too. Never open the board for the user: the lin
   same text instead and says why, for the reviewer to paste into their Claude chat. The comment holds 4 KB: a very long list
   ends with "…and N more lines: read them from the board's database".
 
-**Several images, and rounds.** A board can hold several images and videos and shows them as tabs. Shift + ←/→ switches
-between tabs (on an image tab), and a link ending in `#open-<id>` (the links Claude sends) opens one file directly. Numbers run across the whole board, so "#7" is unambiguous.
+**Several images, and rounds.** A board can hold several images and videos and shows them as tabs. Alt/Option + ←/→
+opens the tab to the left or right, on any tab (Shift + ←/→ does too on an image tab), and a link ending in
+`#open-<id>` (the links Claude sends) opens one file directly. Drag a tab, or press Alt/Option + Shift + ←/→, to move the
+open tab along the row. Numbers run across the whole board, so "#7" is unambiguous.
 Rounds of the same thing (built with `--group`) share **one tab**: the tab opens the latest round, and a **Version** dropdown
-beside the tabs opens an older one (each option shows its open-note count). Notes stay on the round they were written on.
+beside the tabs opens an older one (each option shows its open-note count); Alt/Option + ↑/↓ steps to the newer or older
+version. Notes stay on the round they were written on. None of these keys act while a note or field is being typed in.
 Switching versions keeps your place, so the same part can be compared round to round: the other round opens at the same
 zoom and on the same spot (mapped by proportion when the two are different sizes; an untouched, fitted view stays fitted).
 A video also keeps the same moment, playing or paused, when the two renders are timed the same: the same length within a
@@ -342,7 +345,7 @@ Database collections (the page subscribes to all five):
 { id: "<group name, or image id for an ungrouped tab>", label, hidden: true | false, at: ISO, by: "<user id>" | "claude" }
 ```
 ```js
-// layout/tabs: the tab order, set by dragging a tab along the row (or Alt + ← / →, which moves the open tab); the same for everyone
+// layout/tabs: the tab order, set by dragging a tab along the row (or Alt + Shift + ← / →, which moves the open tab); the same for everyone
 { order: ["<group or image id>", ...], at: ISO, by: "<user id>" }
 ```
 - Tabs the `order` list doesn't name (a round added later, say) follow in the board's own order. No doc: the board's order.

@@ -3,6 +3,14 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-12 · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom:** the tool bar's two thin dividers sit centred between their groups (about 12 px of clear space on each
+  side), and the second one, between the colours and Undo, is drawn at all (it was hidden by another style).
+- **MarkRoom:** new keys. Alt/Option + ← / → opens the tab to the left or right, and Alt/Option + ↑ / ↓ the newer or
+  older version of the open tab (keeping your place, as the Version list does). Moving a tab along the row is now
+  Alt/Option + Shift + ← / →, or a drag. None of them act while typing in a note.
+
 ## 2026-11-09 · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom:** a board you come back to opens where you left it. The Claude app reloads a board when you return to its
