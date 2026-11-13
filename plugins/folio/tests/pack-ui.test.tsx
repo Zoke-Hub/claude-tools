@@ -188,3 +188,53 @@ test('an emptied Name packs under the project folder\'s name', async ($, on) => 
   expect(await ui.find({ type: 'Text', text: /FolioPack - Project - / })).toBeFalsy()
   await ui.unmount()
 })
+
+test('a packing prompt sent together with another one still finishes the pack', async ($, on) => {
+  let isZipped = false
+  stubEngine(on, { tree, exists: path => path === HOME || (isZipped && path.endsWith('.zip')) })
+  const asks: string[] = []
+  on('prompt.submit', (_, e) => {
+    asks.push(e.text)
+    return { text: e.text }
+  })
+  await start($)
+  const ui = await panel($)
+  await ui.press({ key: 'folio-pack' })
+  await ui.press({ key: 'pack-up' })
+  // The app sends prompts queued while Claude replied as one.
+  await $.turn.start({ text: `and check the colours\n\n${asks[0]!}`, turnId: 'both' })
+  isZipped = true
+  await $.turn.complete({ reason: 'answer', answer: 'zipped', durationMs: 1000, isAborted: false, turnId: 'both' })
+  expect(await ui.find({ type: 'Button', text: 'Packed ✓' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test("a packing prompt that never runs lets Pack up come back by itself", async ($, on) => {
+  const { clock, toasts } = stubEngine(on, { tree, exists: path => path === HOME })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  await start($)
+  const ui = await panel($)
+  await ui.press({ key: 'folio-pack' })
+  await ui.press({ key: 'pack-up' })
+  expect(await ui.find({ type: 'Button', text: 'Packing…' })).toBeTruthy()
+  // The prompt was dropped (Esc): no turn runs it.
+  await clock.advance(5 * 60_000)
+  expect(await ui.find({ type: 'Button', text: 'Pack up' })).toBeTruthy()
+  expect(toasts).toContain("Claude didn't get to zipping the FolioPack. Press Pack up to try again.")
+  await ui.unmount()
+})
+
+test('two presses of Pack up before the panel redraws make one pack', async ($, on) => {
+  let packs = 0
+  stubEngine(on, { tree, exists: path => path === HOME })
+  on('prompt.submit', (_, e) => {
+    packs++
+    return { text: e.text }
+  })
+  await start($)
+  const ui = await panel($)
+  await ui.press({ key: 'folio-pack' })
+  await Promise.all([ui.press({ key: 'pack-up' }), ui.press({ key: 'pack-up' })])
+  expect(packs).toBe(1)
+  await ui.unmount()
+})

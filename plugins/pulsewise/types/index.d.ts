@@ -7,7 +7,10 @@ export type Point = {
   state: 'pending' | 'running' | 'done'
   started: number | null
   ended: number | null
-  /** When Claude's own steps first matched this point while the list still had it waiting (the list lagging behind). */
+  /**
+   * When one of Claude's own steps first matched this point closely (two words in common) while the list still had it
+   * waiting (the list lagging behind); cleared when the turn ends with the point still waiting.
+   */
   seenAt?: number | null
   /** When Claude's steps last matched this point: the status line puts Claude's current step here. */
   activeAt?: number | null
@@ -27,6 +30,20 @@ export type TaskStep = {
   unit?: string | null
 }
 
+/**
+ * Where a piece of background work stands:
+ *   running        working, and counted: the bar is busy while it runs
+ *   silent         a helper job not heard from (past its ttl, or its process could not be checked): not counted, not
+ *                  ended; it runs again the moment its file reports
+ *   betweenTurns   an agent the app lists as idle (or by a word PulseWise does not know): not counted, not ended; it
+ *                  runs again when the app says so or it acts
+ *   done, failed   ended, once (`ended` is set only here); only an agent that acts again, or a job the bar ended
+ *                  itself whose own file reports after that, comes back from them
+ * Beside the state, `coveredBy` marks a background command whose helper job reports it (covered: not counted itself,
+ * its job is) or a stopped job a redo replaced (superseded: ended, hidden).
+ */
+export type TaskState = 'running' | 'silent' | 'betweenTurns' | 'done' | 'failed'
+
 /** One piece of background work: a background command, an agent, or a helper job. */
 export type Task = {
   id: string
@@ -37,8 +54,17 @@ export type Task = {
   /** Explicit point name a helper job asked for. */
   pointName: string | null
   started: number
+  /** When it ended: set only once it is done or failed. */
   ended: number | null
-  state: 'running' | 'done' | 'failed'
+  state: TaskState
+  /** When it went silent or between turns (its time stands still from then). */
+  pausedAt?: number | null
+  /** The agent whose end closed or quieted this task of its own: it reopens if that agent acts again. */
+  heldBy?: string | null
+  /** Its end was told with a toast and the taskbar flash: an end after a revival is not told again. */
+  announced?: boolean
+  /** A job whose own file said it ended (not the bar, on its process looking gone or a stop): that end stands. */
+  endedByFile?: boolean
   steps: TaskStep[]
   actions: number
   command: string | null
@@ -61,7 +87,18 @@ export type Task = {
 
 export type Activity = { label: string; started: number; toolUseId: string; isWaiting?: boolean }
 
-export type LogEntry = { text: string; ok: boolean; at: number }
+/** A line of "Done so far"; `id` is the task's, so a task that ends again replaces its line instead of adding one. */
+export type LogEntry = { text: string; ok: boolean; at: number; id?: string }
+
+/**
+ * Where this chat's own turn stands:
+ *   idle             no turn seen yet
+ *   working          Claude's turn is running
+ *   awaitingReply    its turn ended with points still open: Claude's own part stands still until the next turn
+ *   stoppedByPerson  the person pressed Stop with points still open: the same, and the list is not counted as busy
+ *   finished         its turn ended with nothing left open
+ */
+export type ChatPhase = 'idle' | 'working' | 'awaitingReply' | 'stoppedByPerson' | 'finished'
 
 /** Another chat in the same project, as that chat published its progress: shown behind "Other chats". */
 export type SideChat = {
@@ -97,8 +134,18 @@ export type Model = {
   side: SideChat[]
   /** When the last point or task finished, once nothing is left running. */
   finishedAt: number | null
-  /** When the person pressed Stop on Claude's turn: Claude's own part of the open points stands still from then. */
-  stoppedAt?: number | null
+  /** Where this chat's own turn stands; kept here, so a hot reload of the code mid-turn keeps it. */
+  phase: ChatPhase
+  /** When the phase began: Claude's own part of the open points stands still from then while it waits or is stopped. */
+  phaseAt: number | null
+  /** The main loop's turns, counted, and the turn that last wrote or updated the task list. */
+  turn: number
+  listTurn: number
+  /**
+   * Helper jobs this bar ended or took off, by id, with their file's `updated` then: a re-read of a file (after a
+   * reload) never brings one back unless the file reports again since.
+   */
+  closedJobs: Record<string, number>
 }
 
 declare module 'claude-code' {

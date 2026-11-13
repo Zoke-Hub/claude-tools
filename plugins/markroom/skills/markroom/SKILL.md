@@ -42,7 +42,7 @@ the turn, and in a short message too. Never open the board for the user: the lin
 | `scripts/build_board.mjs` | Prepares images (size and format) and videos (H.264 under 15 MB, poster, fps, duration; ffmpeg) and writes `index.html`, `img/` and `board.json` into a board folder. Node, no npm dependencies. |
 | `scripts/render_marks.py` | Draws the saved notes onto the images, or onto the video frame at each note's timecode (ffmpeg). It writes a full marked image, one close-up per note and `notes.md`. Needs Pillow. |
 | `scripts/snapshot_board.mjs` | Freezes a board, with its images, marks and notes, into one read-only HTML file to keep or send in chat. |
-| `assets/mock-runtime.js` | Test-only stand-in for the artifact runtime (database, user, comments, assets and permissions), for checking the page on localhost. Never publish it. |
+| `assets/mock-runtime.js` | Test-only stand-in for the artifact runtime (database, user, comments, assets and permissions), for checking the page on localhost. Its header lists test hooks (failing writes, a slow or failing connect, changes made elsewhere). Never publish it. |
 
 ## 1. What the reviewer gets
 
@@ -67,7 +67,8 @@ the turn, and in a short message too. Never open the board for the user: the lin
 | Text | T | Click and type words onto the image. Enter places them, Shift + Enter adds a line, and a double-click edits them later |
 
 - Four colours, keys 1–4. One note can mix colours; the swatches in its comment box recolour all its marks.
-- Undo with ⌘Z / Ctrl+Z (it takes back the last mark, move or edit). Delete removes the selected note.
+- Undo with ⌘Z / Ctrl+Z (it takes back the last mark, move or edit, wherever on the board it was made: a change on another
+  file opens that file first, a video at the note's moment, and a short notice names it). Delete removes the selected note.
 - The eye button hides all marks.
 
 **Notes: marks gather into one note until Done**
@@ -92,6 +93,15 @@ the turn, and in a short message too. Never open the board for the user: the lin
   stays). Only editors of the board can add pictures, on a board published with `assets`; anyone else is told why.
   Copy all notes and Send to Claude list them as "[+2 pictures]".
 - **Copy all notes** gives a plain-text list. It's the fallback when the page has no database, such as a local copy or a signed-out viewer, and notes then stay in that browser.
+- **Saving.** Notes and the whole-image box save after a 0.6 s typing pause, and at once when the page is left or hidden;
+  the chip at the top says Saving… / All notes saved. A change that didn't go keeps the chip on "Last change not saved"
+  until it does: it is tried again by itself (after a few seconds, and when the browser is back online) and with the next
+  edit, and a note whose first save failed is sent again in full. If the live link to the notes drops, the chip says
+  "Lost the link to the board. Reconnecting…" until it is back. Claude's reply arriving while the reviewer types never
+  overwrites their words, and a note deleted elsewhere while it is open closes with a short notice. If the database
+  doesn't answer at first, the page asks again for a few seconds before keeping notes in this browser for that visit
+  (showing only that visit's notes; earlier ones kept in the browser stay stored). While it is still connecting, Send and
+  pasting a picture say so.
 - **Send notes to Claude** sits beside This file / All files, with the number of open notes it will send. With **This file** it
   sends the open notes of the round in view (plus its whole-image box when that is open); with **All files** it reads
   **Send all open comments** and sends every open note and open whole-image/video box on the board, closed tabs left out.
@@ -156,7 +166,7 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
 - Middle: the frame on the left, the **note box docked on the right**. It is the comment box for writing only: with no note in
   hand it says "New note · 00:05:12" and typing starts a note at the playhead; marks drawn on the frame join that note.
   While marking, a **Done** button sits beside the marks (as on images); Done, Enter or C puts the cursor in the docked box.
-  Enter or **Save** there saves the note. The box never opens on top of the video, and it is the only place a new note is
+  Enter or **Save** there saves the note (so does Esc; a note started there and left empty is thrown away). The box never opens on top of the video, and it is the only place a new note is
   written: the note joins the cards (and the full-screen list) only once it is saved, never as a draft card while it is being
   drawn or typed. It is still stored as you go, so nothing is lost on a reload.
 - Under the frame, a transport: previous / next note, −1 / +1 frame, play, timecode MM:SS:FF, **Set in (I)** for a note that
@@ -361,8 +371,9 @@ Database collections (the page subscribes to all five):
 
 ## 7. Gotchas
 
-- Never republish while the reviewer is marking (and never for a new round: §5). Saved notes survive a republish, but a
-  note typed in the last ~0.6 s can be lost.
+- Never republish while the reviewer is marking (and never for a new round: §5). Saved notes survive a republish, and
+  words still in their 0.6 s typing pause are sent the moment the page reloads, but the reload can cut that write short,
+  so the last words typed can still be lost.
 - An asset (a live round's file) is served at `/_blob/<asset id>` from every version of the page. Asset files can be up to
   20 MB; keep review renders under the 15 MB the build script already aims for.
 - The built-in browser pane shows `file://` pages without running scripts. To check the page:

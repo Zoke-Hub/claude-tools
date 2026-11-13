@@ -239,3 +239,11 @@ test('a message is named by its part number and the letter of its section', () =
   expect(partRef({ order: 31, sections })).toBe('32')
   expect(partRef({ order: 31, sections: [] }, 5)).toBe('32')
 })
+
+test('a pinned fact in the history names the parts it came from, so a higher part still wins', async () => {
+  const v = viewFor(chat(12))
+  const chunks = v.chunks.map((c, i) => (i < 2 ? { ...c, status: 'folded' as const } : c))
+  const fact = { id: 'f', kind: 'fact' as const, text: 'the count sits after the button', query: 'button count', chunkIds: [chunks[1]!.id], recalls: 2, pinnedAt: 0, lastUsedFold: 0, pinnedFold: 0 }
+  const block = (await historyBlock(noFs, { ...v, chunks, pinned: [fact] }))!
+  expect(block).toContain('- the count sits after the button (part 2)')
+})

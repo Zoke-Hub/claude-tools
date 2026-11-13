@@ -4,7 +4,7 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Activity, ChunkRecord, PinnedFact, PickerView, Section } from '../types'
+import type { Activity, ChunkRecord, PartMark, PinnedFact, PickerView, Section } from '../types'
 import type { Original } from './store'
 import { reveal } from './private'
 import { addActivity, change, chunkOf, EMPTY_VIEW, patchChunk, privateVault, readOriginal } from './store'
@@ -47,9 +47,14 @@ const WINDOW_CHARS = 1200
 
 // Asked this often, an answer is pinned into the brief, and a stretch of an
 // original read this often is brought back word for word; unused for this
-// many folds, either goes back (it stays recallable).
+// many folds, either goes back (it stays recallable), and however often it is
+// used, it goes back after PIN_KEPT_FOLDS folds, to be pinned again from a
+// fresh lookup if it is still asked for.
 const PIN_AFTER = 2
 const UNPIN_AFTER_FOLDS = 3
+const PIN_KEPT_FOLDS = 8
+// The questions the person unpinned, kept so none is pinned again by itself.
+const UNPINNED_KEPT = 50
 
 const STOP = new Set('the a an and or of to in on for with what which how why is are was were did do we i you it this that from about at by as be'.split(' '))
 
@@ -343,6 +348,58 @@ export async function recall($: EngineInterface, query: string, isExact: boolean
   return reveal(await find($, query, isExact), privateVault())
 }
 
+type Loaded = { chunk: ChunkRecord; original: Original | null; body: string }
+
+// Every saved chunk, by its original: the newest has no summary until the next
+// one starts, and it is the one most asked about right after a compaction.
+async function loadAll($: EngineInterface, v: PickerView): Promise<Loaded[]> {
+  const loaded: Loaded[] = []
+  for (const chunk of v.chunks) {
+    const original = await readOriginal($, chunk.id)
+    loaded.push({ chunk, original, body: (original?.text ?? '').toLowerCase() })
+  }
+
+  return loaded
+}
+
+// The chunks the query's search reads, best first, and the four the model reads.
+function rank(loaded: Loaded[], query: string) {
+  const terms = [...new Set(words(query))]
+  const weights = weightsOf(terms, loaded.map(r => r.body))
+  const byAge = [...loaded].sort((a, b) => a.chunk.order - b.chunk.order).map(r => r.chunk.id)
+  const scored = loaded.map(r => ({
+    chunk: r.chunk,
+    text: stretch(r.chunk, r.original, terms),
+    score: score(r.chunk, r.body, terms, weights) * placeBoost(byAge.indexOf(r.chunk.id), byAge.length, query),
+  }))
+  const ranked = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score)
+  // The model reads the best parts in chat order, so "later" reads as later.
+  const best = ranked.slice(0, 4).sort((a, b) => a.chunk.order - b.chunk.order)
+
+  return { terms, weights, byAge, ranked, best }
+}
+
+// How far the chat went when an answer was made: its newest part, and that
+// part's size, since the newest part keeps growing.
+function markOf(chunks: readonly ChunkRecord[]): PartMark {
+  const newest = [...chunks].sort((a, b) => b.order - a.order)[0]
+
+  return newest === undefined ? { order: -Number.MAX_SAFE_INTEGER, tokens: 0 } : { order: newest.order, tokens: newest.tokens }
+}
+
+// A pin made before marks were kept covers the parts it came from, no more.
+function pinMark(p: PinnedFact, chunks: readonly ChunkRecord[]): PartMark {
+  return p.upTo ?? markOf(chunks.filter(c => p.chunkIds.includes(c.id)))
+}
+
+// An answer stays good while no part newer than it (or the part it was newest
+// in, grown since) is among those its question's search would have the model
+// read: such a part may say something else, and the newest part wins. A newer
+// part that doesn't come up for the question changes nothing.
+function isCurrent(mark: PartMark, best: ReadonlyArray<{ chunk: ChunkRecord }>): boolean {
+  return best.every(({ chunk: c }) => c.order < mark.order || (c.order === mark.order && c.tokens <= mark.tokens))
+}
+
 async function find($: EngineInterface, query: string, isExact: boolean): Promise<string> {
   const key = normalise(query)
   const v = await read($, view)
@@ -358,40 +415,33 @@ async function find($: EngineInterface, query: string, isExact: boolean): Promis
 
     return output
   }
+
+  const loaded = await loadAll($, v)
+  const { terms, weights, byAge, ranked, best } = rank(loaded, query)
   const cached = v.pinned.find(p => p.kind === 'fact' && isSameQuestion(p.query, key))
   if (cached && !isExact) {
-    await notePinnedUse($, cached)
+    if (isCurrent(pinMark(cached, v.chunks), best)) {
+      await notePinnedUse($, cached)
 
-    return `${cached.text} (pinned fact, from ${cached.chunkIds.join(', ')})`
+      return `${cached.text} (pinned fact, from ${cached.chunkIds.join(', ')})`
+    }
+    // A newer part may say otherwise: the pin goes, and the question is looked up again.
+    await unpinStale($, [cached], 'a newer part may change it; looked up again')
   }
-  // The same question again: the last answer, with no model call.
+  // The same question again: the last answer, with no model call, while no newer part may change it.
   const again = [...answers.keys()].find(k => isSameQuestion(k, key))
   if (again !== undefined && !isExact) {
     const prior = answers.get(again)!
-    await remember($, query, key, prior.answer, prior.chunkIds, prior.text, again)
+    if (isCurrent(prior.upTo, best)) {
+      await remember($, query, key, prior.answer, prior.chunkIds, prior.text, prior.upTo, again)
 
-    return `${prior.text}\n(answered from this session's recall cache)`
+      return `${prior.text}\n(answered from this session's recall cache)`
+    }
+    answers.delete(again)
   }
 
-  const terms = [...new Set(words(query))]
   const isAboutPerson = ABOUT_PERSON.test(query)
-  // Every saved chunk, by its original: the newest has no summary until the next
-  // one starts, and it is the one most asked about right after a compaction.
-  const loaded: Array<{ chunk: ChunkRecord; original: Original | null; body: string }> = []
-  for (const chunk of v.chunks) {
-    const original = await readOriginal($, chunk.id)
-    loaded.push({ chunk, original, body: (original?.text ?? '').toLowerCase() })
-  }
-  const weights = weightsOf(terms, loaded.map(r => r.body))
-  const byAge = [...loaded].sort((a, b) => a.chunk.order - b.chunk.order).map(r => r.chunk.id)
-  const scored = loaded.map(r => ({
-    chunk: r.chunk,
-    text: stretch(r.chunk, r.original, terms),
-    score: score(r.chunk, r.body, terms, weights) * placeBoost(byAge.indexOf(r.chunk.id), byAge.length, query),
-  }))
-  const ranked = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score)
-  // The model reads the best parts in chat order, so "later" reads as later.
-  const best = ranked.slice(0, 4).sort((a, b) => a.chunk.order - b.chunk.order)
+  const upTo = markOf(v.chunks)
   // "The first thing I asked": the oldest part's opening, whatever its words.
   const oldest = loaded.find(r => r.chunk.id === byAge[0])
   const first = ASKS_FIRST.test(query) && ABOUT_A_MESSAGE.test(query) && oldest ? await opening($, oldest.chunk) : null
@@ -416,7 +466,7 @@ async function find($: EngineInterface, query: string, isExact: boolean): Promis
   const answered = async (answer: Answer, material: string, source: string) => {
     const checked = answer.quotes.map(q => ({ ...q, isChecked: squash(material).includes(squash(q.text)) }))
     const text = render(answer, checked, source)
-    await remember($, query, key, answer.answer, best.map(b => b.chunk.id), text)
+    await remember($, query, key, answer.answer, best.map(b => b.chunk.id), text, upTo)
 
     return text
   }
@@ -457,17 +507,26 @@ async function log($: EngineInterface, query: string, chunkIds: string[], how: s
 }
 
 // Counts a found answer; the same question asked again is pinned, so the
-// answer sits in the brief and is never looked up a third time.
-const answers = new Map<string, { answer: string; text: string; chunkIds: string[]; count: number }>()
+// answer sits in the brief and is never looked up a third time. `upTo` is how
+// far the chat went when it was answered.
+const answers = new Map<string, { answer: string; text: string; chunkIds: string[]; count: number; upTo: PartMark }>()
 
-// `prior` is the cached question this one repeats, when it does.
-async function remember($: EngineInterface, query: string, key: string, answer: string, chunkIds: string[], text: string, prior?: string) {
+// A new session has asked nothing yet.
+export function resetRecall() {
+  answers.clear()
+  passageHits.clear()
+}
+
+// `prior` is the cached question this one repeats, when it does. A question
+// the person unpinned is answered and counted, never pinned again by itself.
+async function remember($: EngineInterface, query: string, key: string, answer: string, chunkIds: string[], text: string, upTo: PartMark, prior?: string) {
   await log($, query, chunkIds, prior === undefined ? 'answer' : 'from cache')
   const count = (prior === undefined ? 0 : answers.get(prior)!.count) + 1
-  answers.set(prior ?? key, { answer, text, chunkIds, count })
+  answers.set(prior ?? key, { answer, text, chunkIds, count, upTo })
   if (count < PIN_AFTER) return
   await change($, v => {
     if (v.pinned.some(p => p.kind === 'fact' && isSameQuestion(p.query, key))) return v
+    if (v.unpinned.some(q => isSameQuestion(q, key))) return v
     const fact: PinnedFact = {
       id: `${Date.now().toString(36)}`,
       kind: 'fact',
@@ -477,6 +536,8 @@ async function remember($: EngineInterface, query: string, key: string, answer: 
       recalls: count,
       pinnedAt: Date.now(),
       lastUsedFold: v.folds,
+      pinnedFold: v.folds,
+      upTo,
     }
 
     return addActivity({ ...v, pinned: [...v.pinned, fact] }, { kind: 'pin', text: `Pinned “${answer.slice(0, 60)}”`, detail: `recalled ${count}×`, chunkIds })
@@ -511,7 +572,7 @@ async function notePassages($: EngineInterface, found: Passage[]) {
     if (count < PIN_AFTER) continue
     const ref = partRef(p.chunk, await passageStart($, p))
     await change($, v => {
-      if (v.pinned.some(x => x.kind === 'passage' && x.query === p.key)) return v
+      if (v.pinned.some(x => x.kind === 'passage' && x.query === p.key) || v.unpinned.includes(p.key)) return v
       const passage: PinnedFact = {
         id: `${Date.now().toString(36)}-p`,
         kind: 'passage',
@@ -521,6 +582,7 @@ async function notePassages($: EngineInterface, found: Passage[]) {
         recalls: count,
         pinnedAt: Date.now(),
         lastUsedFold: v.folds,
+        pinnedFold: v.folds,
         ref,
       }
 
@@ -540,18 +602,59 @@ async function notePinnedUse($: EngineInterface, fact: PinnedFact) {
 }
 
 // The activity line for a pin sent back to its summary.
-export function unpinEntry(p: PinnedFact, detail: string): Omit<Activity, 'id' | 'at'> {
+function unpinEntry(p: PinnedFact, detail: string): Omit<Activity, 'id' | 'at'> {
   return { kind: 'unpin', text: p.kind === 'passage' ? 'Sent a brought-back passage back to its summary' : `Unpinned “${p.text.slice(0, 60)}”`, detail, chunkIds: p.chunkIds }
 }
 
-// At each fold: pinned facts unused for a while leave the brief.
-export function dropStalePins(v: PickerView): PickerView {
-  const stale = v.pinned.filter(p => v.folds - p.lastUsedFold >= UNPIN_AFTER_FOLDS)
-  if (stale.length === 0) return v
-  let next: PickerView = { ...v, pinned: v.pinned.filter(p => !stale.includes(p)) }
-  for (const p of stale) {
-    next = addActivity(next, unpinEntry(p, 'not needed lately; still recallable'))
+// A pin's counts go with it, so the next ask is a fresh lookup.
+function forget(p: PinnedFact) {
+  if (p.kind === 'passage') passageHits.delete(p.query)
+  else for (const k of [...answers.keys()]) if (isSameQuestion(k, p.query)) answers.delete(k)
+}
+
+// The view with these pins gone, each said in the activity, and their counts
+// forgotten.
+function dropPins(v: PickerView, pins: readonly PinnedFact[], detail: string): PickerView {
+  let next: PickerView = { ...v, pinned: v.pinned.filter(p => !pins.some(x => x.id === p.id)) }
+  for (const p of pins) {
+    forget(p)
+    next = addActivity(next, unpinEntry(p, detail))
   }
 
   return next
+}
+
+// Pins Folio lets go (unused, or a newer part may change them): asked for
+// twice again, each is pinned again from a fresh lookup.
+async function unpinStale($: EngineInterface, pins: readonly PinnedFact[], detail: string) {
+  await change($, v => dropPins(v, pins.filter(p => v.pinned.some(x => x.id === p.id)), detail))
+}
+
+// The person's Unpin or Send back: it goes, its counts go, and Folio never
+// pins that question or passage again by itself (recall still answers it).
+export async function unpin($: EngineInterface, id: string): Promise<boolean> {
+  const p = (await read($, view)).pinned.find(x => x.id === id)
+  if (p === undefined) return false
+  await change($, v => ({ ...dropPins(v, [p], 'by you; still recallable'), unpinned: [...v.unpinned.filter(q => q !== p.query), p.query].slice(-UNPINNED_KEPT) }))
+
+  return true
+}
+
+// At each fold: pins unused for a while leave the brief, and so do pins kept
+// long enough, however often they are used.
+export function dropStalePins(v: PickerView): PickerView {
+  const stale = v.pinned.filter(p => v.folds - p.lastUsedFold >= UNPIN_AFTER_FOLDS || v.folds - p.pinnedFold >= PIN_KEPT_FOLDS)
+
+  return stale.length === 0 ? v : dropPins(v, stale, 'not needed lately, or pinned a while; still recallable')
+}
+
+// At each fold, before the history is written: pinned facts a newer part may
+// change leave it, the way a lookup of one would let it go.
+export async function dropSupersededPins($: EngineInterface, v: PickerView): Promise<PickerView> {
+  const facts = v.pinned.filter(p => p.kind === 'fact')
+  if (facts.length === 0) return v
+  const loaded = await loadAll($, v)
+  const stale = facts.filter(p => !isCurrent(pinMark(p, v.chunks), rank(loaded, p.query).best))
+
+  return stale.length === 0 ? v : dropPins(v, stale, 'a newer part may change it; still recallable')
 }

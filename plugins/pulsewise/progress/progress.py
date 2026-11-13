@@ -33,9 +33,11 @@ chat's id (CLAUDE_CODE_SESSION_ID), so a chat's bar shows only its own jobs.
 """
 
 # Raised with every change, so PulseWise replaces an older copy in ~/.claude/progress.
-HELPER_VERSION = 3
+HELPER_VERSION = 5
 
 import atexit
+import builtins
+import contextlib
 import json
 import os
 import re
@@ -55,28 +57,72 @@ KEEP_FINISHED_S = 24 * 3600
 # A chat's status file (chats/) untouched this long is a chat that is gone: PulseWise no longer lists it.
 KEEP_CHAT_S = 2 * 24 * 3600
 
-_current = None
+# The jobs this process started with start() / job() and has not finished, oldest first: the newest is the one
+# the module-level calls (step, message, finish, fail) go to, and each is closed when the process ends.
+_open = []
+_open_lock = threading.Lock()
 
 
 def _now():
     return round(time.time() * 1000)
 
 
-def _write_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, separators=(",", ":")))
-    # On Windows the replace fails while PulseWise has the file open: try again a few times, then skip this write.
-    for attempt in range(5):
+def _write_json(path, data, attempts=5):
+    """Writes in one go (a temp file, then a rename). On Windows the rename fails while PulseWise has the file open,
+    so it is tried again: `attempts` times, waiting a little longer each time. True once written."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(data, separators=(",", ":")))
+    except OSError:
+        return False
+    for attempt in range(attempts):
         try:
             os.replace(tmp, path)
-            return
+            return True
         except PermissionError:
-            time.sleep(0.05 * (attempt + 1))
+            time.sleep(min(0.25, 0.05 * (attempt + 1)))
+        except OSError:
+            break
     try:
         tmp.unlink()
     except OSError:
         pass
+    return False
+
+
+@contextlib.contextmanager
+def _file_lock(path, timeout_s=5.0):
+    """Holds `.<name>.lock` beside a job file while one command reads, changes and writes it, so a `step` and a
+    `finish` run at the same moment cannot undo each other. Works the same on Windows and macOS (an exclusive create).
+    A lock left by a command that died is taken over after 10 s; one never freed in `timeout_s` is gone past."""
+    lock = path.with_name(f".{path.name}.lock")
+    deadline = time.time() + timeout_s
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > 10:
+                    lock.unlink()
+                    continue
+            except OSError:
+                pass
+            if time.time() > deadline:
+                break
+            time.sleep(0.02)
+        except OSError:
+            break
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+            try:
+                lock.unlink()
+            except OSError:
+                pass
 
 
 def _read_json(path, default):
@@ -94,6 +140,15 @@ def _clean_old_jobs():
         for path in folder.glob("*.json"):
             if path.name.startswith("."):
                 continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                pass
+    # A temp file or a lock a command left when it was killed.
+    cutoff = time.time() - KEEP_FINISHED_S
+    for pattern in (".*.tmp", ".*.lock"):
+        for path in JOBS.glob(pattern):
             try:
                 if path.stat().st_mtime < cutoff:
                     path.unlink()
@@ -163,13 +218,16 @@ class Job:
                 return step
         return self._add_step(name)
 
-    def _write(self, force=False):
+    def _write(self, force=False, final=False):
         now = time.time()
         if not force and now - self._last_write < MIN_WRITE_S:
             return
         self._last_write = now
         self.data["updated"] = _now()
-        _write_json(self.path, self.data)
+        if _write_json(self.path, self.data, attempts=40 if final else 5) or not final:
+            return
+        # The end could not be written: the bar would show the job running until it gives up on it.
+        print(f"progress.py: could not write the end of {self.data['name']!r} to {self.path}", file=sys.stderr)
 
     def _beat(self):
         while not self._closed:
@@ -180,8 +238,11 @@ class Job:
 
     def step(self, name, done=None, total=None, unit=None):
         """Makes `name` the current step; `done` of `total` when it can count.
-        `unit="%"` when done/total are a share rather than a count of items."""
+        `unit="%"` when done/total are a share rather than a count of items.
+        Once the job is finished (or failed), a step changes nothing."""
         with self._lock:
+            if self._closed:
+                return
             step = self._find(name)
             if unit is not None:
                 step["unit"] = unit
@@ -207,6 +268,8 @@ class Job:
     def message(self, text):
         """Shows a short line of text with the job (what it is doing now)."""
         with self._lock:
+            if self._closed:
+                return
             self.data["message"] = str(text)[:200]
             self._write()
 
@@ -230,9 +293,10 @@ class Job:
             self.data["ended"] = ended
             if message:
                 self.data["message"] = str(message)[:200]
-            self._write(force=True)
+            self._write(force=True, final=True)
             if state == "done":
                 self._remember_durations()
+        _forget(self)
 
     def _remember_durations(self):
         """Keeps each step's time, so the next run of this job is sized well."""
@@ -241,10 +305,7 @@ class Job:
         for step in self.data["steps"]:
             if step["started"] and step["ended"]:
                 known[step["name"]] = step["ended"] - step["started"]
-        try:
-            _write_json(HISTORY, history)
-        except OSError:
-            pass
+        _write_json(HISTORY, history)
 
     def __enter__(self):
         return self
@@ -252,9 +313,26 @@ class Job:
     def __exit__(self, kind, value, tb):
         if kind is None:
             self.finish()
+        elif issubclass(kind, SystemExit):
+            # sys.exit() inside the job: 0 (or none) is a success, anything else a failure.
+            failure = _exit_failure(value.code)
+            if failure is None:
+                self.finish()
+            else:
+                self.fail(failure)
         else:
             self.fail(f"{kind.__name__}: {value}")
         return False
+
+
+def _exit_failure(code):
+    """What an exit code says went wrong, or None for a success: sys.exit(), sys.exit(0) and sys.exit(None) succeed;
+    sys.exit(2) fails with "exit code 2", sys.exit("message") with the message (Python exits 1 then)."""
+    if code is None or code == 0:
+        return None
+    if isinstance(code, int):
+        return f"exit code {code}"
+    return str(code)[:200]
 
 
 def start(name, steps=None, point=None, weights=None, redoes=None):
@@ -262,32 +340,50 @@ def start(name, steps=None, point=None, weights=None, redoes=None):
     task-list point it belongs to when it starts early; `weights` maps step
     names to rough relative lengths; `redoes` names a job that stopped (its
     name or id) which this one redoes, so the bar shows this one in its place."""
-    global _current
-    _current = Job(name, steps=steps, point=point, weights=weights, redoes=redoes)
-    return _current
+    started = Job(name, steps=steps, point=point, weights=weights, redoes=redoes)
+    with _open_lock:
+        _open.append(started)
+    return started
+
+
+def _forget(closed):
+    """A job is finished: the module-level calls (step, message, ...) go on to the newest job still open, if any."""
+    with _open_lock:
+        if closed in _open:
+            _open.remove(closed)
+
+
+def _current():
+    """The job the module-level calls go to: the newest one still open, or None."""
+    with _open_lock:
+        return _open[-1] if _open else None
 
 
 job = start
 
 
 def step(name, done=None, total=None):
-    if _current is not None:
-        _current.step(name, done, total)
+    current = _current()
+    if current is not None:
+        current.step(name, done, total)
 
 
 def message(text):
-    if _current is not None:
-        _current.message(text)
+    current = _current()
+    if current is not None:
+        current.message(text)
 
 
 def finish():
-    if _current is not None:
-        _current.finish()
+    current = _current()
+    if current is not None:
+        current.finish()
 
 
 def fail(message=None):
-    if _current is not None:
-        _current.fail(message)
+    current = _current()
+    if current is not None:
+        current.fail(message)
 
 
 def track(items, name, total=None):
@@ -303,24 +399,73 @@ def track(items, name, total=None):
         step(name, index, total)
 
 
+def _open_jobs():
+    with _open_lock:
+        return list(_open)
+
+
 _previous_hook = sys.excepthook
 
 
 def _on_uncaught(kind, value, tb):
-    if _current is not None:
-        _current.fail(f"{kind.__name__}: {value}")
+    for open_job in _open_jobs():
+        open_job.fail(f"{kind.__name__}: {value}")
     _previous_hook(kind, value, tb)
 
 
 sys.excepthook = _on_uncaught
 
+# How the script asked to exit, outside any `with progress.job(...)`: an exit code never reaches excepthook or atexit,
+# so sys.exit() and the exit() / quit() builtins note it on the way out (from the main thread; a thread's sys.exit
+# ends only that thread). A `raise SystemExit(n)` written out is not seen: such a script's open jobs end as done.
+_exit_code = None
+_system_exit = sys.exit
+
+
+def _note_exit(code):
+    """Notes the code the script asked to exit with, from the main thread only."""
+    global _exit_code
+    if threading.current_thread() is threading.main_thread():
+        _exit_code = code
+
+
+def _exit(code=None):
+    _note_exit(code)
+    _system_exit(code)
+
+
+sys.exit = _exit
+
+
+class _NotedQuitter:
+    """The exit() / quit() builtins, noting the code as sys.exit does (and showing as they do)."""
+
+    def __init__(self, quitter):
+        self._quitter = quitter
+
+    def __repr__(self):
+        return repr(self._quitter)
+
+    def __call__(self, code=None):
+        _note_exit(code)
+        return self._quitter(code)
+
+
+for _name in ("exit", "quit"):
+    if callable(getattr(builtins, _name, None)) and not isinstance(getattr(builtins, _name), _NotedQuitter):
+        setattr(builtins, _name, _NotedQuitter(getattr(builtins, _name)))
+
 
 @atexit.register
 def _on_exit():
-    # A script that ends without finish() counts as done; an uncaught error
-    # was already marked failed by the hook above.
-    if _current is not None:
-        _current.finish()
+    # Every job still open ends with the script: done when it exits as a success (finish() or not), failed when it
+    # exits with a non-zero code; an uncaught error was already marked failed by the hook above.
+    failure = _exit_failure(_exit_code)
+    for open_job in _open_jobs():
+        if failure is None:
+            open_job.finish()
+        else:
+            open_job.fail(failure)
 
 
 # ---- command line ---------------------------------------------------------
@@ -456,16 +601,32 @@ def _find(ref):
     return best[1] if best else None
 
 
-def _load(ref):
-    path = _find(ref)
-    data = _read_json(path, None) if path else None
-    if data is None:
-        sys.exit(f"progress.py: no running job {ref!r}")
-    job_id = data["id"]
+def _load(path):
+    """A job file as a Job to change, or None. One already finished is closed: a step on it changes nothing."""
+    data = _read_json(path, None)
+    if not data or "id" not in data:
+        return None
     found = Job.__new__(Job)
-    found.id, found.path, found.data = job_id, path, data
-    found._lock, found._last_write, found._closed = threading.Lock(), 0.0, data["state"] != "running"
+    found.id, found.path, found.data = data["id"], path, data
+    found._lock, found._last_write, found._closed = threading.Lock(), 0.0, data.get("state") != "running"
     return found
+
+
+def _change(ref, change, is_strict=True):
+    """Reads, changes and writes a job file under its lock, so step, finish and fail from separate commands never undo
+    each other (a step that loses the race to a finish finds the job closed). With no running job of that name, a
+    step is left out with a note; finish and fail stop with an error."""
+    path = _find(ref)
+    if path is None:
+        if is_strict:
+            sys.exit(f"progress.py: no running job {ref!r}")
+        print(f"progress.py: no running job {ref!r}; this step is left out", file=sys.stderr)
+        return
+    with _file_lock(path):
+        found = _load(path)
+        if found is None:
+            sys.exit(f"progress.py: no running job {ref!r}")
+        change(found)
 
 
 def main(argv=None):
@@ -512,11 +673,11 @@ def main(argv=None):
         started._write(force=True)
         print(started.id)
     elif args.action == "step":
-        _load(args.id).step(args.step, args.done, args.total)
+        _change(args.id, lambda found: found.step(args.step, args.done, args.total), is_strict=False)
     elif args.action == "finish":
-        _load(args.id).finish()
+        _change(args.id, lambda found: found.finish())
     elif args.action == "fail":
-        _load(args.id).fail(args.message)
+        _change(args.id, lambda found: found.fail(args.message))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { ChunkRecord } from '../types'
 import { currentOpenTasks, isOneChatPath } from './measure'
-import { change, EMPTY_VIEW, homeDir, setWorking } from './store'
+import { change, EMPTY_VIEW, homeDir, sessionEpoch, setWorking } from './store'
 import { mergeBrief } from './summarize'
 import { expandHome, isFullPath } from './paths'
 
@@ -48,6 +48,7 @@ export async function refreshBrief($: EngineInterface): Promise<void> {
 }
 
 async function mergeNew($: EngineInterface): Promise<void> {
+  const epoch = sessionEpoch()
   const v = await read($, view)
   const covered = new Set(v.briefDigest?.ids ?? [])
   const fresh: ChunkRecord[] = v.chunks.filter(c => c.isSummarised && !covered.has(c.id)).sort((a, b) => a.order - b.order)
@@ -59,6 +60,8 @@ async function mergeNew($: EngineInterface): Promise<void> {
     if (merged === null) return
     // One check of the files, the merged list's, which holds the new ones too.
     const files = await lastingFiles($, merged.files, await homeDir($))
+    // A brief merged for a session that has ended since stays out of the next one.
+    if (sessionEpoch() !== epoch) return
     await change($, x => ({ ...x, briefDigest: { ids: [...covered, ...fresh.map(c => c.id)], ...merged, files } }))
   } finally {
     await setWorking($, null)

@@ -30,6 +30,9 @@ type StubOptions = {
   messages?: SessionMessage[]
   // The light model's answer to a prompt; null for none.
   model?: (prompt: string) => string | null | Promise<string | null>
+  // The session's id as the engine reads it now ("test-session" unless given),
+  // so a test can play a /clear, which goes on under a new id.
+  id?: () => string
 }
 
 // A path from a file event in the form the test wrote it, on any system. The
@@ -67,7 +70,8 @@ export function stubEngine(on: On, o: StubOptions = {}) {
   on('command.register', () => ({ value: { command: 'folio' } }))
   on('tool.register', () => ({ value: { tool: 'mcp__folio__recall' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'test-session' }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('session.id', () => ({ value: o.id?.() ?? 'test-session' }))
   if (o.messages !== undefined) {
     const messages = o.messages
     on('session.messages', () => ({ value: messages }))

@@ -249,8 +249,10 @@ export async function historyBlock($: EngineInterface, v: PickerView): Promise<s
   ]
   const brief = joinBrief(briefLists(v, folded), openTasksOf(v))
   if (brief !== '') parts.push(`The brief kept from the folded parts:\n${brief}`)
+  // Each fact names the parts it came from, so a higher part that disagrees still wins.
   const facts = v.pinned.filter(p => p.kind === 'fact')
-  if (facts.length > 0) parts.push(`Pinned facts (looked up often):\n${facts.map(p => `- ${p.text}`).join('\n')}`)
+  const from = (ids: string[]) => (n => (n.length === 0 ? '' : ` (part${n.length === 1 ? '' : 's'} ${n.join(', ')})`))(partNos(v.chunks, ids))
+  if (facts.length > 0) parts.push(`Pinned facts (looked up often):\n${facts.map(p => `- ${p.text}${from(p.chunkIds)}`).join('\n')}`)
   const passages = v.pinned.filter(p => p.kind === 'passage')
   if (passages.length > 0) {
     const nums = (ids: string[]) => partNos(v.chunks, ids).map(n => `part ${n}`).join(', ')

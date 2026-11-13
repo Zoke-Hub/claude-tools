@@ -16,9 +16,11 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, Hook, Register, RenderChildren } from 'claude-code'
 
-import type { LogEntry, Model, Point, SideChat, Task, TaskStep } from '../types'
+import type { ChatPhase, LogEntry, Model, Point, SideChat, Task, TaskState, TaskStep } from '../types'
 
 type Api = Parameters<Hook<'session.start'>>[0]
+/** The app's word on each background agent, as `$.agent.list()` gives it. */
+type AgentInfo = Awaited<ReturnType<Api['agent']['list']>>[number]
 // The desktop's elements, as $.ui.resolve hands them out.
 type Ui = ElementTable<'desktop'>
 
@@ -66,13 +68,64 @@ type Seg = {
   badge?: string
 }
 
-const EMPTY: Model = { points: [], tasks: [], actions: [], log: [], side: [], finishedAt: null }
+const EMPTY: Model = { points: [], tasks: [], actions: [], log: [], side: [], finishedAt: null, phase: 'idle', phaseAt: null, turn: 0, listTurn: -1, closedJobs: {} }
 
 const model = atom({ plugin: 'pulsewise', key: 'model' } as const, EMPTY)
 const tick = atom({ plugin: 'pulsewise', key: 'tick' } as const, 0)
 const selected = atom({ plugin: 'pulsewise', key: 'selected' } as const, null)
 const showDone = atom({ plugin: 'pulsewise', key: 'showDone' } as const, false)
 const showSide = atom({ plugin: 'pulsewise', key: 'showSide' } as const, false)
+
+/**
+ * The model in this version's shape. The host keeps the model across a hot reload of the code, so a model an older
+ * version wrote can arrive here: it gets the fields it lacked (its Stop moment becomes the stopped phase).
+ */
+function view(m: Model): Model {
+  if (m.phase !== undefined && m.closedJobs !== undefined) return m
+  const { stoppedAt, ...rest } = m as Model & { stoppedAt?: number | null }
+  return {
+    ...rest,
+    phase: m.phase ?? (stoppedAt != null ? 'stoppedByPerson' : 'idle'),
+    phaseAt: m.phaseAt ?? stoppedAt ?? null,
+    turn: m.turn ?? 0,
+    listTurn: m.listTurn ?? -1,
+    closedJobs: m.closedJobs ?? {},
+  }
+}
+
+// ---- the life of a task (TaskState in ../types) ---------------------------
+
+/** Done or failed: ended, once. Only an agent that acts again comes back from it. */
+const isFinal = (t: Task) => t.state === 'done' || t.state === 'failed'
+
+/** Silent or between turns: not heard from, not ended. It counts again the moment it reports or acts. */
+const isPaused = (t: Task) => t.state === 'silent' || t.state === 'betweenTurns'
+
+/** Running work goes quiet: a job silent, an agent between turns. Its time stands still from now. */
+function pause(t: Task, now: number) {
+  if (t.state !== 'running') return
+  t.state = t.kind === 'agent' ? 'betweenTurns' : 'silent'
+  t.pausedAt = now
+}
+
+/** Quiet work reports or acts again: it runs. */
+function resume(t: Task) {
+  if (!isPaused(t)) return
+  t.state = 'running'
+  t.pausedAt = null
+}
+
+/**
+ * Whether a task holds the bar open: running, not covered by the helper job that reports it (the job counts instead),
+ * and not a command of an agent that is no longer running (its ends go to that agent, never to this chat).
+ */
+function isWorkRunning(m: Model, t: Task): boolean {
+  if (t.state !== 'running' || t.coveredBy) return false
+  if (!t.owner || t.pid !== null) return true
+  return m.tasks.some(agent => agent.id === t.owner && agent.state === 'running')
+}
+
+const isAnyWorkRunning = (m: Model) => m.tasks.some(t => isWorkRunning(m, t))
 
 // A heartbeat older than this means the script is gone (its pid is then checked).
 const STALE_MS = 30_000
@@ -201,7 +254,7 @@ function taskFraction(t: Task): number | null {
 
 /** A task's expected length in ms: real when done, extrapolated from its count when running. */
 function taskWeight(t: Task, now: number): number {
-  const elapsed = Math.max(1000, (t.ended ?? now) - t.started)
+  const elapsed = Math.max(1000, (t.ended ?? t.pausedAt ?? now) - t.started)
   if (t.state !== 'running') return elapsed
   const f = taskFraction(t)
   if (f !== null && f > 0.03) return Math.max(elapsed, elapsed / f)
@@ -240,7 +293,7 @@ function taskStatus(m: Model, t: Task, now: number, withLeft = true): string {
  * something it left to run (a local server on a timer, say), so its line says so instead of looking like work.
  */
 const isLeftRunning = (m: Model, t: Task) =>
-  !isTurnRunning && t.state === 'running' && t.kind !== 'agent' && !t.owner && m.points.every(p => p.state === 'done')
+  m.phase !== 'working' && t.state === 'running' && t.kind !== 'agent' && !t.owner && m.points.every(p => p.state === 'done')
 
 function leftRunningStatus(t: Task, now: number): string {
   const counted = t.steps.length > 0
@@ -250,6 +303,8 @@ function leftRunningStatus(t: Task, now: number): string {
 function taskStatusBare(t: Task, now: number): string {
   if (t.state === 'failed') return `stopped${t.message ? ` · ${t.message}` : ''}`
   if (t.state === 'done') return `done · ${fmt((t.ended ?? now) - t.started)}${t.redoOf ? ` (redo of “${t.redoOf}”)` : ''}`
+  if (t.state === 'silent') return `no report for ${fmt(now - t.updated)} · it runs again when it reports`
+  if (t.state === 'betweenTurns') return `between turns · ${fmt(now - (t.pausedAt ?? now))}`
   if (t.redoOf) return `redo of “${t.redoOf}” · ${taskStatusBare({ ...t, redoOf: null }, now)}`
   const current = t.steps.find(s => s.state === 'running')
   const prefix = current && t.steps.length > 1 ? `${current.name} · ` : ''
@@ -304,11 +359,28 @@ function expectedMs(m: Model, name: string): number {
   return average
 }
 
-/** The time Claude's own part of a point has reached: now, or the moment the person pressed Stop. */
-const ownNow = (m: Model, now: number) => Math.min(now, m.stoppedAt ?? now)
+/**
+ * Claude's own part stands still: its turn ended with points open (it waits for the person, or for its background
+ * work to wake it) or the person pressed Stop. Until its next turn, its readout and its beats' sizes do not move.
+ */
+const isHeld = (m: Model) => m.phase === 'awaitingReply' || m.phase === 'stoppedByPerson'
+
+/** The time Claude's own part of a point has reached: now, or the moment its turn ended or was stopped. */
+const ownNow = (m: Model, now: number) => (isHeld(m) ? Math.min(now, m.phaseAt ?? now) : now)
 
 /** Stopped by the person with points still open: Claude's own part stands still until its next turn. */
-const isStoppedByPerson = (m: Model) => m.stoppedAt != null && m.points.some(p => p.state !== 'done')
+const isStoppedByPerson = (m: Model) => m.phase === 'stoppedByPerson' && m.points.some(p => p.state !== 'done')
+
+/**
+ * Its turn not running and points still open, not stopped by the person: Claude waits for a reply (when nothing of
+ * its own runs to wake it).
+ */
+const isWaitingForReply = (m: Model) =>
+  m.phase !== 'working' && m.phase !== 'stoppedByPerson' && m.points.some(p => p.state !== 'done') && !isAnyWorkRunning(m)
+
+/** What Claude's own held part says: stopped, waiting for a reply, or waiting on its background work. */
+const heldWords = (m: Model) =>
+  m.phase === 'stoppedByPerson' ? 'stopped' : isAnyWorkRunning(m) ? 'waiting on its background work' : 'waiting for your reply'
 
 /** A point's share of the time: its real time once done; while it runs, its time so far or what it is expected to take. */
 function pointWeight(m: Model, index: number, now: number): number {
@@ -318,7 +390,7 @@ function pointWeight(m: Model, index: number, now: number): number {
   const start = p.started ?? p.seenAt ?? null
   if (start === null) return expected
   const own = ownNow(m, now)
-  let end = p.ended ?? (m.stoppedAt != null ? own : p.state === 'running' || p.seenAt != null ? Math.max(own, start + expected) : own)
+  let end = p.ended ?? (isHeld(m) ? own : p.state === 'running' || p.seenAt != null ? Math.max(own, start + expected) : own)
   for (const t of pointTasks(m, index)) end = Math.max(end, t.started + taskWeight(t, now))
   return Math.max(1000, end - start)
 }
@@ -342,13 +414,13 @@ function pointStatus(m: Model, index: number, now: number): string {
   const only = running[0]
   if (p.state === 'pending' && !running.length)
     return p.seenAt != null
-      ? m.stoppedAt != null
-        ? `stopped · ${fmt(ownNow(m, now) - p.seenAt)}`
+      ? isHeld(m)
+        ? `${heldWords(m)} · ${fmt(ownNow(m, now) - p.seenAt)}`
         : `Claude working ${fmt(now - p.seenAt)} · not yet marked in progress`
       : 'not started'
   if (running.length > 1) return `${running.length} at once · ${Math.round(pointFill(m, index, now) * 100)}%`
   if (running.length === 1 && only) return `${only.name} · ${taskStatus(m, sourceOf(m, only), now)}`
-  if (p.state === 'running' && m.stoppedAt != null) return `stopped · ${fmt(ownNow(m, now) - (p.started ?? now))}`
+  if (p.state === 'running' && isHeld(m)) return `${heldWords(m)} · ${fmt(ownNow(m, now) - (p.started ?? now))}`
   if (p.state === 'running') return `Claude working ${fmt(now - (p.started ?? now))}`
   const end = Math.max(p.ended ?? now, ...tasks.map(t => t.ended ?? now))
   return `done · ${fmt(end - (p.started ?? end))}`
@@ -393,8 +465,8 @@ function taskSeg(t: Task, now: number, m: Model): Seg {
     key: `t:${t.id}`,
     name: t.name,
     weight: taskWeight(source, now),
-    fill: t.state !== 'running' ? 1 : (fraction ?? 0),
-    state: t.state,
+    fill: isFinal(t) ? 1 : (fraction ?? 0),
+    state: t.state === 'done' || t.state === 'failed' ? t.state : 'running',
     stripe: t.state === 'running' && fraction === null,
     status: taskStatus(m, source, now),
   }
@@ -414,7 +486,7 @@ function mainSegs(m: Model, now: number, isWorking: boolean): Seg[] {
       weight: pointWeight(m, i, now),
       fill: pointFill(m, i, now),
       state: isDone ? (tasks.some(t => t.state === 'failed') ? 'failed' : 'done') : p.state === 'pending' && !tasks.length && p.seenAt == null ? 'pending' : 'running',
-      stripe: ((p.state === 'running' || p.seenAt != null) && !isDone && isWorking && m.stoppedAt == null) || tasks.some(t => t.state === 'running' && taskFraction(sourceOf(m, t)) === null),
+      stripe: ((p.state === 'running' || p.seenAt != null) && !isDone && isWorking && !isHeld(m)) || tasks.some(t => t.state === 'running' && taskFraction(sourceOf(m, t)) === null),
       status: pointStatus(m, i, now),
       badge: tasks.filter(t => t.state === 'running').length > 1 ? `${tasks.filter(t => t.state === 'running').length} at once` : undefined,
     }
@@ -482,15 +554,15 @@ function detailSegs(m: Model, key: string, now: number): Seg[] {
   if (p) {
     const begun = p.started ?? p.seenAt ?? null
     const elapsed = begun !== null ? (p.ended ?? ownNow(m, now)) - begun : 0
-    const isStopped = m.stoppedAt != null && p.state !== 'done' && begun !== null
+    const isStill = isHeld(m) && p.state !== 'done' && begun !== null
     segs.unshift({
       key: `c:${index}`,
       name: 'Claude',
       weight: Math.max(1000, p.state === 'pending' && p.seenAt == null ? expectedMs(m, p.name) : elapsed),
       fill: p.state === 'done' ? 1 : 0,
       state: p.state === 'pending' && p.seenAt != null ? 'running' : p.state,
-      stripe: !isStopped && (p.state === 'running' || (p.state === 'pending' && p.seenAt != null)),
-      status: p.state === 'done' ? `done · ${fmt(elapsed)}` : isStopped ? `stopped · ${fmt(elapsed)}` : p.state === 'running' ? (isWaitingOnPerson(m) ? 'waiting for your answer' : `working ${fmt(elapsed)} · no count for Claude's own work`) : 'not started',
+      stripe: !isStill && (p.state === 'running' || (p.state === 'pending' && p.seenAt != null)),
+      status: p.state === 'done' ? `done · ${fmt(elapsed)}` : isStill ? `${heldWords(m)} · ${fmt(elapsed)}` : p.state === 'running' ? (isWaitingOnPerson(m) ? 'waiting for your answer' : `working ${fmt(elapsed)} · no count for Claude's own work`) : 'not started',
     })
   }
   return segs
@@ -509,13 +581,12 @@ function shares(segs: Seg[]): number[] {
   return raw.map(r => r / sum)
 }
 
-const isBusy = (m: Model) => (m.points.some(p => p.state !== 'done') && m.stoppedAt == null) || m.tasks.some(t => t.state === 'running')
+/** Work open in this chat: points not done (unless the person stopped Claude), or work running that counts. */
+const isBusy = (m: Model) => (m.points.some(p => p.state !== 'done') && m.phase !== 'stoppedByPerson') || isAnyWorkRunning(m)
 
 /** Whether this chat's own work is worth showing: running, or finished moments ago. */
 function isOwnVisible(m: Model, now: number): boolean {
-  if (m.tasks.some(t => t.state === 'running')) return true
-  if (m.points.length && m.points.some(p => p.state !== 'done') && m.stoppedAt == null) return true
-  return m.finishedAt !== null && now - m.finishedAt < LINGER_MS
+  return isBusy(m) || (m.finishedAt !== null && now - m.finishedAt < LINGER_MS)
 }
 
 /** The band shows for this chat's own work, or while another chat in the project still has something to show. */
@@ -566,31 +637,38 @@ type Lane = { key: string; title: string; kind?: string; right: string; isBusy: 
 const LANES_CAPTION = 'Tracks'
 const CAPTION_H = 20
 
-/** A bar for each background job running now (or just finished): its steps, its %, what it is doing. */
+/** A bar for each background job running now, quiet (silent, between turns) or just finished: its steps, its %, what it is doing. */
 function laneRows(m: Model, now: number): Lane[] {
   return m.tasks
-    .filter(t => !t.coveredBy && !t.owner && (t.state === 'running' || (t.ended !== null && now - t.ended < LINGER_MS)))
+    .filter(t => !t.coveredBy && !t.owner && (t.state === 'running' || isPaused(t) || (t.ended !== null && now - t.ended < LINGER_MS)))
     .sort((a, b) => a.started - b.started)
     .map(t => {
       const source = sourceOf(m, t)
       const isBusy = t.state === 'running'
+      const isEnded = isFinal(t)
       let segs = source.steps.length > 1 ? stepSegs(source, now) : [taskSeg(t, now, m)]
-      if (!isBusy) segs = segs.map(seg => ({ ...seg, fill: 1, state: t.state === 'failed' ? 'failed' : 'done', stripe: false }))
+      // Ended: full, green or red. Quiet (silent, between turns): as far as it got, nothing moving.
+      if (isEnded) segs = segs.map(seg => ({ ...seg, fill: 1, state: t.state === 'failed' ? 'failed' : 'done', stripe: false }))
+      else if (!isBusy) segs = segs.map(seg => ({ ...seg, stripe: false }))
       const fraction = taskFraction(source)
-      const elapsed = fmt((t.ended ?? now) - t.started)
+      const elapsed = fmt((t.ended ?? t.pausedAt ?? now) - t.started)
       const left = isBusy ? taskLeft(source, now) : null
-      const right = !isBusy
+      const right = isEnded
         ? t.state === 'failed'
           ? 'stopped'
           : 'done'
-        : fraction !== null
-          ? `${Math.round(fraction * 100)}%${left !== null ? ` · ${leftText(left)}` : ''}`
-          : elapsed
+        : t.state === 'silent'
+          ? 'no report'
+          : t.state === 'betweenTurns'
+            ? 'between turns'
+            : fraction !== null
+              ? `${Math.round(fraction * 100)}%${left !== null ? ` · ${leftText(left)}` : ''}`
+              : elapsed
       // The time left shows on the right, so the line under the bar leaves it out.
-      const what = source !== t ? taskStatus(m, source, now, false) : t.kind === 'agent' ? 'working, no steps reported' : taskStatus(m, t, now, false)
+      const what = !isBusy ? taskStatusBare(t, now) : source !== t ? taskStatus(m, source, now, false) : t.kind === 'agent' ? 'working, no steps reported' : taskStatus(m, t, now, false)
       const forPoint = t.point >= 0 && m.points[t.point] ? `point ${t.point + 1} · ` : ''
-      const line = !isBusy ? `${forPoint}${t.state === 'failed' ? 'stopped' : 'done'} · ${elapsed}` : `${forPoint}${what}`
-      return { key: `l:${t.id}`, title: t.name.replace(/^Agent:\s*/, ''), kind: t.kind === 'agent' ? 'agent' : undefined, right, isBusy, segs, line, point: t.point }
+      const line = isEnded ? `${forPoint}${t.state === 'failed' ? 'stopped' : 'done'} · ${elapsed}` : `${forPoint}${what}`
+      return { key: `l:${t.id}`, title: t.name.replace(/^Agent:\s*/, ''), kind: t.kind === 'agent' ? 'agent' : undefined, right, isBusy, segs, line, point: t.point, isAlert: t.state === 'silent' }
     })
 }
 
@@ -845,12 +923,6 @@ let project = ''
 let parentHost = ''
 let chatTitle = ''
 let lastRecordCheck = 0
-// Whether Claude's turn is running in this chat: a turn that ended with points still open waits on the person.
-let isTurnRunning = false
-// The main loop's turns, counted, and the turn that last wrote or updated the task list: a list Claude ticked done
-// earlier in the same turn is still the work in hand; one finished in an earlier turn is not.
-let turnCount = 0
-let listTurn = -1
 let recordPath = ''
 let recordMtime = 0
 // When the person last opened this chat, from the app's record of it.
@@ -883,22 +955,87 @@ const seenMtime = new Map<string, number>()
 const seenChatMtime = new Map<string, number>()
 
 
-function mutate($: Api, fn: (m: Model, now: number) => boolean) {
-  return update($, model, m => {
-    const next = copy(m)
+/**
+ * What a change asks the world for once it is written: a toast, the taskbar flash, a job's end written back to its
+ * file. A change can be worked out more than once (a write that another beat is worked out again on the newer model),
+ * so these are collected while it is worked out and run once, after the write that counts.
+ */
+type Effect =
+  | { kind: 'toast'; text: string }
+  | { kind: 'attention' }
+  | { kind: 'closeFile'; id: string; ok: boolean; ended: number; message: string | null; seen: number }
+
+/**
+ * Every change to the model, from the hooks and the poll alike: `fn` changes a copy of the newest model (true when it
+ * changed something), the copy is written only if nobody wrote in between (else worked out again on what they wrote),
+ * and its effects run once it is written. Nothing is written when nothing changed.
+ */
+async function mutate($: Api, fn: (m: Model, now: number, fx: Effect[]) => boolean): Promise<{ before: Model; after: Model; changed: boolean }> {
+  let before = EMPTY
+  // Beaten fifty times running (it never is), this change is dropped rather than written over another's.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const held = await $.state.get({ plugin: 'pulsewise', key: 'model' })
+    before = view(held.value ?? EMPTY)
+    const next = copy(before)
     const now = Date.now()
-    if (!fn(next, now)) return m
-    settle(next, now)
-    if (m.finishedAt === null && next.finishedAt !== null && isLongFinish(next, now)) drawAttention($, now)
-    return next
-  })
+    const fx: Effect[] = []
+    if (!fn(next, now, fx)) return { before, after: before, changed: false }
+    settle(before, next, now, fx)
+    const wrote = await $.state.set({ plugin: 'pulsewise', key: 'model' }, next, { ifVersion: held.version })
+    if (!wrote.isSet) continue
+    runEffects($, fx)
+    return { before, after: next, changed: true }
+  }
+  return { before, after: before, changed: false }
 }
 
-/** After a change: the time everything finished, or none while work runs. */
-function settle(m: Model, now: number) {
+/** After a change: the time everything finished (with the flash when that ends a long stretch), or none while work runs. */
+function settle(before: Model, m: Model, now: number, fx: Effect[]) {
   if (isBusy(m)) m.finishedAt = null
   else if (m.finishedAt === null && (m.points.length || m.tasks.length)) m.finishedAt = now
+  if (before.finishedAt === null && m.finishedAt !== null && isLongFinish(m, now)) fx.push({ kind: 'attention' })
   m.log = m.log.slice(-60)
+  // Job files the helper has cleared away (a day old) need no memory.
+  const closed = Object.entries(m.closedJobs).filter(([, at]) => now - at < CLOSED_KEEP_MS)
+  if (closed.length !== Object.keys(m.closedJobs).length || closed.length > CLOSED_MAX)
+    m.closedJobs = Object.fromEntries(closed.sort((a, b) => b[1] - a[1]).slice(0, CLOSED_MAX))
+}
+
+// How long, and how many, ended jobs the model remembers (the helper deletes job files after a day).
+const CLOSED_KEEP_MS = 26 * 60 * 60_000
+const CLOSED_MAX = 400
+
+function runEffects($: Api, fx: Effect[]) {
+  const now = Date.now()
+  for (const effect of fx) {
+    if (effect.kind === 'toast') void Promise.resolve($.ui.toast(effect.text)).catch(() => undefined)
+    else if (effect.kind === 'attention') drawAttention($, now)
+    else void closeJobFile($, effect)
+  }
+}
+
+/**
+ * A job the bar ended itself (its process gone, stopped, redone) gets its end written into its file, so no re-read
+ * (a reload's, a restart's) takes it for running. Left alone if its script wrote since (it lives) or ended it itself.
+ */
+async function closeJobFile($: Api, end: Extract<Effect, { kind: 'closeFile' }>) {
+  if (!jobsDir) return
+  const path = `${jobsDir}/${end.id}.json`
+  try {
+    const d = JSON.parse(await $.fs.read(path)) as JobFile
+    if (d.id !== end.id || d.state !== 'running' || d.updated > end.seen) return
+    d.state = end.ok ? 'done' : 'failed'
+    d.ended = end.ended
+    d.message = end.message ?? d.message
+    for (const s of d.steps)
+      if (s.state === 'running') {
+        s.state = d.state
+        s.ended = end.ended
+      }
+    await $.fs.write(path, JSON.stringify(d))
+  } catch {
+    // Gone, or being written: the model's memory of it (closedJobs) still keeps it from coming back.
+  }
 }
 
 /** When the work began: the list's first point to start, or with no list, the first task. */
@@ -917,8 +1054,11 @@ function isLongFinish(m: Model, now: number): boolean {
  * notifications" setting does it for the app's notifications.
  */
 const FLASH_IF_BEHIND = [
-  `Add-Type -Namespace PulseWise -Name Win -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [StructLayout(LayoutKind.Sequential)] public struct FLASHWINFO { public uint cbSize; public IntPtr hwnd; public uint dwFlags; public uint uCount; public uint dwTimeout; } [DllImport("user32.dll")] public static extern bool FlashWindowEx(ref FLASHWINFO fi);'`,
-  '$apps = @(Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })',
+  `Add-Type -Namespace PulseWise -Name Win -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder name, int size); [StructLayout(LayoutKind.Sequential)] public struct FLASHWINFO { public uint cbSize; public IntPtr hwnd; public uint dwFlags; public uint uCount; public uint dwTimeout; } [DllImport("user32.dll")] public static extern bool FlashWindowEx(ref FLASHWINFO fi);'`,
+  // The desktop app's own windows only (its Electron windows, class Chrome_WidgetWin_1): a console window of the
+  // claude command line carries the same process name.
+  'function Test-AppWindow($h) { $n = New-Object System.Text.StringBuilder 256; [void][PulseWise.Win]::GetClassName($h, $n, 256); $n.ToString() -eq "Chrome_WidgetWin_1" }',
+  '$apps = @(Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and (Test-AppWindow $_.MainWindowHandle) })',
   'if (-not $apps.Count) { exit 0 }',
   '$owner = [uint32]0',
   '[void][PulseWise.Win]::GetWindowThreadProcessId([PulseWise.Win]::GetForegroundWindow(), [ref]$owner)',
@@ -935,10 +1075,6 @@ function drawAttention($: Api, now: number) {
   if (!appData || now - attentionAt < ATTENTION_GAP_MS) return
   attentionAt = now
   void $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', FLASH_ENCODED], { timeoutMs: 20_000 }).catch(() => {})
-}
-
-function logLine(m: Model, entry: LogEntry) {
-  m.log.push(entry)
 }
 
 const runningPoint = (m: Model) => {
@@ -1020,30 +1156,32 @@ function matchingPoint(m: Model, name: string, fallback = true): number {
 
 /**
  * The unfinished points one of Claude's own steps belongs to, by its description: two telling words shared with the
- * point's name, or one that ties on its own (isTellingWord). Several can match when one step does several points' work.
+ * point's name (a close match), or one that ties on its own (isTellingWord). Several can match when one step does
+ * several points' work.
  */
-function stepPoints(m: Model, text: string): number[] {
+function stepPoints(m: Model, text: string): { index: number; isClose: boolean }[] {
   const mine = nameWords(text)
   if (!mine.size) return []
-  const found: number[] = []
+  const found: { index: number; isClose: boolean }[] = []
   m.points.forEach((p, i) => {
     if (p.state === 'done') return
     const shared = commonWords(mine, nameWords(p.name))
-    if (shared.length >= 2 || shared.some(isTellingWord)) found.push(i)
+    if (shared.length >= 2 || shared.some(isTellingWord)) found.push({ index: i, isClose: shared.length >= 2 })
   })
   return found
 }
 
 /**
- * Claude's step, matched to points: a point the list still has waiting starts moving on the bar from now (its real
- * start, kept when the list catches up), and Claude's current step shows under the point it matches.
+ * Claude's step, matched to points: its current step shows under the point it matches, and a point the list still has
+ * waiting starts moving on the bar from now (its real start, kept when the list catches up) only on a close match, two
+ * words in common: one shared word is too little to backdate a point's time by.
  */
 function noteStep(m: Model, text: string, now: number): boolean {
   let changed = false
-  for (const i of stepPoints(m, text)) {
-    const p = m.points[i]
+  for (const { index, isClose } of stepPoints(m, text)) {
+    const p = m.points[index]
     if (!p) continue
-    if (p.state === 'pending' && p.seenAt == null) p.seenAt = now
+    if (isClose && p.state === 'pending' && p.seenAt == null) p.seenAt = now
     p.activeAt = now
     changed = true
   }
@@ -1124,7 +1262,7 @@ function endPoint(m: Model, i: number, now: number) {
   // Ticked without being marked in progress: its work started when Claude's steps first matched it.
   p.started = p.started ?? p.seenAt ?? now
   p.ended = now
-  logLine(m, { text: `${i + 1}. ${p.name} · ${fmt(now - p.started)}`, ok: true, at: now })
+  m.log.push({ text: `${i + 1}. ${p.name} · ${fmt(now - p.started)}`, ok: true, at: now })
 }
 
 function startPoint(m: Model, i: number, now: number) {
@@ -1175,9 +1313,10 @@ function applyPlan(m: Model, input: Record<string, unknown>, now: number) {
     const named = items.map(item => item as { content?: unknown; status?: unknown })
     const isSame = isSameList(old, named)
     if (!isSame) {
-      // A new list: finished work and its log go; work still running stays as "other work".
+      // A new list: finished work and its log go; work not ended (running, or quiet) stays as "other work".
       m.log = []
-      m.tasks = m.tasks.filter(t => t.state === 'running').map(t => ({ ...t, point: -1 }))
+      dropTasks(m, t => !isFinal(t))
+      m.tasks = m.tasks.map(t => ({ ...t, point: -1 }))
     }
     const points: Point[] = named.map(item => {
       const name = String(item.content ?? '')
@@ -1202,7 +1341,7 @@ function applyPlan(m: Model, input: Record<string, unknown>, now: number) {
       points.forEach((p, i) => {
         const prev = old.find(one => one.name === p.name)
         if (p.state === 'done' && prev && prev.state !== 'done')
-          logLine(m, { text: `${i + 1}. ${p.name} · ${fmt(now - (prev.started ?? prev.seenAt ?? now))}`, ok: true, at: now })
+          m.log.push({ text: `${i + 1}. ${p.name} · ${fmt(now - (prev.started ?? prev.seenAt ?? now))}`, ok: true, at: now })
       })
     }
     m.points = points
@@ -1240,20 +1379,82 @@ function addTask(m: Model, task: Omit<Task, 'point' | 'steps' | 'actions' | 'cov
   })
 }
 
-function endTask($: Api, m: Model, t: Task, ok: boolean, now: number, message?: string) {
-  if (t.state !== 'running') return
+/**
+ * A task ends: done or failed, once. A job the bar ends itself (not by its own file saying so) has its end written to
+ * its file afterwards; every ended job is remembered, so a re-read never brings it back. An agent's end takes its own
+ * work with it (holdAgentWork). Shown work gets its line in "Done so far" and, when it ran long, a toast and the flash.
+ */
+function endTask(m: Model, t: Task, ok: boolean, now: number, fx: Effect[], message?: string, isFileEnded = false) {
+  if (isFinal(t)) return
   t.state = ok ? 'done' : 'failed'
   t.ended = now
+  t.pausedAt = null
   if (message) t.message = message
   for (const s of t.steps) if (s.state === 'running') s.state = ok ? 'done' : 'failed'
-  if (t.kind === 'agent')
-    for (const job of m.tasks.filter(o => o.owner === t.id && o.state === 'running' && o.pid === null)) endTask($, m, job, ok, now, message)
-  if (t.coveredBy || t.owner) return
-  logLine(m, { text: `${t.name} · ${ok ? fmt(now - t.started) : (message ?? 'stopped')}`, ok, at: now })
-  if (now - t.started > TOAST_AFTER_MS) {
-    $.ui.toast(`${ok ? 'Finished' : 'Stopped'}: ${t.name} · ${fmt(now - t.started)}`)
-    drawAttention($, now)
+  if (t.kind === 'job') {
+    rememberClosed(m, t)
+    t.endedByFile = isFileEnded
+    if (!isFileEnded) fx.push({ kind: 'closeFile', id: t.id, ok, ended: now, message: t.message, seen: t.updated })
   }
+  if (t.kind === 'agent') holdAgentWork(m, t, ok, now, fx, message)
+  if (t.coveredBy || t.owner) return
+  announce(m, t, ok, now, fx, message)
+}
+
+/**
+ * An agent's end, for the work of its own that runs without a process to watch: its background commands (their ends
+ * go to the agent, never to this chat) end with it; its step-by-step jobs go silent (they may yet report). Both reopen
+ * if the agent acts again (reviveAgent).
+ */
+function holdAgentWork(m: Model, agent: Task, ok: boolean, now: number, fx: Effect[], message?: string) {
+  for (const o of m.tasks) {
+    if (o.owner !== agent.id || o.pid !== null || o.state !== 'running') continue
+    if (o.kind === 'job') pause(o, now)
+    else endTask(m, o, ok, now, fx, message)
+    o.heldBy = agent.id
+  }
+}
+
+/** An end (or a quiet spell) undone: the task runs again, with nothing left of how it ended. */
+function reopen(t: Task) {
+  Object.assign(t, { state: 'running', ended: null, message: null, pausedAt: null, heldBy: null, endedByFile: false })
+}
+
+/** An agent taken for ended (or between turns) acts again: it runs, and the work its end closed reopens. */
+function reviveAgent(m: Model, agent: Task) {
+  if (isPaused(agent)) resume(agent)
+  else if (isFinal(agent)) reopen(agent)
+  for (const o of m.tasks) if (o.heldBy === agent.id) reopen(o)
+}
+
+/**
+ * An end in "Done so far" (one line a task: an end after a revival replaces its earlier line) and, for work that ran
+ * long, a toast and the taskbar flash, once a task.
+ */
+function announce(m: Model, t: Task, ok: boolean, now: number, fx: Effect[], message?: string) {
+  m.log = m.log.filter(entry => entry.id !== t.id)
+  m.log.push({ text: `${t.name} · ${ok ? fmt(now - t.started) : (message ?? 'stopped')}`, ok, at: now, id: t.id })
+  if (t.announced || now - t.started <= TOAST_AFTER_MS) return
+  t.announced = true
+  fx.push({ kind: 'toast', text: `${ok ? 'Finished' : 'Stopped'}: ${t.name} · ${fmt(now - t.started)}` }, { kind: 'attention' })
+}
+
+/** A job the bar ended itself reports again: it runs, its line in "Done so far" goes (its real end writes a new one). */
+function reopenJob(m: Model, t: Task) {
+  reopen(t)
+  delete m.closedJobs[t.id]
+  m.log = m.log.filter(entry => entry.id !== t.id)
+}
+
+/** A job the bar no longer holds as running: its file's report then, so a re-read of the same report is history. */
+function rememberClosed(m: Model, t: Task) {
+  if (t.kind === 'job') m.closedJobs[t.id] = Math.max(m.closedJobs[t.id] ?? 0, t.updated)
+}
+
+/** Takes tasks off the bar (keeping those `keep` says), remembering the jobs among them (rememberClosed). */
+function dropTasks(m: Model, keep: (t: Task) => boolean) {
+  for (const t of m.tasks) if (!keep(t)) rememberClosed(m, t)
+  m.tasks = m.tasks.filter(keep)
 }
 
 /** Reads a background task's end from its notification text. */
@@ -1268,15 +1469,15 @@ function endFromNotification($: Api, text: string) {
     ends.push({ id, status, toolUseId })
   }
   if (!ends.length) return
-  void mutate($, (m, now) => {
+  void mutate($, (m, now, fx) => {
     let changed = false
     for (const end of ends) {
       const t = m.tasks.find(one => one.id === end.id || (end.toolUseId !== null && one.id === end.toolUseId))
-      if (!t || t.state !== 'running') continue
-      endTask($, m, t, end.status === 'completed', now, end.status === 'completed' ? undefined : end.status)
+      if (!t || isFinal(t)) continue
+      endTask(m, t, end.status === 'completed', now, fx, end.status === 'completed' ? undefined : end.status)
       if (t.coveredBy) {
         const job = m.tasks.find(one => one.id === t.coveredBy)
-        if (job && job.state === 'running' && end.status !== 'completed') endTask($, m, job, false, now, end.status)
+        if (job && !isFinal(job) && end.status !== 'completed') endTask(m, job, false, now, fx, end.status)
       }
       changed = true
     }
@@ -1284,8 +1485,9 @@ function endFromNotification($: Api, text: string) {
   })
 }
 
-function jobToTask(m: Model, d: JobFile, existing: Task | undefined): Task {
-  const steps: TaskStep[] = d.steps.map(s => ({
+/** A job file's steps, as the model keeps them. */
+const stepsOf = (d: JobFile): TaskStep[] =>
+  d.steps.map(s => ({
     name: s.name,
     state: s.state,
     done: s.done,
@@ -1296,36 +1498,96 @@ function jobToTask(m: Model, d: JobFile, existing: Task | undefined): Task {
     weight: s.weight,
     unit: s.unit ?? null,
   }))
+
+/** What a job file says, as the model keeps it: the same fields for a job first seen and for one read again. */
+const progressOf = (d: JobFile) => ({
+  name: d.name,
+  pointName: d.point,
+  started: d.started,
+  steps: stepsOf(d),
+  command: d.argv,
+  script: d.script,
+  pid: d.pid,
+  heartbeat: d.heartbeat,
+  ttl: d.ttl_ms ?? null,
+  updated: d.updated,
+  message: d.message,
+})
+
+/** A job file first seen, as a running task (its file's end, if it says one, is applied after: applyJobFile). */
+function jobToTask(m: Model, d: JobFile): Task {
   return {
+    ...progressOf(d),
     id: d.id,
     kind: 'job',
-    name: d.name,
-    point: existing?.point ?? pointFor(m, d.point, d.started, d.name),
-    pointName: d.point,
-    started: d.started,
-    ended: d.ended,
-    state: d.state,
-    steps,
+    point: pointFor(m, d.point, d.started, d.name),
+    ended: null,
+    state: 'running',
     actions: 0,
-    command: d.argv,
-    script: d.script,
-    pid: d.pid,
-    heartbeat: d.heartbeat,
-    ttl: d.ttl_ms ?? null,
-    updated: d.updated,
     coveredBy: null,
-    message: d.message,
   }
 }
+
+// A heartbeat job's file this old when the bar first sees it: its script is long gone (a crash, a power cut, a
+// restart), so it is history, unless it reports again.
+const LONG_GONE_MS = 10 * 60_000
+
+/** A job past its time without a report: a job with no process to watch, past its ttl (30 minutes by default). */
+const isOverdue = (t: Task, now: number) => t.kind === 'job' && t.pid === null && now - t.updated > (t.ttl ?? 30 * 60_000)
+
+/**
+ * One job file read afresh, applied to the model:
+ *   new to the bar     added and linked (to the command it reports, the agent that runs it, the stopped job it
+ *                      redoes) unless it is history: ended before the bar saw it, ended or taken off by this bar
+ *                      already (closedJobs) with no report since, or long gone at first sight
+ *   ended in the bar   left alone (the same report read again never reopens it), unless the bar ended it itself (its
+ *                      process looked gone, it was stopped) and its own file reports running since: it lives after all
+ *   still open         takes the file's progress; a silent job runs again when the file has reported since; the file's
+ *                      own end ends it
+ */
+function applyJobFile(m: Model, d: JobFile, now: number, fx: Effect[]): boolean {
+  const existing = m.tasks.find(t => t.id === d.id)
+  if (!existing) {
+    const closed = m.closedJobs[d.id]
+    if (closed !== undefined && d.updated <= closed) return false
+    // A job that ended before this bar saw it is history, not news.
+    if (d.state !== 'running' && now - (d.ended ?? 0) > LINGER_MS) return false
+    const task = jobToTask(m, d)
+    const isLongGone = d.state === 'running' && (d.pid !== null && d.heartbeat ? now - d.updated > LONG_GONE_MS : isOverdue(task, now))
+    if (isLongGone) {
+      rememberClosed(m, task)
+      return true
+    }
+    m.tasks.push(task)
+    linkToShell(m, task)
+    linkToAgent(m, task)
+    linkRedo(m, task, d.redoes ?? null, now, fx)
+    if (d.state !== 'running') endTask(m, task, d.state === 'done', d.ended ?? now, fx, d.message ?? undefined, true)
+    return true
+  }
+  const hasReported = d.updated > existing.updated
+  if (isFinal(existing)) {
+    if (existing.endedByFile || d.state !== 'running' || !hasReported) return false
+    reopenJob(m, existing)
+  }
+  Object.assign(existing, { ...progressOf(d), updated: Math.max(existing.updated, d.updated) })
+  if (existing.state === 'silent' && hasReported) resume(existing)
+  if (d.state !== 'running') endTask(m, existing, d.state === 'done', d.ended ?? now, fx, d.message ?? undefined, true)
+  return true
+}
+
+/** A job's script name too common to tell which command started it: an interpreter or a shell, with or without .exe. */
+const isGenericScript = (script: string) => /^(python[\d.]*|py|node|deno|bun|npx|npm|bash|sh|zsh|cmd|powershell|pwsh|claude|-c)(\.exe)?$/i.test(script.trim())
 
 /** A job started by a background agent (named like it, or started by one of its commands) joins the agent's bar. */
 function linkToAgent(m: Model, job: Task) {
   if (job.owner) return
   const mine = nameWords(job.name)
   for (const agent of m.tasks) {
-    if (agent.kind !== 'agent' || agent.state !== 'running') continue
+    if (agent.kind !== 'agent' || isFinal(agent)) continue
     const isNamed = isNamedLike(mine, taskWords(agent.name))
-    const isStartedByIt = (agent.commands ?? []).some(command => command.includes(job.name) || (!!job.script && job.script !== 'progress.py' && command.includes(job.script)))
+    const script = job.script ?? ''
+    const isStartedByIt = (agent.commands ?? []).some(command => command.includes(job.name) || (!!script && script !== 'progress.py' && !isGenericScript(script) && command.includes(script)))
     if (!isNamed && !isStartedByIt) continue
     job.owner = agent.id
     if (!job.pointName) job.point = agent.point
@@ -1338,7 +1600,7 @@ function linkToAgent(m: Model, job: Task) {
  * Named outright (redoes, by id or name), or found: a stopped job in the same point, started before it within 3
  * hours, whose name shares at least two telling words with this one ("Cut out the 4 fills" / "... legs fill").
  */
-function linkRedo($: Api, m: Model, job: Task, redoes: string | null, now: number) {
+function linkRedo(m: Model, job: Task, redoes: string | null, now: number, fx: Effect[]) {
   let old: Task | undefined
   if (redoes) {
     old =
@@ -1352,9 +1614,10 @@ function linkRedo($: Api, m: Model, job: Task, redoes: string | null, now: numbe
       .sort((a, b) => b.started - a.started)[0]
   }
   if (!old || old.coveredBy) return
-  // Hidden first, so a stopped record that still says running is closed without a second line in "Done so far".
+  // Hidden first (superseded), so a stopped record that still says running is closed without a second line in "Done
+  // so far", and its file is marked ended.
   old.coveredBy = job.id
-  if (old.state === 'running') endTask($, m, old, false, now, 'redone')
+  if (!isFinal(old)) endTask(m, old, false, now, fx, 'redone')
   job.redoOf = old.name
   if (redoes && !job.pointName) job.point = old.point
 }
@@ -1362,7 +1625,7 @@ function linkRedo($: Api, m: Model, job: Task, redoes: string | null, now: numbe
 /** A helper job started by a background command reports that command's progress. */
 function linkToShell(m: Model, job: Task) {
   const script = (job.script ?? '').trim()
-  if (!script || /^(python[\d.]*|-c|bash|sh|zsh)$/.test(script)) return
+  if (!script || isGenericScript(script)) return
   const shell = m.tasks.find(
     t => t.kind === 'shell' && t.state === 'running' && !t.coveredBy && (t.command ?? '').includes(script) && t.started <= job.started + 2000,
   )
@@ -1371,49 +1634,35 @@ function linkToShell(m: Model, job: Task) {
   if (!job.pointName) job.point = shell.point
 }
 
-async function readJobs($: Api, m: Model, now: number): Promise<boolean> {
+/**
+ * The JSON files in `dir` written since this bar last read them (by their mtime, kept in `seen`), parsed; dot files
+ * left out; null when the folder could not be listed. A file that does not parse (being written) is read again next time.
+ */
+async function readChanged<T>($: Api, dir: string, seen: Map<string, number>): Promise<T[] | null> {
   let entries: { name: string; kind: string; mtimeMs: number }[] = []
   try {
-    entries = await $.fs.list(jobsDir)
+    entries = await $.fs.list(dir)
   } catch {
-    return false
+    return null
   }
-  let changed = false
+  const files: T[] = []
   for (const entry of entries) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json') || entry.name.startsWith('.')) continue
-    if (seenMtime.get(entry.name) === entry.mtimeMs) continue
-    seenMtime.set(entry.name, entry.mtimeMs)
-    let d: JobFile
+    if (seen.get(entry.name) === entry.mtimeMs) continue
+    seen.set(entry.name, entry.mtimeMs)
     try {
-      d = JSON.parse(await $.fs.read(`${jobsDir}/${entry.name}`)) as JobFile
+      const d: unknown = JSON.parse(await $.fs.read(`${dir}/${entry.name}`))
+      if (d && typeof d === 'object') files.push(d as T)
     } catch {
-      continue
+      seen.delete(entry.name)
     }
-    if (d.session !== session) continue
-    const existing = m.tasks.find(t => t.id === d.id)
-    // A job that ended before this bar saw it is history, not news.
-    if (!existing && d.state !== 'running' && now - (d.ended ?? 0) > LINGER_MS) continue
-    const task = jobToTask(m, d, existing)
-    if (existing) {
-      const wasRunning = existing.state === 'running'
-      Object.assign(existing, { ...task, coveredBy: existing.coveredBy, state: wasRunning ? 'running' : existing.state })
-      if (wasRunning && d.state !== 'running') {
-        existing.state = 'running'
-        endTask($, m, existing, d.state === 'done', d.ended ?? now, d.message ?? undefined)
-      }
-    } else {
-      m.tasks.push(task)
-      linkToShell(m, task)
-      linkToAgent(m, task)
-      linkRedo($, m, task, d.redoes ?? null, now)
-      if (d.state !== 'running') {
-        task.state = 'running'
-        endTask($, m, task, d.state === 'done', d.ended ?? now, d.message ?? undefined)
-      }
-    }
-    changed = true
   }
-  return changed
+  return files
+}
+
+/** This chat's job files written since the last read, parsed. Applied later, by applyJobFile. */
+async function fetchJobs($: Api): Promise<JobFile[]> {
+  return ((await readChanged<JobFile>($, jobsDir, seenMtime)) ?? []).filter(d => d.session === session)
 }
 
 const chatsDir = () => `${home}/.claude/progress/chats`
@@ -1462,8 +1711,7 @@ async function publish($: Api, m: Model, now: number) {
   if (!segs.length && !lastPublished) return
   const busy = isBusy(m)
   const isAsking = isWaitingOnPerson(m)
-  const isStopped = !isTurnRunning && m.points.some(p => p.state !== 'done') && !m.tasks.some(t => t.state === 'running')
-  const needsInput = busy && (isAsking || isStopped)
+  const needsInput = busy && (isAsking || isWaitingForReply(m))
   const left = busy && !needsInput ? mainLeft(m, now) : null
   const summary = {
     session,
@@ -1563,31 +1811,31 @@ async function readOtherRecords($: Api, chats: SideChat[], now: number) {
   }
 }
 
-async function readSideChats($: Api, m: Model, now: number): Promise<boolean> {
-  if (!project || !home) return false
-  let entries: { name: string; kind: string; mtimeMs: number }[] = []
-  try {
-    entries = await $.fs.list(chatsDir())
-  } catch {
-    return false
-  }
-  const kept = new Map(m.side.map(chat => [chat.session, chat]))
-  let changed = false
-  for (const entry of entries) {
-    if (entry.kind !== 'file' || !entry.name.endsWith('.json') || entry.name.startsWith('.')) continue
-    if (seenChatMtime.get(entry.name) === entry.mtimeMs) continue
-    seenChatMtime.set(entry.name, entry.mtimeMs)
-    try {
-      const d = JSON.parse(await $.fs.read(`${chatsDir()}/${entry.name}`)) as SideChat & { project?: string }
-      if (d.project !== project || d.session === session) continue
-      kept.set(d.session, { session: d.session, title: d.title || 'Other chat', pct: d.pct, busy: d.busy, line: d.line, updated: d.updated, segs: d.segs ?? [], finishedAt: d.finishedAt ?? null, focusedAt: d.focusedAt ?? null, needsInput: !!d.needsInput, isStopped: !!d.isStopped, host: d.host ?? '', left: typeof d.left === 'number' && d.left > 0 ? d.left : null, listedAt: kept.get(d.session)?.listedAt ?? now })
-      changed = true
-    } catch {
-      // A file being written right now: read again when it changes.
-    }
-  }
+/**
+ * The project's other chats whose files changed since the last read, parsed (null when the folder could not be read),
+ * with the shared seen marks and the chats' own records in the app read fresh for applySideChats. `seen` (the model
+ * as the poll began) only says which chats to look up.
+ */
+async function fetchSideChats($: Api, seen: Model, now: number): Promise<SideChat[] | null> {
+  if (!project || !home) return null
+  const read = await readChanged<SideChat & { project?: string }>($, chatsDir(), seenChatMtime)
+  if (!read) return null
+  const fresh: SideChat[] = read
+    .filter(d => d.project === project && d.session !== session)
+    .map(d => ({ session: d.session, title: d.title || 'Other chat', pct: d.pct, busy: d.busy, line: d.line, updated: d.updated, segs: d.segs ?? [], finishedAt: d.finishedAt ?? null, focusedAt: d.focusedAt ?? null, needsInput: !!d.needsInput, isStopped: !!d.isStopped, host: d.host ?? '', left: typeof d.left === 'number' && d.left > 0 ? d.left : null }))
   await readSeen($)
-  await readOtherRecords($, [...kept.values()], now)
+  const listed = new Map(seen.side.map(chat => [chat.session, chat]))
+  for (const chat of fresh) listed.set(chat.session, chat)
+  await readOtherRecords($, [...listed.values()], now)
+  return fresh
+}
+
+/** The other chats read (fetchSideChats), merged into the model's list, and the ones no longer worth showing taken off. */
+function applySideChats(m: Model, fresh: SideChat[] | null, now: number): boolean {
+  if (!fresh) return false
+  const kept = new Map(m.side.map(chat => [chat.session, chat]))
+  let changed = fresh.length > 0
+  for (const chat of fresh) kept.set(chat.session, { ...chat, listedAt: kept.get(chat.session)?.listedAt ?? now })
   // A chat that is not working and never finished anything (idle since it started) is not shown. A finished chat
   // leaves once the person opened it after it finished (its own record in the app says when), or a little after
   // they saw it in the panel of any chat (unseen and unopened, after a long cap); one that stopped writing while
@@ -1605,61 +1853,147 @@ async function readSideChats($: Api, m: Model, now: number): Promise<boolean> {
       changed = true
     }
   }
-  if (isSeenDirty) await writeSeen($, now)
   // Each chat keeps the spot it took when it was first listed, oldest on top, so the rows never swap on an update.
   if (changed) m.side = [...kept.values()].sort((a, b) => (a.listedAt ?? 0) - (b.listedAt ?? 0) || a.session.localeCompare(b.session))
   return changed
 }
 
-async function checkProcesses($: Api, m: Model, now: number): Promise<boolean> {
-  let isStale = false
-  for (const t of m.tasks)
-    if (t.kind === 'job' && t.state === 'running' && t.pid === null && now - t.updated > (t.ttl ?? 30 * 60_000)) {
-      endTask($, m, t, false, now, 'stopped reporting')
-      isStale = true
-    }
-  const doubtful = m.tasks.filter(
-    t => t.kind === 'job' && t.state === 'running' && t.pid !== null && (!t.heartbeat || now - t.updated > STALE_MS),
-  )
-  if (!doubtful.length) return isStale
-  let alive = new Set<number>()
+/** A job, running or silent, whose process is worth a look (isDoubtfulReport). */
+const isDoubtful = (t: Task, now: number) => t.kind === 'job' && (t.state === 'running' || t.state === 'silent') && isDoubtfulReport(t, now)
+
+/** A report (a job task's or a job file's) with a pid that is not heartbeating, or whose heartbeat is over STALE_MS old. */
+const isDoubtfulReport = (report: { pid: number | null; heartbeat: boolean; updated: number }, now: number) =>
+  report.pid !== null && (!report.heartbeat || now - report.updated > STALE_MS)
+
+/**
+ * The pids of these that still run, or null when this system's process list could not be read (then nothing is taken
+ * for dead): tasklist on Windows, ps on macOS and Linux.
+ */
+async function alivePids($: Api, pids: number[]): Promise<Set<number> | null> {
   try {
-    const ran = await $.process.run(['ps', '-o', 'pid=', '-p', doubtful.map(t => t.pid).join(',')])
-    alive = new Set(ran.stdout.split(/\s+/).filter(Boolean).map(Number))
+    if (appData) {
+      const ran = await $.process.run(['tasklist', '/FO', 'CSV', '/NH'], { timeoutMs: 15_000 })
+      const listed = new Set<number>()
+      for (const line of ran.stdout.split(/\r?\n/)) {
+        const pid = /^"[^"]*","(\d+)"/.exec(line.trim())?.[1]
+        if (pid) listed.add(Number(pid))
+      }
+      // A list with no process in it (not even tasklist itself) was not read.
+      return ran.exitCode === 0 && listed.size ? new Set(pids.filter(pid => listed.has(pid))) : null
+    }
+    const ran = await $.process.run(['ps', '-o', 'pid=', '-p', pids.join(',')], { timeoutMs: 15_000 })
+    // ps answers 1 when none of them runs; anything else, or a complaint, is ps not working.
+    if (ran.exitCode !== 0 && (ran.exitCode !== 1 || ran.stderr.trim())) return null
+    return new Set(ran.stdout.split(/\s+/).filter(Boolean).map(Number))
   } catch {
-    // ps did not run: fall back to the heartbeat alone.
-    for (const t of doubtful) if (t.heartbeat) endTask($, m, t, false, now, 'stopped responding')
-    return doubtful.some(t => t.heartbeat)
+    return null
   }
-  let changed = isStale
-  for (const t of doubtful) {
-    if (alive.has(t.pid as number)) continue
-    endTask($, m, t, false, now, 'stopped (the script ended without finishing)')
-    changed = true
+}
+
+/** What a look at the doubtful jobs' processes found: which were asked, which live, and gone ones' files read again. */
+type PidCheck = { pids: Map<string, number>; alive: Set<number> | null; ends: JobFile[] }
+
+/** The doubtful jobs' processes looked up: the model's (as the poll began) and the ones this poll read for the first time. */
+async function checkPids($: Api, seen: Model, read: JobFile[], now: number): Promise<PidCheck | null> {
+  const doubtful = new Map<string, number>()
+  for (const t of seen.tasks) if (isDoubtful(t, now)) doubtful.set(t.id, t.pid as number)
+  for (const d of read)
+    if (!seen.tasks.some(t => t.id === d.id) && d.state === 'running' && isDoubtfulReport(d, now)) doubtful.set(d.id, d.pid as number)
+  if (!doubtful.size) return null
+  const alive = await alivePids($, [...new Set(doubtful.values())])
+  // A process gone may have written its end since this poll read the files: its file has the last word.
+  const ends: JobFile[] = []
+  if (alive)
+    for (const [id, pid] of doubtful) {
+      if (alive.has(pid)) continue
+      try {
+        const d = JSON.parse(await $.fs.read(`${jobsDir}/${id}.json`)) as JobFile
+        if (d.id === id && d.state !== 'running') ends.push(d)
+      } catch {
+        // No file to read: the process check stands.
+      }
+    }
+  return { pids: doubtful, alive, ends }
+}
+
+/**
+ * The process check applied: a job whose process lives runs (a silent one again); one whose process is gone fails,
+ * once; when the check could not run, a heartbeat job long unheard goes silent, never failed on that alone.
+ */
+function applyPids(m: Model, check: PidCheck, now: number, fx: Effect[]): boolean {
+  let changed = false
+  for (const d of check.ends) changed = applyJobFile(m, d, now, fx) || changed
+  for (const t of m.tasks) {
+    const pid = check.pids.get(t.id)
+    if (pid === undefined || pid !== t.pid || !isDoubtful(t, now)) continue
+    if (check.alive === null) {
+      if (t.heartbeat && t.state === 'running') {
+        pause(t, now)
+        changed = true
+      }
+    } else if (check.alive.has(pid)) {
+      if (t.state === 'silent') {
+        resume(t)
+        changed = true
+      }
+    } else {
+      endTask(m, t, false, now, fx, 'stopped (the script ended without finishing)')
+      changed = true
+    }
   }
   return changed
 }
 
-async function checkAgents($: Api, m: Model, now: number): Promise<boolean> {
-  const running = m.tasks.filter(t => t.kind === 'agent' && t.state === 'running')
-  if (!running.length) return false
-  // An unanswered list must not stop the rest of the update.
-  const agents = await $.agent.list().catch(() => null)
-  if (!agents) return false
+/** Jobs with no process to watch, past their time without a report, go silent (not failed: they may report again). */
+function pauseOverdue(m: Model, now: number): boolean {
   let changed = false
-  for (const t of running) {
-    const found = agents.find(a => a.id === t.id)
-    // One the app no longer lists has ended (a moment's grace for one just spawned).
-    if (!found) {
-      if (now - t.started < 10_000) continue
-      endTask($, m, t, true, now)
+  for (const t of m.tasks)
+    if (t.state === 'running' && isOverdue(t, now)) {
+      pause(t, now)
       changed = true
-      continue
     }
-    if (found.status === 'completed' || found.status === 'idle') endTask($, m, t, true, now)
-    else if (found.status === 'failed' || found.status === 'killed') endTask($, m, t, false, now, found.status)
-    else continue
-    changed = true
+  return changed
+}
+
+/**
+ * An agent's state by the app's word for it: gone from the list, or completed, is done; failed or killed, failed;
+ * running, pending or waiting (on its own background work) runs; idle, or a word PulseWise does not know, is
+ * between turns (never taken for an end).
+ */
+function agentStateOf(info: AgentInfo | undefined): TaskState {
+  if (!info) return 'done'
+  switch (info.status) {
+    case 'completed':
+      return 'done'
+    case 'failed':
+    case 'killed':
+      return 'failed'
+    case 'running':
+    case 'pending':
+    case 'waiting':
+      return 'running'
+    default:
+      return 'betweenTurns'
+  }
+}
+
+/** Moves an agent to the state the app gives it: ended once (with its own work), or running and between turns either way. */
+function moveAgent(m: Model, t: Task, next: TaskState, now: number, fx: Effect[], status?: string): boolean {
+  if (next === t.state || isFinal(t)) return false
+  if (next === 'done' || next === 'failed') endTask(m, t, next === 'done', now, fx, next === 'failed' ? status : undefined)
+  else if (next === 'running') resume(t)
+  else pause(t, now)
+  return true
+}
+
+/** The app's list of agents applied to the agents not ended (a moment's grace for one just spawned and not yet listed). */
+function applyAgents(m: Model, agents: AgentInfo[], now: number, fx: Effect[]): boolean {
+  let changed = false
+  for (const t of m.tasks) {
+    if (t.kind !== 'agent' || isFinal(t)) continue
+    const found = agents.find(a => a.id === t.id)
+    if (!found && now - t.started < 10_000) continue
+    changed = moveAgent(m, t, agentStateOf(found), now, fx, found?.status) || changed
   }
   return changed
 }
@@ -1683,7 +2017,6 @@ async function openChat($: Api, host: string) {
 // An other-chat row's height in px (its 50 px row less the gap under it); its name's click area: from the row's top,
 // this tall, round the 12.5 px name (caps from about 4 px, descenders to about 17).
 const CHAT_ROW = 46
-const CHAT_NAME_TOP = 0
 const CHAT_NAME_H = 18
 // Room each side of an other chat's name inside its click highlight.
 const NAME_PAD = 6
@@ -1727,37 +2060,54 @@ function redraw($: Api, now: number) {
 /** What the other-chats button says: which chats are listed and whether each works, waits or is done. */
 const sideKey = (m: Model) => m.side.map(chat => `${chat.session}:${chat.busy ? (chat.needsInput ? 'wait' : 'busy') : 'done'}`).join(',')
 
+/** What one poll read from disk and the app, before any of it is applied. */
+type PollRead = { jobs: JobFile[]; chats: SideChat[] | null; pids: PidCheck | null; agents: AgentInfo[] | null }
+
+/** A poll's reads, applied to the newest model (inside mutate, after every hook change that landed meanwhile). */
+function applyPoll(m: Model, found: PollRead, now: number, fx: Effect[]): boolean {
+  let changed = false
+  for (const d of found.jobs) changed = applyJobFile(m, d, now, fx) || changed
+  changed = applySideChats(m, found.chats, now) || changed
+  changed = pauseOverdue(m, now) || changed
+  if (found.pids) changed = applyPids(m, found.pids, now, fx) || changed
+  if (found.agents) changed = applyAgents(m, found.agents, now, fx) || changed
+  if (!isVisible(m, now) && m.finishedAt !== null && !m.points.length && m.tasks.length) {
+    // Nothing left to show: clear the finished tasks (they stay in "Done so far").
+    dropTasks(m, () => false)
+    changed = true
+  }
+  return changed
+}
+
 async function poll($: Api) {
   if (isPolling || !session) return
   isPolling = true
   lastPollAt = Date.now()
   try {
     const now = Date.now()
-    const before = await read($, model)
-    const current = copy(before)
+    // The model as the poll begins says only what to look at. What the looks find is applied to the newest model
+    // (applyPoll, through mutate), so a hook's change that lands while they run (a task's end, a new agent, a ticked
+    // point, the end of a turn) is never written over.
+    const seen = view(await read($, model))
     await readOwnRecord($, now)
-    let changed = await readJobs($, current, now)
-    changed = (await readSideChats($, current, now)) || changed
+    const jobs = await fetchJobs($)
+    const chats = await fetchSideChats($, seen, now)
+    let pids: PidCheck | null = null
     if (now - lastPidCheck >= 5000) {
       lastPidCheck = now
-      changed = (await checkProcesses($, current, now)) || changed
+      pids = await checkPids($, seen, jobs, now)
     }
-    if (now - lastAgentCheck >= 2000) {
+    let agents: AgentInfo[] | null = null
+    if (now - lastAgentCheck >= 2000 && seen.tasks.some(t => t.kind === 'agent' && !isFinal(t))) {
       lastAgentCheck = now
-      changed = (await checkAgents($, current, now)) || changed
+      // An unanswered list must not stop the rest of the update, nor end any agent.
+      agents = await $.agent.list().catch(() => null)
     }
-    if (!isVisible(current, now) && current.finishedAt !== null && !current.points.length && current.tasks.length) {
-      // Nothing left to show: clear the finished tasks (they stay in "Done so far").
-      current.tasks = []
-      changed = true
-    }
-    if (changed) {
-      settle(current, now)
-      await update($, model, () => current)
-      // While the band draws nothing (no work here), the app does not draw it again on a change by itself: ask, when
-      // the band should appear or go, or the other chats it lists change (one working, one done, one waiting).
-      if (isVisible(current, now) !== isVisible(before, now) || sideKey(current) !== sideKey(before)) redraw($, now)
-    }
+    const { before, after: current, changed } = await mutate($, (m, at, fx) => applyPoll(m, { jobs, chats, pids, agents }, at, fx))
+    if (isSeenDirty) await writeSeen($, now)
+    // While the band draws nothing (no work here), the app does not draw it again on a change by itself: ask, when
+    // the band should appear or go, or the other chats it lists change (one working, one done, one waiting).
+    if (changed && (isVisible(current, now) !== isVisible(before, now) || sideKey(current) !== sideKey(before))) redraw($, now)
     // Opening this chat, or staying on it, draws the band again too (the app may have held a redraw back while the
     // chat sat idle): within 5 s of the person opening it, and every 10 s while there is something to show.
     const isOpenedNow = focusedAt !== null && focusedAt !== answeredFocus
@@ -1855,9 +2205,6 @@ export const register: Register = (on, options) => {
   parentHost = ''
   chatTitle = ''
   lastRecordCheck = 0
-  isTurnRunning = false
-  turnCount = 0
-  listTurn = -1
   recordPath = ''
   recordMtime = 0
   focusedAt = null
@@ -1906,13 +2253,17 @@ export const register: Register = (on, options) => {
     if (!agentId && tool.includes('ccd_turn__')) {
       let note = ''
       if (tool.endsWith('__update_plan')) {
-        const before = await read($, model)
+        const before = view(await read($, model))
         const added = addedPoints(before, input)
         const rules = `${$.plugin.root}/progress/cheaper-agents.md`
         note = !isSideBySide ? '' : isNewPlan(before, input) ? parallelPlan(rules) : added.length ? addedNote(added, rules) : ''
         const items = Array.isArray(input.items) ? (input.items as { content?: unknown }[]) : null
-        await mutate($, (m, now) => (applyPlan(m, input, now), true))
-        listTurn = turnCount
+        await mutate($, (m, now) => {
+          applyPlan(m, input, now)
+          // A list Claude ticked done earlier in this same turn is still the work in hand (see isClaudeOnList).
+          m.listTurn = m.turn
+          return true
+        })
         // A new pulse starts with every beat folded: nothing opened from the list before.
         if (items && !isSameList(before.points, items)) {
           followKeys.clear()
@@ -1934,8 +2285,8 @@ export const register: Register = (on, options) => {
       await mutate($, m => {
         const t = m.tasks.find(one => one.id === agentId)
         if (!t) return false
-        // An agent taken for done that acts again was only between turns: it runs again.
-        if (t.kind === 'agent' && t.state !== 'running') Object.assign(t, { state: 'running', ended: null, message: null })
+        // An agent that acts is running: between turns, or taken for ended, it runs again with the work its end closed.
+        if (t.kind === 'agent' && t.state !== 'running') reviveAgent(m, t)
         t.actions += 1
         if (tool === 'Bash' && text('command')) t.commands = [...(t.commands ?? []), text('command').slice(0, 400)].slice(-12)
         return true
@@ -1964,7 +2315,7 @@ export const register: Register = (on, options) => {
         return true
       })
     const ran = await next(e)
-    await mutate($, (m, now) => {
+    await mutate($, (m, now, fx) => {
       let changed = false
       if ((m.actions ?? []).some(a => a.toolUseId === toolUseId)) {
         m.actions = (m.actions ?? []).filter(a => a.toolUseId !== toolUseId)
@@ -1975,12 +2326,15 @@ export const register: Register = (on, options) => {
         result && typeof result === 'object'
           ? ((result.backgroundTaskId ?? result.taskId ?? result.task_id) as string | undefined)
           : undefined
-      // A background task Claude stops sends no end notification: TaskStop (KillShell before it) is its end.
+      // A background task Claude stops sends no end notification: TaskStop (KillShell before it) is its end. A
+      // command a helper job reports (covered) takes its job with it.
       if (tool === 'TaskStop' || tool === 'KillShell') {
         const stopped = text('task_id') || text('shell_id')
-        const t = m.tasks.find(one => one.id === stopped && one.state === 'running')
+        const t = m.tasks.find(one => one.id === stopped && !isFinal(one))
         if (t) {
-          endTask($, m, t, false, now, 'stopped')
+          endTask(m, t, false, now, fx, 'stopped')
+          const job = t.coveredBy ? m.tasks.find(one => one.id === t.coveredBy) : undefined
+          if (job && !isFinal(job)) endTask(m, job, false, now, fx, 'stopped')
           changed = true
         }
       }
@@ -2007,40 +2361,44 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId) {
-      isTurnRunning = true
-      turnCount += 1
-      // A new turn after Stop: Claude's own part moves again.
-      await mutate($, m => (m.stoppedAt != null ? ((m.stoppedAt = null), true) : false))
-    }
+    if (!e.agentId)
+      // Claude's turn runs (after a reply, a Stop or a background task's end): its own part moves again.
+      await mutate($, (m, now) => {
+        m.phase = 'working'
+        m.phaseAt = now
+        m.turn += 1
+        return true
+      })
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const ended = await next(e)
     const agentId = (e as unknown as { agentId?: string }).agentId
-    if (!agentId) isTurnRunning = false
-    // A background agent's turn also ends while it waits on its own background command; it wakes again when that
-    // command ends. The app's own word for it says which: one still waiting (or running) is left to the regular check.
-    const status = agentId ? (await $.agent.list().catch(() => [])).find(a => a.id === agentId)?.status : undefined
-    if (agentId && status !== 'waiting' && status !== 'running' && status !== 'pending')
-      await mutate($, (m, now) => {
-        const t = m.tasks.find(one => one.id === agentId && one.kind === 'agent')
-        if (!t || t.state !== 'running') return false
-        endTask($, m, t, true, now)
-        return true
-      })
-    else if (!agentId) {
-      // Stop pressed: Claude's own part of the open points stands still (its background work runs on, and shows).
+    if (agentId) {
+      // A background agent's turn also ends while it waits on its own background command; it wakes again when that
+      // command ends. The app's own word for it says which (agentStateOf); with no word (the list unanswered), the
+      // regular check decides later, and nothing ends now.
+      const agents = await $.agent.list().catch(() => null)
+      if (agents)
+        await mutate($, (m, now, fx) => {
+          const t = m.tasks.find(one => one.id === agentId && one.kind === 'agent')
+          if (!t) return false
+          const info = agents.find(a => a.id === agentId)
+          return moveAgent(m, t, agentStateOf(info), now, fx, info?.status)
+        })
+    } else {
+      // Its turn over: with points still open Claude's own part stands still, waiting for the person (or stopped by
+      // them); its background work runs on, and shows. A step matched to a waiting point this turn no longer counts.
       const isStop = e.isAborted
       await mutate($, (m, now) => {
-        const hadActions = (m.actions ?? []).length > 0
         m.actions = []
-        if (isStop && m.points.some(p => p.state !== 'done')) {
-          m.stoppedAt = now
-          return true
-        }
-        return hadActions
+        const isOpen = m.points.some(p => p.state !== 'done')
+        const phase: ChatPhase = isOpen ? (isStop ? 'stoppedByPerson' : 'awaitingReply') : 'finished'
+        m.phase = phase
+        m.phaseAt = now
+        for (const p of m.points) if (p.state === 'pending') p.seenAt = null
+        return true
       })
       // Claude stopping changes what the band shows (a finished list goes; Claude's part stops moving), and the app
       // does not draw it again by itself once the list finished a while ago: ask now, and again when a list finished
@@ -2060,7 +2418,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const m = await read($, model)
+    const m = view(await read($, model))
     const tickNow = await read($, tick)
     const now = Date.now()
     // Drawn after a quiet spell (the app holds an idle chat's timers back): check jobs and other chats now, so what
@@ -2069,7 +2427,7 @@ export const register: Register = (on, options) => {
     // Claude working on a list keeps its pulse up, even with every point ticked and no background job (a long command
     // in the foreground, in the turn that ticked them): the list is behind, and Nudge says so. A list finished in an
     // earlier turn does not come back for a new message.
-    const isClaudeOnList = e.props.isWorking && m.points.length > 0 && (m.points.some(p => p.state !== 'done') || listTurn === turnCount)
+    const isClaudeOnList = e.props.isWorking && m.points.length > 0 && (m.points.some(p => p.state !== 'done') || m.listTurn === m.turn)
     if (!isVisible(m, now) && !isClaudeOnList) return next(e)
 
     const picked = await read($, selected)

@@ -4,16 +4,16 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { afterTurn, clearStaleFolding, compactNow, onCompact, REBUILD_ASK, setReplying } from './actions'
+import { afterTurn, compactNow, onCompact, REBUILD_ASK, resetActions, setReplying, showFolding } from './actions'
 import { shortTokens } from './chunks'
 import { refreshContext, workTokens } from './measure'
-import { FILES_PREFIX, IMPORT_DESCRIPTION, IMPORT_SCHEMA, importPack, isPackWaiting, notePackTurn, PACK_PREFIX, packTurnDone } from './pack'
+import { FILES_PREFIX, IMPORT_DESCRIPTION, IMPORT_SCHEMA, importPack, isPackBusy, notePackTurn, PACK_PREFIX, packTurnDone, resetPack } from './pack'
 import { RECALL_TOOL } from './fold'
-import { drawPanel, worthALook } from './panel'
-import { RECALL_BLOCK, RECALL_DESCRIPTION, RECALL_SCHEMA, recall } from './recall'
-import { change, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, openStore, setSettings, settingsOf } from './store'
+import { drawPanel, resetPanel, worthALook } from './panel'
+import { RECALL_BLOCK, RECALL_DESCRIPTION, RECALL_SCHEMA, recall, resetRecall } from './recall'
+import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, openStore, setSettings, settingsOf } from './store'
 import { shortenRow } from './shorten'
-import { syncChunks } from './sync'
+import { resetSync, syncChunks } from './sync'
 import { errorText, later, note } from './debug'
 
 const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
@@ -26,16 +26,50 @@ const COMMAND = 'folio'
 const PANEL = 'folio-panel'
 const TITLE = 'Folio'
 
+// Folio works in the session the chat is in now. /clear and a resume go on
+// under a new id with no session.start, so every hook that reads or writes the
+// store checks the id first: the old session is closed (its index written,
+// every per-session state let go) and the new one's store opened. One check
+// runs at a time.
+let binding: Promise<void> | null = null
+
+async function ensureSession($: EngineInterface): Promise<void> {
+  while (binding !== null) await binding
+  const id = await $.session.id()
+  if (boundId() === id) return
+  binding = rebind($, id).finally(() => (binding = null))
+  await binding
+}
+
+async function rebind($: EngineInterface, id: string) {
+  const was = boundId()
+  if (was !== null) await endSession($, was)
+  await openStore($, id)
+  if (was !== null) void note($, `the chat went on as session ${id}: Folio closed ${was} and opened ${id}`)
+}
+
+// Lets go of everything one session holds: its store, waiting folds and packs,
+// recall's counts, the panel's opened chunk and its FolioPack form.
+async function endSession($: EngineInterface, id: string) {
+  await closeStore($, id)
+  resetRecall()
+  resetSync()
+  resetPack()
+  await resetActions($)
+  await resetPanel($)
+}
+
 // Opens the panel in the side panel; the footer ring closes it when it is showing.
 // Each opening shuts What fills the context, sets Pack up back after a pack,
 // measures the context again and catches up on summaries, so the
 // panel never shows a size from before a compaction.
 async function openPanel($: EngineInterface) {
+  await ensureSession($)
   // What fills the context starts shut each time the panel opens.
   await update($, open, list => [...list.filter(x => x !== 'pack:context'), ...(list.includes('context-closed') ? [] : ['context-closed'])])
   // A pack Claude is still zipping keeps reading Packing….
-  await update($, packed, state => (state === 'packing' && isPackWaiting() ? state : null))
-  await clearStaleFolding($)
+  await update($, packed, () => (isPackBusy() ? ('packing' as const) : null))
+  await showFolding($)
   void refreshContext($).catch(() => {})
   later($, () => syncChunks($))
   const opened = await $.ui.open({ id: PANEL, title: TITLE, closeOnEscape: true })
@@ -59,14 +93,25 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: COMMAND, description: 'Open Folio, which keeps long chats small' })
     await $.tool.register({ name: 'recall', description: RECALL_DESCRIPTION, inputSchema: RECALL_SCHEMA, isDeferred: false })
     await $.tool.register({ name: 'import_pack', description: IMPORT_DESCRIPTION, inputSchema: IMPORT_SCHEMA, isDeferred: true })
-    await openStore($)
+    await ensureSession($)
     await change($, v => ({ ...v, cwd: e.cwd }))
     later($, async () => {
+      await ensureSession($)
       await refreshContext($).catch(() => {})
       await syncChunks($)
     })
 
     return started
+  })
+
+  // The session ends (an exit, /clear, a resume): its index is written and
+  // Folio lets go of it. After /clear or a resume the chat goes on under a new
+  // id, and the next hook opens that session's store.
+  on('session.end', async ($, e, next) => {
+    const id = boundId()
+    if (id !== null) await endSession($, id).catch(err => note($, `closing the session failed: ${errorText(err)}`))
+
+    return next(e)
   })
 
   on('command.run', { command: COMMAND }, async $ => {
@@ -77,6 +122,7 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
+      await ensureSession($)
       setReplying(true)
       notePackTurn(e.text, e.turnId)
     }
@@ -88,6 +134,7 @@ export const register: Register = (on, options) => {
     const done = await next(e)
     if (e.agentId === undefined) {
       setReplying(false)
+      await ensureSession($)
       // Pack up reads Packed once Claude has made the zips; if it didn't,
       // Pack up comes back and says so.
       const zipped = await packTurnDone($, e.turnId)
@@ -99,6 +146,7 @@ export const register: Register = (on, options) => {
       // Each step runs even if the one before fails: a size that can't be
       // read must not stop the summaries or Automatic's fold.
       later($, async () => {
+        await ensureSession($)
         await refreshContext($).catch(() => {})
         await syncChunks($).catch(err => note($, `sync failed: ${errorText(err, true)}`))
         await afterTurn($)
@@ -110,6 +158,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: RECALL_TOOL }, async ($, e) => {
     const query = typeof e.query === 'string' ? e.query : ''
+    await ensureSession($)
     const text = query.trim() === '' ? 'Give a query: what you need from the earlier chat.' : await recall($, query, e.exact === true)
 
     return { result: text }
@@ -118,9 +167,10 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__folio__import_pack' }, async ($, e) => {
     const path = typeof e.path === 'string' ? e.path : ''
     if (path.trim() === '') return { result: 'Give `path`: the unzipped FolioPack folder.' }
+    await ensureSession($)
     const { text, isOpened } = await importPack($, path)
     // The folded history goes in once this reply ends.
-    if (isOpened) void compactNow($, REBUILD_ASK)
+    if (isOpened) void compactNow($, REBUILD_ASK).catch(() => {})
 
     return { result: text }
   }).catch(() => ({ result: 'Folio could not open that FolioPack in time. Try again, or read its START-HERE.md.' }))
@@ -135,14 +185,22 @@ export const register: Register = (on, options) => {
     return next({ ...e, context: [...(e.context ?? []), note] })
   })
 
-  on('session.compact', async ($, e, next) => onCompact($, e, next))
+  on('session.compact', async ($, e, next) => {
+    await ensureSession($)
+
+    return onCompact($, e, next)
+  })
 
   on('prompt.context', async ($, e, next) => next({ ...e, blocks: [...e.blocks, RECALL_BLOCK] }))
 
   // A long shell output reaches Claude as its start, its end and a note on how
   // to recall the rest; the whole is saved first. The setting turns it off.
   if (options.shortenOutputs !== false) {
-    on('session.append', { door: 'tool-result' }, async ($, e, next) => next(await shortenRow($, e)))
+    on('session.append', { door: 'tool-result' }, async ($, e, next) => {
+      await ensureSession($)
+
+      return next(await shortenRow($, e))
+    })
   }
 
   // The Custom slider's value when the pointer comes up. It came from drawn
@@ -151,6 +209,7 @@ export const register: Register = (on, options) => {
     const done = await next(e)
     const ceiling = (e.data as { ceiling?: unknown } | null)?.ceiling
     if (e.element !== 'folio-custom-slider' || typeof ceiling !== 'number') return done
+    await ensureSession($)
     const v = await read($, view)
     const top = v.context?.customTop ?? CUSTOM_MAX
     if (ceiling >= CUSTOM_MIN && ceiling <= Math.min(top, CUSTOM_MAX) && ceiling % CUSTOM_STEP === 0) {
@@ -200,6 +259,8 @@ export const register: Register = (on, options) => {
   on('ui.press', { plugin: 'folio' }, async ($, e, next) => {
     const start = Date.now()
     try {
+      // A press changes the store of the session the chat is in now.
+      await ensureSession($)
       const done = await next(e)
       if (Date.now() - start > 500) void note($, `slow press ${e.element} -> ${JSON.stringify(done)} in ${Date.now() - start} ms`)
 

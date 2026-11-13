@@ -28,6 +28,7 @@ export const EMPTY_VIEW: PickerView = {
   headsUpFold: null,
   privateCount: 0,
   cwd: '',
+  unpinned: [],
 }
 
 // Each module that reads the view declares it the same way, so the engine's
@@ -71,6 +72,26 @@ export async function homeDir($: EngineInterface): Promise<string> {
 let dir = ''
 let vault: Vault = {}
 
+// The session the store is open for: none yet; one, by its id; or one that
+// ended (/clear and a resume go on under a new id, with no session.start), so
+// the next hook opens the store of whichever session it runs in.
+type Binding = { kind: 'unbound' } | { kind: 'bound'; id: string } | { kind: 'ended'; id: string }
+let binding: Binding = { kind: 'unbound' }
+// Moves on whenever the store opens or closes, so work started for one session
+// (a sync, a merge of the brief) can tell its session has gone and stop.
+let epoch = 0
+// The index writes, one after another, so a session's end can wait for the last.
+let saving: Promise<void> = Promise.resolve()
+
+// The id of the session the store is open for; null while none is.
+export function boundId(): string | null {
+  return binding.kind === 'bound' ? binding.id : null
+}
+
+export function sessionEpoch(): number {
+  return epoch
+}
+
 // A record saved by an older version gets the fields added since.
 export function normaliseChunk(c: Partial<ChunkRecord> & { id: string }): ChunkRecord {
   return {
@@ -98,7 +119,10 @@ export function normaliseChunk(c: Partial<ChunkRecord> & { id: string }): ChunkR
 }
 
 function normalisePin(p: Partial<PinnedFact> & { id: string }): PinnedFact {
-  return { kind: 'fact', text: '', query: '', chunkIds: [], recalls: 0, pinnedAt: 0, lastUsedFold: 0, ...p }
+  const pin = { kind: 'fact' as const, text: '', query: '', chunkIds: [], recalls: 0, pinnedAt: 0, lastUsedFold: 0, ...p }
+
+  // A pin saved before pins aged out counts its age from its last use.
+  return { ...pin, pinnedFold: p.pinnedFold ?? pin.lastUsedFold }
 }
 
 export function normaliseView(saved: Partial<PickerView>): Partial<PickerView> {
@@ -109,15 +133,32 @@ export function normaliseView(saved: Partial<PickerView>): Partial<PickerView> {
     joins: saved.joins ?? [],
     collapsed: saved.collapsed ?? [],
     briefDigest: saved.briefDigest ?? null,
+    unpinned: saved.unpinned ?? [],
   }
 }
 
-export async function openStore($: EngineInterface): Promise<void> {
-  dir = `${sessionsDir(await homeDir($))}/${await $.session.id()}`
+// Opens the store of session `id`: its folder, its saved index over what the
+// panel holds, and its private items.
+export async function openStore($: EngineInterface, id: string): Promise<void> {
+  binding = { kind: 'bound', id }
+  epoch += 1
+  dir = `${sessionsDir(await homeDir($))}/${id}`
   // A missing or damaged index starts over; the originals stay on disk.
   const saved = await readJson<Partial<PickerView>>($, `${dir}/index.json`)
   if (saved !== null) await update($, view, v => ({ ...v, ...normaliseView(saved), working: null })).catch(() => {})
   vault = (await readJson<Vault>($, `${dir}/private.json`)) ?? {}
+}
+
+// Closes the store as its session ends: the last index write lands, then the
+// panel starts over for the next session, keeping only the mode and strategy
+// chosen in this window and the folder it runs in.
+export async function closeStore($: EngineInterface, id: string): Promise<void> {
+  await saving
+  binding = { kind: 'ended', id }
+  epoch += 1
+  dir = ''
+  vault = {}
+  await update($, view, v => ({ ...EMPTY_VIEW, settings: v.settings, cwd: v.cwd }))
 }
 
 async function save($: EngineInterface): Promise<void> {
@@ -128,7 +169,7 @@ async function save($: EngineInterface): Promise<void> {
 
 export async function change($: EngineInterface, fn: (v: PickerView) => PickerView): Promise<PickerView> {
   await update($, view, fn)
-  void save($)
+  saving = saving.then(() => save($)).catch(() => {})
 
   return read($, view)
 }

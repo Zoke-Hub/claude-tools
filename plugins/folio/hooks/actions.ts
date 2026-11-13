@@ -4,12 +4,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, SessionCompactInput, SessionCompactResult } from 'claude-code'
 
-import type { ActivityItem, PickerView } from '../types'
+import type { ActivityItem, ChunkRecord, PickerView } from '../types'
 import { currentChat, shortTokens } from './chunks'
 import { buildFolded, chunksIn, estimateAll, isPaired, joinFolded, noPlan, planFold, protectedIds } from './fold'
 import { errorText, later, note } from './debug'
 import { needsFold, refreshContext, sideSaving, summaryTokens, workTokens } from './measure'
-import { dropStalePins } from './recall'
+import { dropStalePins, dropSupersededPins } from './recall'
 import { refreshBrief } from './brief'
 import { addActivity, change, chunkOf, EMPTY_VIEW, patchChunk, readOriginal, setWorking, settingsOf, writeOriginal } from './store'
 import { saveChat } from './sync'
@@ -20,29 +20,71 @@ const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
 // compaction is a fold it asked for, or a rebuild after an undo.
 export const FOLD_ASK = 'folio: fold'
 export const REBUILD_ASK = 'folio: rebuild'
+type Ask = typeof FOLD_ASK | typeof REBUILD_ASK
 
 // The heads-up shows once the work passes this share of the ceiling.
 const HEADS_UP_SHARE = 0.8
 
-// A fold or rebuild asked for while a reply was running waits for its end.
-let waitingAsk: string | null = null
-// Whether Claude is replying now, for a press of Fold now to say it waits.
+// Whether Claude is replying now: a chat compacts only between replies.
 let isReplying = false
 export function setReplying(is: boolean) {
   isReplying = is
 }
+export function isClaudeReplying(): boolean {
+  return isReplying
+}
 const WAITS = 'Folio will fold once Claude finishes replying.'
 
-// Fold now's press, kept until Folio confirms its fold or says why none ran.
-const folding = atom({ plugin: 'folio', key: 'folding' } as const, null)
-export async function setFolding($: EngineInterface, is: boolean) {
-  await update($, folding, () => (is ? Date.now() : null))
+// Folio's fold or rebuild, from the ask to Claude Code's answer:
+// - idle: nothing asked;
+// - queued: asked while Claude replies; sent once the reply ends;
+// - compacting: sent, and Folio's compaction hook hasn't finished it yet. An
+//   ask that comes before the hook reads the chat rides along (the hook reads
+//   every ask then); one that comes after waits in `after`, for the next;
+// - failed: the last one didn't run; `why` says so.
+// Asks are a set: a fold does what a waiting rebuild would, and when it finds
+// nothing to fold it still rebuilds.
+type Request =
+  | { kind: 'idle' }
+  | { kind: 'queued'; asks: Ask[] }
+  | { kind: 'compacting'; asks: Ask[]; id: number; isRead: boolean; after: Ask[] }
+  | { kind: 'failed'; why: string }
+let request: Request = { kind: 'idle' }
+let requestCount = 0
+// What an ask came to: done (or sent as a prompt), or why not.
+type Outcome = { isDone: boolean; why: string }
+
+// A compaction that Claude Code doesn't start within this while (a /compact
+// prompt dropped, or merged into another) is let go, so Fold now comes back;
+// one Folio's hook is working on gets up to the longer while.
+const START_WAIT_MS = 3 * 60_000
+const WORK_WAIT_MS = 10 * 60_000
+
+const union = (a: readonly Ask[], b: readonly Ask[]): Ask[] => [...new Set([...a, ...b])]
+
+// Whether a fold asked for waits or runs: Fold now reads Folding… and takes no
+// second press meanwhile.
+export function isFoldPending(): boolean {
+  if (request.kind === 'queued') return request.asks.includes(FOLD_ASK)
+  if (request.kind === 'compacting') return request.asks.includes(FOLD_ASK) || request.after.includes(FOLD_ASK)
+
+  return false
 }
-// A press left over from a fold that never reached Folio is let go when the
-// panel opens again, unless its fold still waits for a reply's end.
-export async function clearStaleFolding($: EngineInterface) {
-  const at = await read($, folding)
-  if (at !== null && waitingAsk === null && Date.now() - at > 2 * 60_000) await setFolding($, false)
+
+// Fold now's state for the panel: when its fold was asked for, while it waits
+// or runs. Only a drawing hangs on it, so one that can't be set (the mod
+// unloading) changes nothing.
+const folding = atom({ plugin: 'folio', key: 'folding' } as const, null)
+export async function showFolding($: EngineInterface) {
+  await update($, folding, at => (isFoldPending() ? (at ?? Date.now()) : null)).catch(() => {})
+}
+
+// A new session asks nothing yet.
+export async function resetActions($: EngineInterface) {
+  request = { kind: 'idle' }
+  isReplying = false
+  autoAskedAt = null
+  await showFolding($)
 }
 
 // Claude Code's own compaction, passed on unchanged; the size is measured again
@@ -61,10 +103,6 @@ async function passOn(
   return done
 }
 
-// Asks the engine to compact; this mod's own session.compact hook answers it.
-// Refused while a reply runs, so a rebuild then waits for the reply's end.
-// Why the last fold asked for didn't happen, for Fold now to say.
-export let lastSkip = ''
 // The desktop app (and any SDK session) can't compact from a mod: there a
 // compaction runs only as a /compact prompt. Once seen, Folio asks that way.
 let isPromptOnly = false
@@ -72,76 +110,146 @@ const isHeadless = (err: unknown) => /headless|not available/i.test(errorText(er
 
 // Asks for a fold or a rebuild. Where a mod can't compact directly, it runs
 // "/compact <ask>" as a slash command, once the chat is idle; Folio's own hook
-// recognises the ask and does the folding.
-export async function compactNow($: EngineInterface, ask: string): Promise<boolean> {
-  const isDone = await askCompact($, ask)
-  // Nothing folds and nothing waits: Fold now is pressable again.
-  if (!isDone && waitingAsk === null) await setFolding($, false)
-
-  return isDone
+// recognises the ask and does the folding. The state changes before anything
+// is awaited, so a second press that comes before the panel redraws sees it.
+export async function compactNow($: EngineInterface, ask: Ask): Promise<Outcome> {
+  return shown($, enqueue($, ask))
 }
 
-// The ask waits for the reply's end; a rebuild says so.
-function waitForReply($: EngineInterface, ask: string): false {
-  waitingAsk = ask
-  lastSkip = ask === REBUILD_ASK ? 'Folio updates the chat after this reply.' : WAITS
-  if (ask === REBUILD_ASK) $.ui.toast(lastSkip)
+// An ask on its way, with Fold now's state drawn as it starts and as it ends.
+async function shown($: EngineInterface, outcome: Outcome | Promise<Outcome>): Promise<Outcome> {
+  await showFolding($)
+  const done = await outcome
+  await showFolding($)
 
-  return false
+  return done
 }
 
-async function askCompact($: EngineInterface, ask: string): Promise<boolean> {
-  // A chat compacts only between replies: while Claude is answering, the ask
-  // waits for the reply's end (turn.complete comes even for a stopped reply).
-  if (isReplying) return waitForReply($, ask)
-  if (isPromptOnly) return askByPrompt($, ask)
+function enqueue($: EngineInterface, ask: Ask): Outcome | Promise<Outcome> {
+  if (request.kind === 'compacting') {
+    if (!request.isRead) {
+      request = { ...request, asks: union(request.asks, [ask]) }
+
+      return { isDone: true, why: '' }
+    }
+    request = { ...request, after: union(request.after, [ask]) }
+
+    return { isDone: false, why: ask === FOLD_ASK ? 'Folio folds once the change it is making now is done.' : '' }
+  }
+  const asks = request.kind === 'queued' ? union(request.asks, [ask]) : [ask]
+  // A chat compacts only between replies: while Claude is answering, the asks
+  // wait for the reply's end (turn.complete comes even for a stopped reply).
+  if (isReplying) return waitForReply($, asks, ask)
+
+  return send($, asks)
+}
+
+// The asks wait for the reply's end; a rebuild says so.
+function waitForReply($: EngineInterface, asks: Ask[], ask: Ask): Outcome {
+  request = { kind: 'queued', asks }
+  if (ask === REBUILD_ASK) {
+    const why = 'Folio updates the chat after this reply.'
+    $.ui.toast(why)
+
+    return { isDone: false, why }
+  }
+
+  return { isDone: false, why: WAITS }
+}
+
+// Sends the asks as one compaction: a fold when one of them is, else a rebuild.
+async function send($: EngineInterface, asks: Ask[]): Promise<Outcome> {
+  requestCount += 1
+  const id = requestCount
+  request = { kind: 'compacting', asks, id, isRead: false, after: [] }
+  watch($, id, 0)
+  const ask = asks.includes(FOLD_ASK) ? FOLD_ASK : REBUILD_ASK
+  if (isPromptOnly) return byPrompt($, id, ask)
   try {
     const result = await $.session.compact({ instructions: ask })
-    const isSkipped = result.skip !== undefined
-    lastSkip = isSkipped ? String(result.skip) : ''
+    const why = result.skip === undefined ? '' : String(result.skip)
+    await settle($, id, why)
 
-    return !isSkipped
+    return { isDone: why === '', why }
   } catch (err) {
     if (isHeadless(err)) {
       isPromptOnly = true
 
-      return askByPrompt($, ask)
+      return byPrompt($, id, ask)
     }
     const why = errorText(err)
-    // Refused as mid-reply all the same: the ask waits for the reply's end.
-    if (/turn is running|between turns/i.test(why)) return waitForReply($, ask)
-    lastSkip = `Claude Code didn't start the fold (${why}). Try again between replies.`
+    // Refused as mid-reply all the same: the asks wait for the reply's end.
+    if (/turn is running|between turns/i.test(why) && request.kind === 'compacting' && request.id === id) {
+      return waitForReply($, union(request.asks, request.after), ask)
+    }
+    const text = `Claude Code didn't start the fold (${why}). Try again between replies.`
     void note($, `fold refused by Claude Code: ${why}`)
+    await settle($, id, text)
 
-    return false
+    return { isDone: false, why: text }
   }
 }
 
 // Runs "/compact <ask>" as the person's slash command would. It is queued for
 // when the chat is idle, and started just after the calling hook returns, since
 // a hook the turn waits on can't run a command. A refusal is said and logged.
-function askByPrompt($: EngineInterface, ask: string): boolean {
-  lastSkip = ''
+function byPrompt($: EngineInterface, id: number, ask: Ask): Outcome {
   $.clock.after(0, () => {
     $.command.run({ command: 'compact', args: ask }).catch((err: unknown) => {
       const why = `Claude Code didn't run /compact (${errorText(err)}).`
       void note($, `fold by /compact refused: ${why}`)
       $.ui.toast(why)
-      void setFolding($, false)
+      void settle($, id, why)
     })
   })
 
-  return true
+  return { isDone: true, why: '' }
 }
 
-// After each reply: a waiting rebuild runs; the chunks with exact details the
+// A compaction asked for and not finished, `waited` ms on: while Claude replies
+// the /compact prompt waits its turn, and while Folio's hook works on it, it is
+// given longer; otherwise it is let go, and Fold now comes back.
+function watch($: EngineInterface, id: number, waited: number) {
+  $.clock.after(START_WAIT_MS, () => {
+    if (request.kind !== 'compacting' || request.id !== id) return
+    const age = waited + START_WAIT_MS
+    if (isReplying || (request.isRead && age < WORK_WAIT_MS)) return watch($, id, age)
+    void note($, `${request.asks.join(' + ')} let go after ${Math.round(age / 1000)} s: Folio's hook didn't finish it`)
+    const why = request.asks.includes(FOLD_ASK) ? "Claude Code didn't run Folio's fold. Press Fold now to try again." : "Claude Code didn't run Folio's update of the chat; the next fold brings it in."
+    $.ui.toast(why)
+    void settle($, id, why)
+  })
+}
+
+// The compaction `id` is over: done (`why` empty) or not. Asks that came while
+// it ran go next, after the reply if one is running.
+async function settle($: EngineInterface, id: number, why: string) {
+  if (request.kind !== 'compacting' || request.id !== id) return
+  const after = request.after
+  request = why === '' ? { kind: 'idle' } : { kind: 'failed', why }
+  if (after.length > 0) {
+    if (isReplying) request = { kind: 'queued', asks: after }
+    else void shown($, send($, after))
+  }
+  await showFolding($)
+}
+
+// Folio's hook reads the chat: every ask made so far is done by this one
+// compaction. One that isn't the running request's (a /compact prompt that
+// came after it was let go) stands alone.
+function takeAsks(ask: Ask): Ask[] {
+  if (request.kind !== 'compacting') return [ask]
+  request = { ...request, isRead: true }
+
+  return request.asks
+}
+
+// After each reply: waiting asks run; the chunks with exact details the
 // next fold would take are noted for the ring, with one heads-up as the work
 // nears the ceiling; and in Automatic the fold itself runs once it is due.
 export async function afterTurn($: EngineInterface) {
-  if (waitingAsk !== null) {
-    const ask = waitingAsk
-    waitingAsk = null
-    await compactNow($, ask)
+  if (request.kind === 'queued') {
+    if (!isReplying) await shown($, send($, request.asks))
 
     return
   }
@@ -199,16 +307,30 @@ function sideItems(v: PickerView, tidy: Record<string, number[]>): ActivityItem[
 // The session.compact hook's work: fold by the plan, or leave the compaction
 // to the engine. Claude Code's own compaction runs as before in Watch mode,
 // for /compact, for subagents, and whenever there is nothing this mod can fold.
+// Folio's own asks arrive from the mod, or as the /compact prompt it sends
+// where a mod can't compact directly; their words are Folio's alone.
+function oursOf(e: SessionCompactInput): Ask | null {
+  const ask = e.instructions?.trim()
+
+  return ask === FOLD_ASK || ask === REBUILD_ASK ? ask : null
+}
+
 export async function onCompact(
   $: EngineInterface,
   e: SessionCompactInput,
   next: (e: SessionCompactInput) => Promise<SessionCompactResult>,
 ): Promise<SessionCompactResult> {
+  const isMine = e.agentId === undefined && e.trigger !== 'precompute' && oursOf(e) !== null
+  let why = 'the fold stopped on an error'
   try {
-    return await foldOrPass($, e, next)
+    const done = await foldOrPass($, e, next)
+    why = done.skip === undefined ? '' : String(done.skip)
+
+    return done
   } finally {
-    // Folio's own ask has folded or said why not: Fold now is pressable again.
-    if (e.agentId === undefined && e.trigger !== 'precompute' && e.instructions?.trim() === FOLD_ASK) await setFolding($, false)
+    // Folio's own ask has folded or said why not, whatever it asked: Fold now
+    // is pressable again, and asks that came meanwhile go next.
+    if (isMine && request.kind === 'compacting') await settle($, request.id, why)
   }
 }
 
@@ -218,23 +340,28 @@ async function foldOrPass(
   next: (e: SessionCompactInput) => Promise<SessionCompactResult>,
 ): Promise<SessionCompactResult> {
   if (e.agentId !== undefined) return next(e)
-  // Folio's own asks arrive from the mod, or as the /compact prompt it sends
-  // where a mod can't compact directly; their words are Folio's alone.
-  const ask = e.instructions?.trim()
-  const isOurs = ask === FOLD_ASK || ask === REBUILD_ASK
+  const ask = oursOf(e)
+  const isOurs = ask !== null
   if (e.trigger === 'manual' && !isOurs) return passOn($, e, next)
-  const v = await read($, view)
   if (e.trigger === 'precompute') {
     // In Automatic mode this mod folds; the engine's own summary would be unused.
-    return v.settings.mode === 'auto' ? { skip: 'Folio folds this chat' } : passOn($, e, next)
+    return (await read($, view)).settings.mode === 'auto' ? { skip: 'Folio folds this chat' } : passOn($, e, next)
   }
-  if (!isOurs && v.settings.mode !== 'auto') return passOn($, e, next)
+  if (!isOurs && (await read($, view)).settings.mode !== 'auto') return passOn($, e, next)
+  // Every ask made so far, read once: what Folio folds or rebuilds now.
+  const asks: Ask[] = ask === null ? [FOLD_ASK] : takeAsks(ask)
+  // The chat's newest stretch is saved first, so a trim never stands in for
+  // words no original holds yet.
+  await saveChat($).catch(err => note($, `save before the fold failed: ${errorText(err)}`))
+  const v = await read($, view)
 
   const messages = e.messages
   const before = v.context?.tokens ?? estimateAll(messages)
-  const isRebuild = ask === REBUILD_ASK
+  let isRebuild = !asks.includes(FOLD_ASK)
   const plan = isRebuild ? noPlan() : planFold(messages, v, workTokens(v))
   const tidyCount = Object.values(plan.tidy).reduce((n, ns) => n + ns.length, 0)
+  // A fold that finds nothing still makes the rebuild asked for with it.
+  if (plan.foldIds.length === 0 && plan.trimIds.length === 0 && !isRebuild && asks.includes(REBUILD_ASK)) isRebuild = true
   if (plan.foldIds.length === 0 && plan.trimIds.length === 0 && !isRebuild) {
     if (!isOurs) return passOn($, e, next)
     // Says exactly why, so Fold now can tell the person.
@@ -287,7 +414,7 @@ async function foldOrPass(
   if (!isRebuild) {
     autoAskedAt = null
     after = { ...after, folds: after.folds + 1, savedTokens: after.savedTokens + saves, foldAsked: after.foldAsked.filter(id => !plan.foldIds.includes(id)), foldNext: [] }
-    after = dropStalePins(after)
+    after = await dropSupersededPins($, dropStalePins(after))
     if (plan.foldIds.length > 0 || tidyCount > 0) {
       const n = plan.foldIds.length
       after = addActivity(after, {
@@ -361,25 +488,45 @@ export async function undoChoice($: EngineInterface, activityId: string) {
   })
 }
 
+// A chunk a fold or a trim took that is not back yet: one restored already
+// (kept word for word) has given its saving back.
+export function isUndoable(c: Pick<ChunkRecord, 'status' | 'decision'>): boolean {
+  return (c.status === 'folded' || c.status === 'trimmed') && c.decision !== 'keep'
+}
+
+// Side message `n` of chunk `c` is tidied out of the chat now, not put back yet.
+export function isTidied(c: Pick<ChunkRecord, 'tidied'> | undefined, n: number | undefined): boolean {
+  return c !== undefined && n !== undefined && c.tidied.includes(n)
+}
+
 // Undo a fold or a trim: the chunk is kept word for word from now on, and the
-// chat is rebuilt so Claude reads it again.
-export async function undo($: EngineInterface, chunkIds: string[]) {
+// chat is rebuilt so Claude reads it again. A chunk restored before is left as
+// it is, so its saving is never given back twice. Says whether any came back.
+export async function undo($: EngineInterface, chunkIds: string[]): Promise<boolean> {
+  let restored: string[] = []
   await change($, v => {
+    restored = chunkIds.filter(id => {
+      const c = chunkOf(v, id)
+
+      return c !== undefined && isUndoable(c)
+    })
+    if (restored.length === 0) return v
     let next = v
     let back = 0
-    for (const id of chunkIds) {
-      const c = chunkOf(next, id)
-      if (c === undefined) continue
+    for (const id of restored) {
+      const c = chunkOf(next, id)!
       back += c.status === 'folded' ? c.tokens - summaryTokens(c) : 0
       next = patchChunk(next, id, { decision: 'keep', keptAtFold: next.folds })
     }
 
     return addActivity(
       { ...next, savedTokens: Math.max(0, next.savedTokens - back) },
-      { kind: 'undo', text: `Restored ${chunkIds.length} chunk${chunkIds.length === 1 ? '' : 's'} word for word`, detail: 'kept from now on', chunkIds },
+      { kind: 'undo', text: `Restored ${restored.length} chunk${restored.length === 1 ? '' : 's'} word for word`, detail: 'kept from now on', chunkIds: restored },
     )
   })
-  await compactNow($, REBUILD_ASK)
+  if (restored.length > 0) await compactNow($, REBUILD_ASK)
+
+  return restored.length > 0
 }
 
 // Tidied side messages, back in the chat for good: never tidied again, and
@@ -403,15 +550,18 @@ export async function putBack($: EngineInterface, sides: Array<{ chunkId: string
   await compactNow($, REBUILD_ASK)
 }
 
-// Undoes a whole activity entry: its chunks restored, its side messages put back.
+// Undoes a whole activity entry: its chunks restored, its side messages put
+// back; what an earlier Restore or Put back already brought back is left alone.
 export async function undoEntry($: EngineInterface, activityId: string) {
-  const entry = (await read($, view)).activity.find(a => a.id === activityId)
+  const v = await read($, view)
+  const entry = v.activity.find(a => a.id === activityId)
   if (entry === undefined) return
-  const sides = (entry.items ?? []).filter(i => i.kind === 'side' && i.n !== undefined).map(i => ({ chunkId: i.chunkId, n: i.n! }))
+  const sides = (entry.items ?? []).filter(i => i.kind === 'side' && isTidied(chunkOf(v, i.chunkId), i.n)).map(i => ({ chunkId: i.chunkId, n: i.n! }))
   const chunks = (entry.items ?? []).filter(i => i.kind === 'chunk').map(i => i.chunkId)
-  if (sides.length > 0) await change($, v => sidesBack(v, sides))
-  if (chunks.length > 0) await undo($, chunks)
-  else await compactNow($, REBUILD_ASK)
+  if (sides.length > 0) await change($, x => sidesBack(x, sides))
+  // A restore asks for the rebuild; side messages alone ask for their own.
+  const isRestored = chunks.length > 0 && (await undo($, chunks))
+  if (sides.length > 0 && !isRestored) await compactNow($, REBUILD_ASK)
 }
 
 // Tidies side messages now, from the suggestion.
@@ -436,13 +586,15 @@ export async function tidyNow($: EngineInterface, sides: Array<{ chunkId: string
   await compactNow($, REBUILD_ASK)
 }
 
-// Summarises a kept chunk this time, from the suggestion: a folded one shows
-// its summary again; one still in the chat folds now.
+// Summarises a kept chunk this time, from the suggestion or a restored
+// chunk's card: a folded one shows its summary again, and saves again what
+// restoring it gave back; one still in the chat folds now.
 export async function summariseNow($: EngineInterface, chunkId: string) {
   const c = chunkOf(await read($, view), chunkId)
   if (c === undefined) return
   await decide($, chunkId, 'fold')
   if (c.status === 'folded') {
+    if (c.decision === 'keep') await change($, v => ({ ...v, savedTokens: Math.max(0, v.savedTokens + c.tokens - summaryTokens(c)) }))
     await compactNow($, REBUILD_ASK)
   } else {
     await change($, v => ({ ...v, foldAsked: [...new Set([...v.foldAsked, chunkId])] }))

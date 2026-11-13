@@ -569,22 +569,25 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   let tdraft = null;                           // text being typed on the image: { id, i, x, y, color } (id null: a new text mark)
   let filter = "all", scope = "this", started = false, viewReady = false;
   const undo = [];
-  const pending = new Map(), tomb = new Set(), timers = new Map(), queues = new Map(), created = new Set();
-  let mode = "connecting", col = null, ovCol = null, inflight = 0, saveError = false, myId = null, users = null;
-  const overall = new Map();                   // image id -> text
-  const ovMeta = new Map();                    // image id -> { reply, status, exists }
-  function renderOverallMeta(saved) {
+  // tomb: notes deleted here (copies arriving later are ignored); queues: one write chain per doc (`retries` holds the docs
+  // whose last write didn't go: the chip shows the error until each goes); lost: live listeners that are down (the chip says so)
+  const tomb = new Set(), queues = new Map(), lost = new Set();
+  // mode: "connecting" (until the store answers), "db", "local" (this browser only), "snapshot" (a saved copy).
+  // offline: local because the store didn't answer (not because this view has none)
+  let mode = "connecting", col = null, ovCol = null, inflight = 0, myId = null, users = null, offline = false;
+  const overall = new Map();                   // image id -> the text in its "Notes on the whole image" box
+  const ovMeta = new Map();                    // image id -> its save record and Claude's side of it (ovRec)
+  function renderOverallMeta() {
     if (!cur) return;
-    const m = ovMeta.get(cur.id) || {}, txt = (overall.get(cur.id) || "").trim();
+    const m = ovRec(cur.id), txt = (overall.get(cur.id) || "").trim();
     const st = $("#ovState"); st.hidden = !txt; st.textContent = m.status === "done" ? "Done" : "Open"; st.classList.toggle("done", m.status === "done");
     const r = $("#ovReply"); r.hidden = !m.reply; r.querySelector("span").textContent = m.reply || "";
     $("#ovFoot").hidden = !txt || RO || mode !== "db"; $("#ovToggle").textContent = m.status === "done" ? "Reopen" : "Mark done";
-    if (saved != null) $("#ovSaved").textContent = saved;
-    paintPics($("#ovPics"), m.atts || [], { ov: cur.id });
+    $("#ovSaved").textContent = m.said;
+    paintPics($("#ovPics"), m.atts, { ov: cur.id });
     renderSendBtn();                                           // the whole-image box counts as an open note
   }
 
-  const isDirty = (id) => pending.has(id) || timers.has(id) || queues.has(id);
   const imgById = (id) => IMAGES.find((i) => i.id === id) || IMAGES[0];
   const wide = () => W / H >= 2.2;
 
@@ -685,7 +688,6 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     finish(); draft = null;
     cur = im; W = im.w; H = im.h;
     const v = isVid(im);
-    rangeIn = null;
     img.hidden = v; vid.hidden = !v; $("#transport").hidden = !v; $("#compose").hidden = !v;
     $("#loading").hidden = false; $("#loading").textContent = v ? "Loading the video…" : "Loading the image…";
     if (v) {
@@ -698,7 +700,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       popText.placeholder = "Write a note for this frame… (C)";
       buildTrack();
     } else {
-      vid.pause();
+      vid.pause(); pendingSeek = null; scrubWant = null;           // nothing of the video waits to land on an image tab
       viewer.appendChild(pop); pop.classList.remove("docked", "is-new");
       popText.placeholder = "What should change here?";
       img.style.width = W + "px"; img.style.height = H + "px";
@@ -706,6 +708,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       if (img.complete && img.naturalWidth) $("#loading").hidden = true;
       $("#miniImg").src = im.src;
     }
+    setRange(null);                                            // a range armed on the last file goes: its chip and Set in too
     $("#ovLabel").textContent = v ? "Notes on the whole video" : "Notes on the whole image";
     viewer.setAttribute("aria-label", (v ? "Video" : "Image") + " under review. Scroll to move, pinch or ⌘/Ctrl + scroll to zoom.");
     const mini = $("#mini"); mini.hidden = v || !wide(); mini.style.aspectRatio = W + " / " + H;
@@ -791,8 +794,10 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     try { localStorage.setItem(PLACE_KEY, JSON.stringify({ id: place.id, files: place.files })); } catch (_) {}
   }
   const savePlaceSoon = () => { if (!placeTimer && !RO) placeTimer = setTimeout(writePlace, 500); };
-  addEventListener("pagehide", writePlace);
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") writePlace(); });
+  // leaving the page, or the page hidden (another chat, another app): the place is kept, and every note still waiting out its
+  // typing pause is saved now
+  addEventListener("pagehide", () => { writePlace(); flushAll(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") { writePlace(); flushAll(); } });
   // a file's kept place, to open it with (showImage's carry): its view and, for a video, its moment, paused
   function keptPlace(im) { const f = im && place.files[im.id]; return f ? { view: f.view || null, t: isVid(im) && f.t != null ? f.t : null, play: false } : undefined; }
   vid.addEventListener("error", () => { if (VID()) { $("#loading").hidden = false; $("#loading").textContent = "This video did not load. Reload the page to try again."; } });
@@ -902,7 +907,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   }
   function askCloseTab(gid, anchor) {
     if (tabPopFor === "close:" + gid) { closeTabPop(); return; }
-    if (mode === "connecting") { toast("Still connecting. Try again in a moment."); return; }
+    if (stillConnecting()) return;
     if (visGroups().length < 2) { toast("A board keeps at least one tab open."); return; }
     const ids = versionsOf(gid).map((im) => im.id), n = ids.length, name = tabName(gid);
     const open = [...marks.values()].filter((m) => ids.includes(m.img) && m.status !== "done").length;
@@ -942,15 +947,19 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // Drag a tab along the row and drop it: the others make way as it passes their middle. With a mouse the drag starts after a
   // few pixels; on touch, hold the tab a moment first (a plain swipe still scrolls the row). The new order saves for everyone.
   const tabDrag = { el: null, gid: null, x0: 0, y0: 0, on: false, timer: 0, id: null, touch: false, justDropped: false, before: null };
-  // Alt / Option + ← / → : the open tab to the left (-1) or right (+1), as a click on it (its latest round); a focused tab
-  // hands the focus on, so the keys can walk the row
+  // run `change` (which redraws the tab row); if a tab had the focus, the tab `gid` takes it, so the keys can go on
+  function keepTabFocus(gid, change) {
+    const hadFocus = !!(document.activeElement && document.activeElement.classList.contains("imgtab"));
+    change();
+    const b = hadFocus && gid != null && [...$("#imgtabs").querySelectorAll(".imgtab")].find((x) => x.dataset.group === gid);
+    if (b) b.focus();
+  }
+  // Alt / Option + ← / → (Shift + ← / → on an image tab): the open tab to the left (-1) or right (+1), as a click on it (its
+  // latest round); a focused tab hands the focus on, so the keys can walk the row
   function stepTab(dir) {
     const vis = visGroups(), j = vis.indexOf(groupOf(cur)) + dir;
     if (j < 0 || j >= vis.length) return;
-    const hadFocus = !!(document.activeElement && document.activeElement.classList.contains("imgtab"));
-    showImage(latestOf(vis[j]));
-    const b = hadFocus && [...$("#imgtabs").querySelectorAll(".imgtab")].find((x) => x.dataset.group === vis[j]);
-    if (b) b.focus();
+    keepTabFocus(vis[j], () => showImage(latestOf(vis[j])));
   }
   // Alt / Option + ↑ / ↓ : the newer (+1) or older (-1) version of this tab, as picking it in the Version list (keeps your place)
   function stepVersion(dir) {
@@ -1015,14 +1024,13 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       const prevOpen = all.slice(0, all.indexOf(g)).reverse().find((x) => vis.includes(x) || next.includes(x));
       next.splice(prevOpen == null ? 0 : next.indexOf(prevOpen) + 1, 0, g);
     }
-    const hadFocus = !!(document.activeElement && document.activeElement.classList.contains("imgtab"));
-    tabOrder = next;
-    const doc = { order: next, at: new Date().toISOString(), by: myId || null };
-    if (mode === "db") enqueue("__taborder", () => layoutCol.doc("tabs").set(doc));
-    else if (mode === "local") saveLocal();
-    renderTabs();
-    const b = moved != null && [...$("#imgtabs").querySelectorAll(".imgtab")].find((x) => x.dataset.group === moved);
-    if (b && hadFocus) b.focus();                  // Alt + Shift + ←/→ again keeps moving the same tab
+    keepTabFocus(moved, () => {                    // Alt + Shift + ←/→ again keeps moving the same tab
+      tabOrder = next;
+      const doc = { order: next, at: new Date().toISOString(), by: myId || null };
+      if (mode === "db") enqueue("__taborder", () => layoutCol.doc("tabs").set(doc));
+      else if (mode === "local") saveLocal();
+      renderTabs();
+    });
   }
   let layoutCol = null;
 
@@ -1185,7 +1193,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       if (VID()) { draftId = m.id; popText.value = m.text; paintPopSw(m); }
       if (!hinted) { hinted = true; toast(VID() ? "Everything you mark on this frame joins #" + m.n + ". Click Done beside it (or press Enter) and write the note on the right." : "Keep marking: everything joins #" + m.n + " until you click Done beside it."); }
     } else {
-      m.items.push(it); undo.push({ t: "add", id: m.id, len: m.items.length });
+      m.items.push(it); undo.push({ t: "add", id: m.id, it, sig: JSON.stringify(itemDoc(it)) });
       touched(m); saveNow(m.id, "items");
       if (ui === "edit" || VID()) paintPopSw(m);
     }
@@ -1222,25 +1230,48 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   function deleteNote(id, record = true) {
     const m = marks.get(id); if (!m) return;
     if (record) undo.push({ t: "delete", m: Object.assign({}, m, { items: cloneItems(m) }) });
-    if (tdraft && tdraft.id === id) cancelTextEdit();
+    release(id);
     marks.delete(id); tomb.add(id);
-    if (activeId === id) { activeId = null; ui = null; if (document.activeElement === popText) popText.blur(); }
-    if (draftId === id) draftId = null;
-    if (focusId === id) focusId = null;
     removeNow(id);
     renderAll();
   }
+  // the note is gone (deleted here or elsewhere): nothing stays in hand on it, so the next mark or keystroke starts a new note
+  function release(id) {
+    if (tdraft && tdraft.id === id) cancelTextEdit();
+    if (activeId === id) { activeId = null; ui = null; if (document.activeElement === popText) popText.blur(); }
+    if (draftId === id) draftId = null;
+    if (focusId === id) focusId = null;
+  }
+  const dropSteps = (id) => { for (let i = undo.length - 1; i >= 0; i--) if (undo[i].id === id) undo.splice(i, 1); };
+  // a note with nothing in it: no marks, no words, no pictures (a video note started by typing, then cleared)
+  const isEmpty = (m) => !m.items.length && !(m.text || "").trim() && !(m.atts || []).length;
+  // an empty draft that is finished or cancelled goes: nothing of it stays in the list, the store or undo
+  function discard(id) {
+    const m = marks.get(id); if (!m || !isEmpty(m)) return false;
+    dropSteps(id); deleteNote(id, false);
+    return true;
+  }
+  // Undo takes back the last change on the board, wherever it was made. A change on another file opens that file first (a
+  // video at the note's moment; a closed tab stays closed) and a notice names it, so nothing changes out of sight. Steps
+  // whose note has gone meanwhile (deleted elsewhere) are passed over.
   function doUndo() {
     if (tdraft) cancelTextEdit();
-    const op = undo.pop();
-    if (!op) { toast("Nothing to undo"); return; }
-    const m = op.id && marks.get(op.id);
+    let op = null, m = null;
+    while (undo.length && !m) { op = undo.pop(); m = op.t === "delete" ? (marks.has(op.m.id) ? null : op.m) : marks.get(op.id) || null; }
+    if (!m) { toast("Nothing to undo"); return; }
+    const im = IMAGES.find((i) => i.id === m.img);
+    if (im && cur && im.id !== cur.id) {
+      if (tabShown(im.id)) { showImage(im); if (m.t != null && VID()) seekTo(m.t); }
+      toast("Undone on “" + im.label + "” (#" + m.n + ")" + (tabShown(im.id) ? "." : ", a closed tab."));
+    }
     if (op.t === "create") deleteNote(op.id, false);
-    else if (op.t === "delete") { tomb.delete(op.m.id); created.delete(op.m.id); marks.set(op.m.id, op.m); saveNow(op.m.id, "all"); if (op.m.img !== cur.id) showImage(imgById(op.m.img)); }
-    else if (op.t === "add" && m) {
-      if (m.items.length >= op.len) m.items.splice(op.len - 1, 1);
-      if (!m.items.length && m.t == null) deleteNote(m.id, false); else saveNow(m.id, "items");
-    } else if (op.t === "items" && m) { m.items = op.before; saveNow(m.id, "items"); }
+    else if (op.t === "delete") { tomb.delete(m.id); rec(m.id).stored = false; marks.set(m.id, m); saveNow(m.id, "all"); }   // its doc went: written again in full
+    else if (op.t === "add") {
+      // the mark this step added: the same object, or (once a copy came in from the store) the last mark just like it
+      let i = m.items.indexOf(op.it); if (i < 0) i = m.items.map((x) => JSON.stringify(itemDoc(x))).lastIndexOf(op.sig);
+      if (i < 0) toast("That mark has changed since, so it stays.");
+      else { m.items.splice(i, 1); if (!m.items.length && m.t == null) deleteNote(m.id, false); else saveNow(m.id, "items"); }
+    } else if (op.t === "items") { m.items = op.before; saveNow(m.id, "items"); }
     renderAll();
   }
   function setText(m, value) { m.text = value; touched(m); saveSoon(m.id, "text"); }
@@ -1303,17 +1334,18 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (focus && !RO) popText.focus({ preventScroll: true });
     setHint();
   }
-  // done with the note in hand: close its box and save it, so the next mark starts a new note
+  // done with the note in hand (Enter, Esc, Save, a click elsewhere, another note or file): close its box and save it, so the
+  // next mark starts a new note. A draft left empty (typed, then cleared) is thrown away instead.
   function finish() {
     if (tdraft) commitTextEdit();
     if (!activeId) return;
-    const id = activeId; activeId = null; ui = null;
-    if (draftId === id) draftId = null;                          // saved: the note joins the list now
+    const id = activeId, wasDraft = draftId === id; activeId = null; ui = null;
+    if (wasDraft) draftId = null;                                // saved: the note joins the list now
     if (document.activeElement === popText) popText.blur();
     if (!VID()) pop.hidden = true;
     doneBtn.hidden = true;
     if (VID() && document.activeElement !== popText) popText.value = "";
-    if (marks.has(id)) flush(id);
+    if (marks.has(id) && !(wasDraft && discard(id))) flush(id);
     renderAll();
   }
   // video: the comment box sits in the right panel, always ready. With no note in hand it starts one at the playhead.
@@ -1380,7 +1412,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // Paste (⌘V) or drop a picture into any note box: it goes to the artifact's asset store (only editors of the board can
   // add one) and the note keeps its asset id in `atts` (marks/<id>.atts, overall/<image id>.atts). Thumbnails sit under the
   // box and a click shows the picture full size. Removing a thumbnail only takes it off the note; the stored file stays.
-  let assetsNs = null;
+  let assetsNs = null, assetsP = null;         // assetsP: the asset store's answer, still on its way in the first moments
   const assetUrls = new Map();                 // asset id -> the url its upload returned (this view only)
   const PIC_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
   function picIds(v) { return Array.isArray(v) ? v.filter(isAssetId) : []; }
@@ -1409,8 +1441,9 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     el.addEventListener("drop", (e) => { el.classList.remove("drop-on"); const fs = picFiles(e.dataTransfer); if (!fs.length) return; e.preventDefault(); addPics(fs, target); });
   }
   async function addPics(files, target) {
-    if (RO) return;
+    if (RO || stillConnecting()) return;
     if (mode !== "db") { toast("Pictures need the board's database, and this copy has none."); return; }
+    if (assetsP) await assetsP;
     if (!assetsNs) { toast("Only editors of this board can add pictures, and only on a board published with its file store (assets)."); return; }
     const ovId = target === "overall" ? cur && cur.id : null;
     const note = ovId ? null : typeof target === "function" ? target() : null;
@@ -1433,17 +1466,9 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       renderAll();
     } else { setOverallPics(ovId, ((ovMeta.get(ovId) || {}).atts || []).concat(ids)); toast((ids.length > 1 ? ids.length + " pictures" : "Picture") + " added to the whole-file notes."); }
   }
-  // saves fields of a file's whole-image note. Update, never set, once it exists: a set would wipe Claude's reply
-  function writeOverall(id, fields) {
-    const m = ovMeta.get(id) || {}; ovMeta.set(id, m);
-    const doc = Object.assign({ img: id }, fields, { at: new Date().toISOString() });
-    if (m.reply) { doc.edited = doc.at; doc.status = "open"; m.status = "open"; }      // changed after Claude's reply: open again
-    return enqueue("__overall_" + id, () => (m.exists ? ovCol.doc(id).update(doc) : ovCol.doc(id).set(Object.assign({ status: "open", text: overall.get(id) || "" }, doc))))
-      .then(() => { m.exists = true; });
-  }
   function setOverallPics(id, atts) {
-    const m = ovMeta.get(id) || {}; m.atts = atts; ovMeta.set(id, m);
-    writeOverall(id, { atts });
+    ovRec(id).atts = atts;
+    ovSave(id, { atts });
     renderOverallMeta();
   }
   document.addEventListener("click", (e) => {
@@ -1626,10 +1651,23 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     }
     return m;
   }
-  const SAVE_TEXT = { connecting: "Connecting…", saving: "Saving…", saved: "All notes saved", local: "Saved in this browser only", error: "Last change not saved. Check your connection and edit again." };
+  const SAVE_TEXT = { connecting: "Connecting…", saving: "Saving…", saved: "All notes saved", local: "Saved in this browser only",
+    error: "Last change not saved. Check your connection; it's tried again.", lost: "Lost the link to the board. Reconnecting…" };
   function setSave(state) {
     const text = state === "snapshot" ? "Saved copy · " + (SNAP && SNAP.savedAt ? dateText(SNAP.savedAt) : "read-only") : SAVE_TEXT[state];
-    saveChip.dataset.state = state; saveChip.textContent = text; holdChip();
+    saveChip.dataset.state = state === "lost" ? "error" : state; saveChip.textContent = text; holdChip();
+  }
+  // the chip, from where things stand: a write under way, else a write that didn't go (until it goes), else a live link that
+  // is down (until it is back), else all saved (or kept in this browser)
+  function showSave() {
+    if (mode === "snapshot" || (mode === "connecting" && !inflight)) return;
+    setSave(inflight ? "saving" : retries.size ? "error" : lost.size ? "lost" : mode === "db" ? "saved" : "local");
+  }
+  // Send, a pasted picture or closing a tab before the store has answered: say so (true) instead of going on
+  function stillConnecting() {
+    if (mode !== "connecting") return false;
+    toast("Still connecting. Try again in a moment.");
+    return true;
   }
   // The save chip only ever grows. "Saving…" is narrower than "All notes saved", and at some window widths that flipped the
   // toolbar between one row and two on every save, so the whole page jumped while typing. sizeChip reserves the widest of the
@@ -1642,44 +1680,126 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     saveChip.dataset.state = st; saveChip.textContent = txt;
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // One write queue per doc (a note's id, "__overall_<file id>", "__tab_<tab>", "__taborder"): one write at a time per doc,
+  // in order. A doc whose last write failed is in `retries` (the chip shows the error) until a write to it goes: it is tried
+  // again by itself after 2, 6 and 18 s, as soon as the browser is back online, and with the next change.
+  const retries = new Map();                   // key -> { fn, n, timer }
   function enqueue(key, fn) {
-    inflight++; setSave("saving");
+    const r = retries.get(key); if (r) { clearTimeout(r.timer); r.timer = 0; }
+    inflight++; showSave();
     const run = async () => { try { await fn(); } catch (e) { if (e && e.code === "unavailable") { await sleep(400 + Math.random() * 600); await fn(); } else throw e; } };
-    const p = (queues.get(key) || Promise.resolve()).then(run).then(() => { saveError = false; }, (e) => {
-      saveError = true; console.warn("save failed", e);
-      if (e && e.code === "quota_exceeded") toast("This board's note storage is full. Delete a few notes, then try again.");
+    const p = (queues.get(key) || Promise.resolve()).then(run).then(() => { retries.delete(key); return true; }, (e) => {
+      console.warn("save failed", e);
+      const t = retries.get(key) || { n: 0, timer: 0 }; t.fn = fn; retries.set(key, t);
+      if (e && e.code === "quota_exceeded" && !t.n) toast("This board's note storage is full. Delete a few notes, then try again.");
+      if (t.n < 3 && !t.timer) t.timer = setTimeout(() => { t.timer = 0; t.n++; enqueue(key, t.fn); }, 2000 * 3 ** t.n);
+      return false;
     }).finally(() => {
       inflight--;
       if (queues.get(key) === p) queues.delete(key);
-      if (!inflight) setSave(saveError ? "error" : mode === "db" ? "saved" : "local");
+      showSave();
     });
     queues.set(key, p);
     return p;
   }
-  function addPending(id, group) { if (!pending.has(id)) pending.set(id, new Set()); pending.get(id).add(group); }
-  function saveSoon(id, group, ms = 600) { addPending(id, group); clearTimeout(timers.get(id)); timers.set(id, setTimeout(() => { timers.delete(id); flush(id); }, ms)); }
-  function saveNow(id, group) { addPending(id, group); clearTimeout(timers.get(id)); timers.delete(id); flush(id); }
+  // a doc nothing needs to write any more (a note deleted before its first write went): its error and its retries go too
+  function forget(key) { const r = retries.get(key); if (r) clearTimeout(r.timer); if (retries.delete(key)) showSave(); }
+  addEventListener("online", () => { for (const [key, r] of retries) enqueue(key, r.fn); });
+  // everything still waiting (a typing pause, the store not answering yet) goes now: on leaving, and once connected
+  function flushAll() { for (const id of [...saves.keys()]) flush(id); for (const id of [...ovMeta.keys()]) ovFlush(id); }
+
+  // ---------- each note's save state ----------
+  // rec(id), a note's save record: stored (the store has its doc: a first write went, or the doc came from the store; until
+  // then every write is a set of the whole note, so a first write that failed goes again in full, never as an update to a
+  // doc that isn't there), groups (fields changed, not sent yet), flying (the fields of the write under way), timer (typing
+  // waits 600 ms), queued (a write waits its turn; it takes every change made by then), gone (the doc was removed elsewhere
+  // while a write of ours was on its way: settled when that write is).
+  const saves = new Map();
+  function rec(id) { let s = saves.get(id); if (!s) saves.set(id, (s = { stored: false, groups: new Set(), flying: null, timer: 0, queued: false, gone: false })); return s; }
+  // new (not in the store yet) · dirty (changes waiting) · saving · failed (tried again by itself, and with the next change) ·
+  // clean · deleted
+  function noteState(id) {
+    if (!marks.has(id)) return "deleted";
+    const s = saves.get(id);
+    if (!s) return "clean";
+    if (retries.has(id)) return "failed";
+    if (s.flying || s.queued) return "saving";
+    if (s.groups.size) return s.stored ? "dirty" : "new";
+    return "clean";
+  }
+  // anything of the note's own waiting, under way or not saved: copies arriving from the store leave those fields alone
+  const isDirty = (id) => !["clean", "deleted"].includes(noteState(id));
+  function addPending(id, group) { rec(id).groups.add(group); }
+  function saveSoon(id, group, ms = 600) { const s = rec(id); s.groups.add(group); clearTimeout(s.timer); s.timer = setTimeout(() => { s.timer = 0; flush(id); }, ms); }
+  function saveNow(id, group) { rec(id).groups.add(group); flush(id); }
   function flush(id) {
-    clearTimeout(timers.get(id)); timers.delete(id);
-    const m = marks.get(id), groups = pending.get(id);
-    if (!m || !groups) return;
-    pending.delete(id);
-    if (mode === "local") { saveLocal(); return; }
-    if (mode !== "db") { pending.set(id, groups); return; }   // still connecting: flushed once the store is ready
-    if (!created.has(id)) { created.add(id); m.legacy = false; enqueue(id, () => col.doc(id).set(toDoc(m))); return; }
-    if (m.legacy) { groups.add("items"); groups.add("text"); m.legacy = false; }   // first change to a version-1 doc: store it in the note shape
-    const doc = toDoc(m), patch = {};
-    for (const g of groups) for (const k of GROUPS[g] || []) if (doc[k] !== undefined) patch[k] = doc[k];
-    if (Object.keys(patch).length) enqueue(id, () => col.doc(id).update(patch));
+    const s = saves.get(id); if (!s) return;
+    clearTimeout(s.timer); s.timer = 0;
+    if (!marks.has(id) || !s.groups.size) return;
+    if (mode === "local") { s.groups.clear(); saveLocal(); return; }
+    if (mode !== "db") return;                                   // still connecting: sent once the store answers
+    if (!s.queued) { s.queued = true; enqueue(id, () => writeNote(id)); }
+  }
+  // a note's write, made when its turn comes, with every change made by then: a set of the whole note until the store has
+  // it, then an update of the changed fields only. A note deleted here has its doc deleted.
+  async function writeNote(id) {
+    const s = saves.get(id); if (!s) return;
+    s.queued = false;
+    const m = marks.get(id);
+    if (!m) { if (s.stored) await col.doc(id).delete(); if (!marks.has(id)) saves.delete(id); return; }
+    const groups = s.groups;
+    if (groups.size) {
+      clearTimeout(s.timer); s.timer = 0;
+      s.groups = new Set(); s.flying = groups;
+      try {
+        if (!s.stored) { m.legacy = false; await col.doc(id).set(toDoc(m)); s.stored = true; s.gone = false; }
+        else {
+          if (groups.has("all")) for (const g of Object.keys(GROUPS)) groups.add(g);
+          if (m.legacy) { groups.add("items"); groups.add("text"); m.legacy = false; }   // first change to a version-1 doc: store it in the note shape
+          const doc = toDoc(m), patch = {};
+          for (const g of groups) for (const k of GROUPS[g] || []) if (doc[k] !== undefined) patch[k] = doc[k];
+          if (Object.keys(patch).length) await col.doc(id).update(patch);
+        }
+      } catch (e) {
+        if (!s.gone) { for (const g of groups) s.groups.add(g); throw e; }   // sent again: by itself shortly, and with the next change
+      } finally { s.flying = null; }
+    }
+    if (s.gone) dropRemote(id);                                  // removed elsewhere while this was on its way: it goes here too
   }
   function removeNow(id) {
-    clearTimeout(timers.get(id)); timers.delete(id); pending.delete(id);
-    if (mode === "db") { if (created.has(id)) enqueue(id, () => col.doc(id).delete()); created.delete(id); }
-    else if (mode === "local") saveLocal();
+    const s = saves.get(id);
+    if (s) { clearTimeout(s.timer); s.timer = 0; s.groups.clear(); }
+    if (mode === "db" && s && (s.stored || queues.has(id))) enqueue(id, () => writeNote(id));   // after any write still on its way
+    else { saves.delete(id); forget(id); if (mode === "local") saveLocal(); }
+  }
+  // a note removed elsewhere (by Claude, another viewer, this board open in another tab) goes here too, with whatever of it
+  // was still waiting to be saved; if it was in hand, its box closes and a short notice says so
+  function dropRemote(id) {
+    const m = marks.get(id), s = saves.get(id); if (!m) return;
+    const inHand = [activeId, draftId, focusId].includes(id) || !!(tdraft && tdraft.id === id);
+    if (s) clearTimeout(s.timer);
+    saves.delete(id); forget(id); dropSteps(id);
+    release(id); marks.delete(id);
+    if (inHand) toast("Note #" + m.n + " was deleted elsewhere.");
+    renderAll();
+  }
+  // a removal from the store. A write of ours still on its way settles it (an update then finds no doc); a doc the store never
+  // confirmed (our own first write, rolled back) isn't a removal
+  function remoteRemoved(id) {
+    const s = saves.get(id);
+    if (!marks.has(id) || !s || !s.stored) return;
+    if (queues.has(id)) { s.gone = true; return; }
+    dropRemote(id);
   }
   function saveLocal() {
     try {
-      localStorage.setItem(LOCAL_KEY, JSON.stringify({ marks: sorted().map((m) => Object.assign(toDoc(m), { id: m.id })), overall: Object.fromEntries(overall), tabs: Object.fromEntries(tabState), tabOrder }));
+      const out = { marks: sorted().map((m) => Object.assign(toDoc(m), { id: m.id })), overall: Object.fromEntries(overall), tabs: Object.fromEntries(tabState), tabOrder };
+      if (offline) {                 // this visit couldn't reach the store and shows only its own notes: an earlier visit's stay stored
+        const d = JSON.parse(localStorage.getItem(LOCAL_KEY) || "null") || {};
+        out.marks = (d.marks || []).filter((o) => o && !marks.has(o.id) && !tomb.has(o.id)).concat(out.marks);
+        out.overall = Object.assign({}, d.overall, out.overall); out.tabs = Object.assign({}, d.tabs, out.tabs); out.tabOrder = tabOrder || d.tabOrder || null;
+      }
+      localStorage.setItem(LOCAL_KEY, JSON.stringify(out));
     } catch (_) {}
     setSave("local");
   }
@@ -1695,25 +1815,70 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     } catch (_) {}
     afterTabsChange(false);
   }
-  let ovTimer = 0;
+
+  // ---------- the whole-file box ----------
+  // ovRec(id), a file's "Notes on the whole image" record: reply, status, atts (Claude's side, and the box's pictures), exists
+  // ("unknown" until the store answers: no set then, it could wipe a reply the page hasn't seen yet; then "yes" | "no"),
+  // fields (changes not sent yet), flying (the write under way), timer (typing waits 600 ms, for each file on its own),
+  // queued, said (the line beside the box's label). A field waiting or under way is this viewer's: a copy arriving from the
+  // store doesn't overwrite it, so Claude replying while the reviewer types keeps their words.
+  let ovSeen = false;                          // the store has listed the whole-file docs: a file it didn't list has none
+  function ovRec(id) {
+    let m = ovMeta.get(id);
+    if (!m) ovMeta.set(id, (m = { reply: "", status: "open", atts: [], exists: ovSeen ? "no" : "unknown", fields: null, flying: null, timer: 0, queued: false, said: "" }));
+    return m;
+  }
+  const ovMine = (m, k) => !!((m.fields && k in m.fields) || (m.flying && k in m.flying));
+  function ovSaid(id, text) { ovRec(id).said = text; if (cur && cur.id === id) $("#ovSaved").textContent = text; }
+  function ovSave(id, fields, ms = 0) {
+    const m = ovRec(id); m.fields = Object.assign(m.fields || {}, fields);
+    clearTimeout(m.timer); m.timer = 0;
+    if (ms) m.timer = setTimeout(() => { m.timer = 0; ovFlush(id); }, ms); else ovFlush(id);
+  }
+  function ovFlush(id) {
+    const m = ovMeta.get(id); if (!m) return;
+    clearTimeout(m.timer); m.timer = 0;
+    if (!m.fields) return;
+    if (mode === "local") { m.fields = null; saveLocal(); ovSaid(id, "Saved in this browser only"); return; }
+    if (mode !== "db" || m.queued) return;                       // still connecting: sent once the store answers
+    m.queued = true; enqueue("__overall_" + id, () => writeOv(id));
+  }
+  // a file's whole-file write, with every change made by then. Once the doc exists, an update (a set would wipe Claude's
+  // reply); while that isn't known, an update too, and a set only when the store turns out to have no doc for the file
+  async function writeOv(id) {
+    const m = ovMeta.get(id); if (!m) return;
+    m.queued = false;
+    const fields = m.fields; if (!fields) return;
+    m.fields = null; m.flying = fields;
+    const doc = Object.assign({ img: id }, fields, { at: new Date().toISOString() });
+    if (m.reply && ("text" in fields || "atts" in fields)) { doc.edited = doc.at; doc.status = "open"; m.status = "open"; }   // changed after Claude's reply: open again
+    const ref = ovCol.doc(id), whole = () => Object.assign({ status: "open", text: overall.get(id) || "", atts: m.atts }, doc);
+    try {
+      if (m.exists === "no") await ref.set(whole());
+      else try { await ref.update(doc); }
+      catch (e) { if (!e || e.code !== "invalid_argument" || (await ref.get()).exists) throw e; await ref.set(whole()); }
+      m.exists = "yes";
+      ovSaid(id, m.fields ? "Saving…" : "Saved · Claude reads it with the notes");
+    } catch (e) {
+      m.fields = Object.assign({}, fields, m.fields);            // sent again: by itself shortly, and with the next change
+      ovSaid(id, "Not saved yet. Check your connection; it's tried again.");
+      throw e;
+    } finally { m.flying = null; }
+  }
   overallEl.addEventListener("input", () => {
-    if (!cur) return;
-    const id = cur.id; overall.set(id, overallEl.value);
-    clearTimeout(ovTimer);
-    renderOverallMeta("Saving…");
-    ovTimer = setTimeout(() => {
-      if (mode === "db") writeOverall(id, { text: overall.get(id) || "" })
-        .then(() => { if (cur && cur.id === id) renderOverallMeta("Saved · Claude reads it with the notes"); });
-      else if (mode === "local") { saveLocal(); renderOverallMeta("Saved in this browser only"); }
-    }, 600);
+    if (!cur || RO) return;
+    overall.set(cur.id, overallEl.value);
+    ovSave(cur.id, { text: overallEl.value }, 600);
+    ovSaid(cur.id, "Saving…"); renderOverallMeta();
   });
   $("#ovToggle").addEventListener("click", () => {
     if (!cur || mode !== "db") return;
-    const id = cur.id, m = ovMeta.get(id) || {};
-    m.status = m.status === "done" ? "open" : "done"; ovMeta.set(id, m); renderOverallMeta();
-    enqueue("__overall_" + id, () => ovCol.doc(id).update({ status: m.status }));
+    const id = cur.id, m = ovRec(id);
+    m.status = m.status === "done" ? "open" : "done"; renderOverallMeta();
+    ovSave(id, { status: m.status });
   });
 
+  // ---------- connecting ----------
   async function connect() {
     if (SNAP) {
       mode = "snapshot";
@@ -1723,74 +1888,114 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       setSave("snapshot"); renderAll();
       return;
     }
-    let db = null;
-    const use = window.claude && window.claude.use ? (n) => window.claude.use(n).catch(() => null) : () => Promise.resolve(null);
-    [db, users] = await Promise.all([use("db"), use("user")]);
+    const has = !!(window.claude && window.claude.use);
+    const use = has ? (n) => window.claude.use(n).catch(() => null) : () => Promise.resolve(null);
+    const usersP = use("user");
+    // The store. null is a plain answer (a local copy, a signed-out viewer: this browser keeps the notes). A failed answer is
+    // asked again after 1, 2 and 4 s before the board falls back to this browser for the visit.
+    let db = null, failedDb = false;
+    for (let i = 0; has; i++) {
+      try { db = await window.claude.use("db"); failedDb = false; break; }
+      catch (e) { failedDb = true; console.warn("db", e); if (i === 3) break; await sleep(1000 * 2 ** i); }
+    }
+    users = await usersP;
     if (users) { try { myId = await users.id(); } catch (_) { myId = null; } for (const m of marks.values()) if (!m.by) m.by = myId; }
     if (!db) {
-      mode = "local"; loadLocal(); if (pending.size) { pending.clear(); saveLocal(); } renderAll(); setSave("local");
-      toast("Notes are kept in this browser only here. Use Copy all notes to send them to Claude.");
+      mode = "local"; offline = failedDb;
+      if (offline) renderAll(); else loadLocal();               // after a failed connect only this visit's notes show (see saveLocal)
+      flushAll(); renderOverallMeta(); showSave();
+      toast(offline ? "Couldn't reach this board's notes. Notes you make now stay in this browser only; reload to try again."
+        : "Notes are kept in this browser only here. Use Copy all notes to send them to Claude.");
       return;
     }
     col = db.collection("marks"); ovCol = db.collection("overall"); tabCol = db.collection("tabs"); layoutCol = db.collection("layout");
-    use("comments").then((c) => { commentsNs = c; });           // Send to Claude; null where the board doesn't declare it
-    use("assets").then((a) => { assetsNs = a; });                // pictures in notes; null for viewers who can't edit, or a board without "assets"
+    commentsP = use("comments").then((c) => { commentsNs = c; });   // Send to Claude; null where the board doesn't declare it
+    assetsP = use("assets").then((a) => { assetsNs = a; });         // pictures in notes; null for viewers who can't edit, or a board without "assets"
     mode = "db";
-    for (const id of [...pending.keys()]) flush(id);           // notes made while connecting
-    col.onSnapshot((snap) => {
-      let changed = false;
-      for (const ch of snap.docChanges()) {
-        const id = ch.doc.id;
-        if (ch.type === "removed") { if (marks.has(id) && !isDirty(id)) { marks.delete(id); created.delete(id); changed = true; } continue; }
-        if (tomb.has(id)) continue;
-        const d = ch.doc.data(); if (!d) continue;
-        const remote = fromDoc(id, d); if (!remote.items.length && remote.t == null) continue;     // not a note (a probe doc, say)
-        created.add(id);
-        const local = marks.get(id);
-        if (local && isDirty(id)) {
-          const groups = pending.get(id) || new Set();
-          for (const [g, keys] of Object.entries(GROUPS)) if (!groups.has(g) && !(g === "text" && timers.has(id))) for (const k of keys) local[k] = remote[k];
-          local.reply = remote.reply;
-          if (!remote.legacy) local.legacy = false;
-        } else marks.set(id, remote);
-        changed = true;
-      }
-      if (changed) renderAll();
-      if (!inflight) setSave(saveError ? "error" : "saved");
-    }, (e) => { console.warn(e); setSave("error"); });
-    ovCol.onSnapshot((snap) => {
-      for (const ch of snap.docChanges()) {
-        if (ch.type === "removed") { overall.delete(ch.doc.id); ovMeta.delete(ch.doc.id); continue; }
-        const d = ch.doc.data() || {};
-        overall.set(ch.doc.id, d.text || "");
-        ovMeta.set(ch.doc.id, { reply: d.reply || "", status: d.status || "open", exists: true, atts: picIds(d.atts) });
-      }
-      if (cur && document.activeElement !== overallEl) overallEl.value = overall.get(cur.id) || "";
-      renderOverallMeta();
-    }, () => {});
-    tabCol.onSnapshot((snap) => {
-      const first = !tabsSeen; tabsSeen = true;
-      for (const ch of snap.docChanges()) {
-        const d = (ch.doc.data && ch.doc.data()) || {};
-        const gid = d.id != null ? String(d.id) : groups().find((g) => tabDocId(g) === ch.doc.id)     // a doc written without `id`
-          || [...tabState.keys()].find((g) => tabState.get(g).src === ch.doc.id);
-        if (gid == null || queues.has("__tab_" + gid)) continue;                       // our own write in flight: the page already shows it
-        if (ch.type === "removed") { if ((tabState.get(gid) || {}).src === ch.doc.id) tabState.delete(gid); continue; }
-        const old = tabState.get(gid);
-        if (old && old.src !== ch.doc.id && old.at && d.at && d.at < old.at) continue;   // two docs for one tab: the later one wins
-        tabState.set(gid, { id: gid, label: d.label, hidden: !!d.hidden, at: d.at, by: d.by, src: ch.doc.id });
-      }
-      afterTabsChange(!first || (!!fromAnchor && cur === fromAnchor));  // say so when a link led to a closed tab
-    }, () => {});
-    layoutCol.onSnapshot((snap) => {
-      for (const ch of snap.docChanges()) {
-        if (ch.doc.id !== "tabs" || queues.has("__taborder") || tabDrag.on) continue;     // our own move in flight, or mid-drag
-        const d = (ch.type !== "removed" && ch.doc.data && ch.doc.data()) || {};
-        tabOrder = Array.isArray(d.order) ? d.order.map(String) : null;
-        renderTabs();
-      }
-    }, () => {});
-    db.collection("rounds").onSnapshot(onRounds, () => {});
+    flushAll();                                                  // notes and whole-file notes written while connecting
+    listen("marks", col, onMarks);
+    listen("overall", ovCol, onOverall);
+    listen("tabs", tabCol, onTabs);
+    listen("layout", layoutCol, onLayout);
+    listen("rounds", db.collection("rounds"), onRounds);
+  }
+  // A live listener. If it dies (the page's host stopped answering, say), it is opened again after 1, 2, 4… up to 30 s, and
+  // the chip says the link is down until a snapshot comes through. next(snap, again): `again` marks the first snapshot of a
+  // listener opened again, which lists everything there is (what was removed meanwhile doesn't come as a change).
+  function listen(name, ref, next) {
+    let tries = 0;
+    const open = (again) => ref.onSnapshot((snap) => {
+      tries = 0;
+      if (lost.delete(name)) showSave();
+      next(snap, again); again = false;
+    }, (e) => {
+      console.warn(name, e); lost.add(name); showSave();
+      if (!e || (e.code !== "revoked" && e.code !== "invalid_argument")) setTimeout(() => open(true), Math.min(30000, 1000 * 2 ** tries++));
+    });
+    open(false);
+  }
+  // the notes in the store, live. A note with changes of its own waiting or under way keeps those fields and takes the rest.
+  function onMarks(snap, again) {
+    let changed = false;
+    const seen = again ? new Set() : null;
+    for (const ch of snap.docChanges()) {
+      const id = ch.doc.id;
+      if (ch.type === "removed") { if (marks.has(id)) { remoteRemoved(id); changed = true; } continue; }
+      if (seen) seen.add(id);
+      if (tomb.has(id)) continue;
+      const d = ch.doc.data(); if (!d) continue;
+      const remote = fromDoc(id, d); if (!remote.items.length && remote.t == null) continue;     // not a note (a probe doc, say)
+      const s = rec(id);
+      if (!(ch.doc.metadata && ch.doc.metadata.hasPendingWrites)) { s.stored = true; s.gone = false; }   // the store has it, not only our own write
+      const local = marks.get(id);
+      if (local && isDirty(id)) {
+        const mine = new Set([...s.groups, ...(s.flying || [])]);
+        if (!mine.has("all")) for (const [g, keys] of Object.entries(GROUPS)) if (!mine.has(g)) for (const k of keys) local[k] = remote[k];
+        local.reply = remote.reply;
+        if (!remote.legacy) local.legacy = false;
+      } else marks.set(id, remote);
+      changed = true;
+    }
+    // the link came back: a note the store no longer lists was removed meanwhile
+    if (seen && !(snap.metadata && snap.metadata.fromCache)) for (const id of [...marks.keys()]) if (!seen.has(id) && !tomb.has(id)) { remoteRemoved(id); changed = true; }
+    if (changed) renderAll();
+    showSave();
+  }
+  // the whole-file notes in the store, live: Claude's reply always; the text, pictures and status where this viewer has none
+  // of their own waiting or under way
+  function onOverall(snap) {
+    for (const ch of snap.docChanges()) {
+      const m = ovRec(ch.doc.id), d = ch.type === "removed" ? null : ch.doc.data() || {};
+      m.exists = d ? "yes" : "no"; m.reply = (d && d.reply) || "";
+      if (!ovMine(m, "status")) m.status = (d && d.status) || "open";
+      if (!ovMine(m, "atts")) m.atts = d ? picIds(d.atts) : [];
+      if (!ovMine(m, "text")) overall.set(ch.doc.id, (d && d.text) || "");
+    }
+    if (!ovSeen && !(snap.metadata && snap.metadata.fromCache)) { ovSeen = true; for (const m of ovMeta.values()) if (m.exists === "unknown") m.exists = "no"; }
+    if (cur && document.activeElement !== overallEl) overallEl.value = overall.get(cur.id) || "";
+    renderOverallMeta();
+  }
+  function onTabs(snap) {
+    const first = !tabsSeen; tabsSeen = true;
+    for (const ch of snap.docChanges()) {
+      const d = (ch.doc.data && ch.doc.data()) || {};
+      const gid = d.id != null ? String(d.id) : groups().find((g) => tabDocId(g) === ch.doc.id)     // a doc written without `id`
+        || [...tabState.keys()].find((g) => tabState.get(g).src === ch.doc.id);
+      if (gid == null || queues.has("__tab_" + gid)) continue;                       // our own write in flight: the page already shows it
+      if (ch.type === "removed") { if ((tabState.get(gid) || {}).src === ch.doc.id) tabState.delete(gid); continue; }
+      const old = tabState.get(gid);
+      if (old && old.src !== ch.doc.id && old.at && d.at && d.at < old.at) continue;   // two docs for one tab: the later one wins
+      tabState.set(gid, { id: gid, label: d.label, hidden: !!d.hidden, at: d.at, by: d.by, src: ch.doc.id });
+    }
+    afterTabsChange(!first || (!!fromAnchor && cur === fromAnchor));  // say so when a link led to a closed tab
+  }
+  function onLayout(snap) {
+    for (const ch of snap.docChanges()) {
+      if (ch.doc.id !== "tabs" || queues.has("__taborder") || tabDrag.on) continue;     // our own move in flight, or mid-drag
+      const d = (ch.type !== "removed" && ch.doc.data && ch.doc.data()) || {};
+      tabOrder = Array.isArray(d.order) ? d.order.map(String) : null;
+      renderTabs();
+    }
   }
   let tabsSeen = false;
 
@@ -2116,9 +2321,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if ((e.key === "Delete" || e.key === "Backspace") && activeId) {
       e.preventDefault(); removeNote(activeId); return;
     }
-    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && e.shiftKey && IMAGES.length > 1 && !VID()) {
-      const gs = visGroups(), i = gs.indexOf(groupOf(cur)) + (e.key === "ArrowRight" ? 1 : -1); if (gs[i]) showImage(latestOf(gs[i])); return;
-    }
+    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && e.shiftKey && IMAGES.length > 1 && !VID()) { stepTab(e.key === "ArrowRight" ? 1 : -1); return; }
     const k = e.key.toLowerCase();
     if (k === "f") { setFull(!app.classList.contains("full")); return; }                 // full screen, on image and video tabs alike
     const tools = { v: "move", h: "move", p: "pin", m: "pin", a: "arrow", b: "box", d: "pen", t: "text" };
@@ -2172,7 +2375,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // closed tabs left out. Where sending can't go through (no Claude session watching, not an editor of the artifact, a
   // local copy) the same text is copied to paste into the Claude chat instead.
   const sendBtn = $("#sendClaude");
-  let commentsNs = null;
+  let commentsNs = null, commentsP = null;      // commentsP: the comments capability's answer, still on its way in the first moments
   const allScope = () => scope === "all" && !$("#scopeSeg").hidden;
   const tabTitle = (im) => (im.group && im.group !== im.label ? im.group + " · " + im.label : im.label);
   function openSet(all) {
@@ -2218,6 +2421,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // "no_session" answer is checked once more before falling back to copying.
   async function sendState() {
     if (mode !== "db") return "off";
+    if (commentsP) await commentsP;                              // its answer may still be on its way just after connecting
     if (!commentsNs || !("sendToClaude" in commentsNs)) return "undeclared";
     const ask = async () => { try { return await commentsNs.canSendToClaude(); } catch (_) { return "off"; } };
     let st = await ask();
@@ -2231,7 +2435,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   sendBtn.addEventListener("click", async () => {
     if (tabPopFor === "send") { closeTabPop(); return; }
     const all = allScope(), { notes, ovs } = openSet(all), n = notes.length + ovs.length;
-    if (!n) return;
+    if (!n || stillConnecting()) return;
     sendBtn.disabled = true; $("#sendLbl").textContent = "Checking…";
     const state = await sendState(), live = state === "available";
     renderSendBtn();
@@ -2348,7 +2552,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     $("#vplay").querySelector(".lbl").textContent = playing ? "Pause" : "Play";
     $("#vplay").querySelector("svg").innerHTML = playing ? '<path d="M8 5v14M16 5v14"/>' : '<path d="M8 5l11 7-11 7z"/>';
     const beats = cur.beats || [];
-    $("#vbeats").querySelectorAll(".vbeat").forEach((el) => { const b = beats[+el.dataset.i]; el.classList.toggle("cur", t >= b.a && t < b.b); });
+    $("#vbeats").querySelectorAll(".vbeat").forEach((el) => { const b = beats[+el.dataset.i]; el.classList.toggle("cur", !!b && t >= b.a && t < b.b); });
     schedule();
   }
   function loopVideo() { tickVideo(); vraf = !vid.paused && !vid.ended ? requestAnimationFrame(loopVideo) : 0; }
@@ -2356,7 +2560,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   ["pause", "seeked", "ended", "durationchange"].forEach((ev) => vid.addEventListener(ev, () => { if (ev === "durationchange" && VID()) buildTrack(); tickVideo(); }));
   let vdrag = false;
   const trackSeek = (e) => { const r = vtrack.getBoundingClientRect(); scrubTo(clamp((e.clientX - r.left) / r.width, 0, 1) * (cur.dur || vdur())); };
-  const endScrub = () => { vdrag = false; dragLock(false); };
+  const endScrub = () => { if (vdrag) { vdrag = false; dragLock(false); } };
   vtrack.addEventListener("pointerdown", (e) => {
     const pin = e.target.closest(".vpin");
     if (pin) { const m = marks.get(pin.dataset.id); if (m) { seekTo(m.t); openComment(m.id, false); } return; }
@@ -2364,9 +2568,9 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     vdrag = true; dragLock(true);
     try { vtrack.setPointerCapture(e.pointerId); } catch (_) {} trackSeek(e);
   });
-  vtrack.addEventListener("pointermove", (e) => { if (vdrag) trackSeek(e); });
-  vtrack.addEventListener("pointerup", endScrub);
-  vtrack.addEventListener("pointercancel", endScrub);
+  // the drag follows the pointer and ends wherever the button comes up, also where the track couldn't capture the pointer
+  window.addEventListener("pointermove", (e) => { if (vdrag) trackSeek(e); });
+  for (const ev of ["pointerup", "pointercancel", "blur"]) window.addEventListener(ev, endScrub);
   $("#vplay").addEventListener("click", togglePlay);
   $("#vback").addEventListener("click", () => scrubTo(shownT() - 1 / fps()));
   $("#vfwd").addEventListener("click", () => scrubTo(shownT() + 1 / fps()));
@@ -2434,7 +2638,8 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   if (!RO && place.id && !keptFile && !fromLink && !fresh && !ownAnchor) placeWait = place.id;
   const startAt = fromLink || (fresh ? NEWEST : (ownAnchor || keptFile || cur));
   const keptStart = fromLink ? undefined : fresh ? keptFile : startAt === keptFile || startAt === ownAnchor ? startAt : undefined;
-  showImage(fresh && keptStart ? keptStart : startAt, fromLink ? undefined : keptPlace(fresh && keptStart ? keptStart : startAt));
+  const openAt = fresh && keptStart ? keptStart : startAt;    // the file opened first (a newer round follows with landOn)
+  showImage(openAt, fromLink ? undefined : keptPlace(openAt));
   if (fresh && keptStart && keptStart !== NEWEST) landOn(NEWEST);
   // a link followed while the board is already open can arrive as a new anchor, without a reload
   addEventListener("hashchange", () => {

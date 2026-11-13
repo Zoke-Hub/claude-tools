@@ -6,17 +6,17 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderChildren } from 'claude-code'
 
 import type { Activity, ChunkRecord, PackDraft, PackGroup, PackStatus, PickerView, PinnedFact, Strategy } from '../types'
-import { compactNow, decide, FOLD_ASK, lastSkip, putBack, setFolding, snooze, summariseNow, tidyNow, undo, undoChoice, undoEntry, undoSnooze } from './actions'
+import { compactNow, decide, FOLD_ASK, isFoldPending, isTidied, isUndoable, putBack, snooze, summariseNow, tidyNow, undo, undoChoice, undoEntry, undoSnooze } from './actions'
 import { isInChat, shortTokens, textTokens } from './chunks'
 import { briefLists, keptAndFolded, keptParts, liveJoins, newestInChat, openTasksOf, summaryTokens, tokensOf, workChunks, workTokens } from './measure'
 import type { BriefLists } from './measure'
 import { CAP_PX, capSvg, drawBar, MIN_PART_COLUMNS, PART_HEIGHT, PART_PX } from './bars'
 import type { Tick } from './pack'
-import { alwaysLines, bytesText, filesName, filesOf, folderState, groupsOf, packFolder, packName, packTitle, packUp, privateLine, privateList, scanProject, tickedBytes, tickOf, toggleGroup, writeSaveTo } from './pack'
+import { alwaysLines, bytesText, filesName, filesOf, folderState, groupsOf, isPackBusy, packFolder, packName, packTitle, packUp, privateLine, privateList, scanProject, tickedBytes, tickOf, toggleGroup, writeSaveTo } from './pack'
 import { partNo, partNos, partRef } from './fold'
 import { checkboxSvg, chunkState, chunkTitle, contextParts, FIXED, FULL, heavyTextSvg, HIGH, KEPT, miniSvg, stripKey, stripParts, TRIMMED, WARN, ZIP_ICON } from './pictures'
-import { addActivity, change, chunkOf, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, homeDir, setSettings, settingsOf, STRATEGIES } from './store'
-import { unpinEntry } from './recall'
+import { change, chunkOf, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, homeDir, sessionEpoch, setSettings, settingsOf, STRATEGIES } from './store'
+import { unpin as unpinFact } from './recall'
 import type { Suggestion } from './suggest'
 import { suggestionsFor } from './suggest'
 import { base } from './paths'
@@ -267,22 +267,20 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
     void setSettings($, { customCeiling: next })
   }
   // Pressed once, it reads Folding… and takes no second press until Folio
-  // confirms the fold or says why none ran.
+  // confirms the fold or says why none ran; a second press that comes before
+  // the panel redraws finds the fold already asked for.
   const isFolding = (await read($, folding)) !== null
   const foldNow = () => {
-    if (isFolding) return
-    void setFolding($, true)
-      .then(() => compactNow($, FOLD_ASK))
-      .then(isDone => {
-        if (!isDone) $.ui.toast(lastSkip || 'Nothing folded.')
-      })
+    if (isFoldPending()) return
+    void compactNow($, FOLD_ASK).then(({ isDone, why }) => {
+      if (!isDone) $.ui.toast(why || 'Nothing folded.')
+    })
   }
+  // Unpinned for good: Folio won't pin that question or passage again by itself.
   const unpin = (id: string) => () =>
-    void change($, x => {
-      const fact = x.pinned.find(p => p.id === id)
-
-      return fact ? addActivity({ ...x, pinned: x.pinned.filter(p => p.id !== id) }, unpinEntry(fact, 'by you; still recallable')) : x
-    }).then(() => $.ui.toast('Sent back: Claude can still recall it'))
+    void unpinFact($, id).then(isDone => {
+      if (isDone) $.ui.toast('Sent back: Claude can still recall it')
+    })
   // A choice or an undo, then a short line saying what changed.
   const said = (fn: () => Promise<unknown>, text: string) => () => void fn().then(() => $.ui.toast(text))
   const quote = (c: ChunkRecord) => `“${chunkTitle(c, false)}”`
@@ -717,7 +715,17 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
       {(isSectionShut('activity') ? [] : v.activity.slice(activityPages.start, activityPages.end)).map(a => {
         const items = a.items ?? []
         const isOpen = opened.has(`act:${a.id}`)
-        const canUndo = (a.kind === 'fold' || a.kind === 'trim' || a.kind === 'tidy') && a.chunkIds.some(id => v.chunks.find(c => c.id === id && c.status !== 'compacted' && (c.status !== 'live' || c.tidied.length > 0)))
+        // Undo stays while something of the entry is still out: a chunk not
+        // restored yet, or a side message not put back. An entry from before
+        // entries listed their items goes by its chunks.
+        const isOut = (item: { kind: 'chunk' | 'side'; chunkId: string; n?: number }) => {
+          const c = chunkOf(v, item.chunkId)
+
+          return item.kind === 'chunk' ? c !== undefined && isUndoable(c) : isTidied(c, item.n)
+        }
+        const canUndo =
+          (a.kind === 'fold' || a.kind === 'trim' || a.kind === 'tidy') &&
+          (items.length > 0 ? items.some(isOut) : a.chunkIds.some(id => isOut({ kind: 'chunk', chunkId: id }) || (chunkOf(v, id)?.tidied.length ?? 0) > 0))
         const canUndoChoice =
           (a.kind === 'choice' && a.chunkIds.some(id => v.chunks.find(c => c.id === id && c.decision === a.choice && c.status !== 'folded' && c.status !== 'compacted'))) ||
           (a.kind === 'snooze' && a.suggestion !== undefined && v.snoozed[a.suggestion] !== undefined)
@@ -748,8 +756,8 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
               <Box flexDirection="column" paddingLeft="md" marginTop="xs">
                 {shown.map(item => {
                   const c = chunkOf(v, item.chunkId)
-                  const canRestore = item.kind === 'chunk' && c !== undefined && (c.status === 'folded' || c.status === 'trimmed') && c.decision !== 'keep'
-                  const canPutBack = item.kind === 'side' && c !== undefined && item.n !== undefined && c.tidied.includes(item.n)
+                  const canRestore = item.kind === 'chunk' && c !== undefined && isUndoable(c)
+                  const canPutBack = item.kind === 'side' && isTidied(c, item.n)
 
                   return (
                     <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
@@ -827,7 +835,14 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
         ) : (
           [
             <Button key={`keep-chunk-${c.id}`} label="Keep word for word" {...choice(c.decision === 'keep')} onPress={said(() => decide($, c.id, 'keep'), `Kept ${quote(c)} word for word`)} />,
-            <Button key={`fold-chunk-${c.id}`} label="Fine to fold" {...choice(c.decision === 'fold')} onPress={said(() => decide($, c.id, 'fold'), `${quote(c)} folds with the rest`)} />,
+            // A restored chunk (folded, kept word for word) goes back to its
+            // summary: the chat is rebuilt for it, and its size saved again.
+            <Button
+              key={`fold-chunk-${c.id}`}
+              label="Fine to fold"
+              {...choice(c.decision === 'fold')}
+              onPress={c.status === 'folded' ? said(() => summariseNow($, c.id), `${quote(c)} goes back to its summary`) : said(() => decide($, c.id, 'fold'), `${quote(c)} folds with the rest`)}
+            />,
           ]
         )}
       </Box>
@@ -956,6 +971,15 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
 let packForm: PackDraft | null = null
 let isScanning = false
 
+// A new session: no chunk opened, no FolioPack form from the old one's project
+// scan, and Pack up as it starts.
+export async function resetPanel($: EngineInterface) {
+  packForm = null
+  await update($, openChunk, () => null)
+  await update($, pack, () => null)
+  await update($, packed, () => null)
+}
+
 async function setForm($: EngineInterface, form: PackDraft | null, phase: 'scanning' | 'ready' | 'failed' = 'ready', error = '') {
   packForm = form
   await update($, pack, s => ({ rev: (s?.rev ?? 0) + 1, phase, error }))
@@ -973,11 +997,14 @@ async function rescan($: EngineInterface) {
 async function scan($: EngineInterface) {
   if (isScanning) return
   isScanning = true
+  // A scan of a session that ended meanwhile is dropped.
+  const epoch = sessionEpoch()
   try {
     await setForm($, null, 'scanning')
-    await setForm($, await scanProject($))
+    const found = await scanProject($)
+    if (sessionEpoch() === epoch) await setForm($, found)
   } catch (err) {
-    await setForm($, null, 'failed', errorText(err))
+    if (sessionEpoch() === epoch) await setForm($, null, 'failed', errorText(err))
   } finally {
     isScanning = false
   }
@@ -1326,13 +1353,14 @@ async function packSection(
           label={packedState === 'packing' ? 'Packing…' : packedState === 'done' ? 'Packed ✓' : 'Pack up'}
           variant={packedState === null ? 'primary' : 'secondary'}
           onPress={() => {
-            if (packedState !== null) return
+            // A second press before the panel redraws finds the pack under way.
+            if (packedState !== null || isPackBusy()) return
+            const packing = packUp($, { ...draft, name })
             void update($, packed, () => 'packing' as const)
-              .then(() => packUp($, { ...draft, name }))
-              .catch((err: unknown) => {
-                void update($, packed, () => null)
-                $.ui.toast(`Folio couldn't pack: ${errorText(err)}`)
-              })
+            packing.catch((err: unknown) => {
+              void update($, packed, () => null)
+              $.ui.toast(`Folio couldn't pack: ${errorText(err)}`)
+            })
           }}
         />
       </Box>

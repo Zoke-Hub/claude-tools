@@ -3,6 +3,24 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-13 · Folio, PulseWise and MarkRoom 1.0.0 (numbers unchanged)
+
+Fixes for states that could get stuck or go out of step, each tested on the old and the new code, and a clean-up.
+
+- **Folio:** after `/clear` the new chat starts on its own: nothing from the old chat is folded back in, packed twice or
+  recalled. "Folding…" and "Packing…" never stick; a second Fold now or Undo during a reply waits its turn instead of
+  replacing the first. New tool output is saved word for word even while older parts are being summarised. A recalled
+  or pinned answer is looked up again once newer parts could change it, Unpin sticks, and pins age out. Restore and Undo
+  no longer count a saving twice.
+- **PulseWise:** a job that stops reporting shows "no report" instead of failing, and carries on if it reports again;
+  no false "Stopped" toasts or taskbar flashes after the computer sleeps. A turn that ends with points open reads
+  "waiting for your reply" and the bar stops counting. A waiting helper agent is no longer marked done. Jobs killed or
+  cut off by a power loss don't come back on a reload. Each toast and flash happens once. The progress helper treats
+  `sys.exit(0)` as done, closes every open job at exit, and keeps two updates to one job from crossing.
+- **MarkRoom:** a note whose save fails is retried and the save chip stays in error until it lands; words typed in the
+  whole-file note survive Claude replying to it; a note started and left empty is thrown away; after a version switch
+  the range chip clears; undo goes to the file the step belongs to; a lost connection to the board reconnects.
+
 ## 2026-11-12 · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom:** the tool bar's two thin dividers sit centred between their groups (about 12 px of clear space on each

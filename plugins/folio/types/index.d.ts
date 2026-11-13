@@ -132,10 +132,21 @@ export type PinnedFact = {
   pinnedAt: number
   // The fold count when it was last recalled; ones unused for a while go back.
   lastUsedFold: number
+  // The fold count when it was pinned: however often it is used, it goes back
+  // after a while, and comes back with a fresh answer if it is asked for again.
+  pinnedFold: number
+  // For a fact: the newest part of the chat when it was answered, and that
+  // part's size then. A part newer than that (or that part grown since) which
+  // the question's search would read may change the answer, so it is looked up
+  // again. Absent on ones pinned before it was kept.
+  upTo?: PartMark
   // For a passage: where it starts, as the part number and section letter
   // recall uses ("32.B"); absent on ones brought back before it was kept.
   ref?: string
 }
+
+// How far the chat went when an answer was made: its newest part's order and size.
+export type PartMark = { order: number; tokens: number }
 
 // What one activity entry touched, listed when the entry is opened.
 export type ActivityItem = {
@@ -199,6 +210,9 @@ export type PickerView = {
   privateCount: number
   // The session's folder, so a whole-project pack can find this chat.
   cwd: string
+  // The questions (a fact's query, a passage's place) the person unpinned:
+  // recall still answers them, but never pins them again by itself.
+  unpinned: string[]
 }
 
 // One file the pack can carry, ticked on its own.

@@ -519,13 +519,11 @@ test('two background jobs get a bar each; a finished one says done while the oth
   await ui.unmount()
 })
 
-test("a background agent's named step-by-step job shows on the agent's own bar", async ($, on) => {
-  const clock = mock.clock(on, { now: Date.now() })
-  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
-  inProject(on)
-  on('tool.call', () => ({ result: {} }))
-  on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
-  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Animation notes on the walk', type: 'general-purpose', status: 'running' }] }))
+/**
+ * A background agent's step-by-step job ("Animation notes on the walk", a CLI job with no process), in a jobs folder
+ * of its own: on step 2 of 3, "Fix arms", 2 of 5 done.
+ */
+const agentNotesJob = (on: On) => {
   const now = Date.now()
   const job = {
     id: 'j9', name: 'Animation notes on the walk', point: null, session: 'chat-1', host_session: 'local_x', pid: null, heartbeat: false, ttl_ms: 1800000,
@@ -539,6 +537,16 @@ test("a background agent's named step-by-step job shows on the agent's own bar",
   on('fs.list', (_, e) => ({ value: pathOf(e).includes('/jobs') ? [{ name: 'j9.json', kind: 'file', size: 10, mtimeMs: 1, isLink: false }] : [] }))
   on('fs.read', () => ({ value: JSON.stringify(job) }))
   on('fs.write', () => ({ value: undefined }))
+}
+
+test("a background agent's named step-by-step job shows on the agent's own bar", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
+  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Animation notes on the walk', type: 'general-purpose', status: 'running' }] }))
+  agentNotesJob(on)
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Animation notes on the walk (parallel agent)', status: 'in_progress' }, { content: 'Cut-out notes', status: 'in_progress' }] })
@@ -1071,31 +1079,76 @@ const RENDER_LIST = [
 ]
 
 /**
+ * A jobs folder the bar reads: each file's content is made at each read (so a `Date.now()` in it is the moment of the
+ * read), and read again only when the test bumps its mtime. What the bar writes is kept, and never changes a file.
+ */
+const jobFolder = (on: On) => {
+  const files = new Map<string, { mtime: number; body: () => Record<string, unknown> }>()
+  const writes: { path: string; text: string }[] = []
+  on('fs.list', (_, e) => ({
+    value: pathOf(e).includes('/jobs') ? [...files].map(([id, file]) => ({ name: `${id}.json`, kind: 'file', size: 10, mtimeMs: file.mtime, isLink: false })) : [],
+  }))
+  on('fs.read', (_, e) => {
+    const path = pathOf(e)
+    const id = [...files.keys()].find(one => path.endsWith(`/jobs/${one}.json`))
+    const file = id === undefined ? undefined : files.get(id)
+    if (!file) throw new Error('missing')
+    return { value: JSON.stringify(file.body()) }
+  })
+  on('fs.write', (_, e) => {
+    writes.push({ path: pathOf(e), text: String((e as { text?: unknown }).text ?? '') })
+    return { value: undefined }
+  })
+  return { files, writes }
+}
+
+/** A helper job's file: a running ttl job with one counted step (4 of 14), with `o` over it. */
+const jobBody = (o: Record<string, unknown>) => ({
+  id: 'j', name: 'Job', point: null, session: 'chat-1', host_session: 'local_x', pid: null, heartbeat: false, ttl_ms: 1_800_000,
+  script: 'progress.py', argv: '', started: Date.now(), updated: Date.now(), ended: null, state: 'running', message: null,
+  steps: [{ name: 'Frames', state: o.state ?? 'running', done: 4, total: 14, unit: null, weight: null, est_ms: null, started: o.started ?? Date.now(), ended: null }],
+  ...o,
+})
+
+const ran = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+
+/**
  * A helper job's file, which the bar can read once `job.written` is set: started at `started()` (the test clock moves
  * timers, not Date.now, so each test gives its job the start it needs), running until `job.ended` is set (its file
  * changes then), and always fresh, as a running job's file is. `flashes()` gives the scripts the bar ran in PowerShell,
  * decoded.
  */
 const helperJob = (on: On, o: { id: string; name: string; started: () => number; env?: Record<string, string> }) => {
-  const job = { written: false, ended: false }
   const runs: string[][] = []
   mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x', ...o.env })
   on('process.run', (_, e) => {
     runs.push((e as { argv: string[] }).argv)
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return ran()
   })
-  on('fs.list', (_, e) => ({ value: job.written && pathOf(e).includes('/jobs') ? [{ name: `${o.id}.json`, kind: 'file', size: 10, mtimeMs: job.ended ? 2 : 1, isLink: false }] : [] }))
-  on('fs.read', () => {
-    const at = o.started()
-    const isEnded = job.ended
-    return {
-      value: JSON.stringify({
-        id: o.id, name: o.name, point: null, session: 'chat-1', host_session: 'local_x', pid: 1, heartbeat: true, script: 'render.py',
-        argv: 'render.py', started: at, updated: Date.now(), ended: isEnded ? Date.now() : null, state: isEnded ? 'done' : 'running', message: null,
-        steps: [{ name: 'Frames', state: isEnded ? 'done' : 'running', done: isEnded ? 14 : 4, total: 14, unit: null, weight: null, est_ms: null, started: at, ended: null }],
-      }),
-    }
-  })
+  const { files } = jobFolder(on)
+  const job = {
+    ended: false,
+    get written() {
+      return files.has(o.id)
+    },
+    set written(isWritten: boolean) {
+      if (isWritten) files.set(o.id, file)
+      else files.delete(o.id)
+    },
+  }
+  const file = {
+    get mtime() {
+      return job.ended ? 2 : 1
+    },
+    body: () => {
+      const at = o.started()
+      const state = job.ended ? 'done' : 'running'
+      return jobBody({
+        id: o.id, name: o.name, pid: 1, heartbeat: true, ttl_ms: null, script: 'render.py', argv: 'render.py', started: at, state, ended: job.ended ? Date.now() : null,
+        steps: [{ name: 'Frames', state, done: job.ended ? 14 : 4, total: 14, unit: null, weight: null, est_ms: null, started: at, ended: null }],
+      })
+    },
+  }
   const flashes = () =>
     runs
       .filter(argv => argv[0] === 'powershell.exe')
@@ -1260,6 +1313,8 @@ test("a long job finishing on Windows flashes the Claude app's taskbar button, u
   expect(sent[0]).toContain('GetForegroundWindow')
   expect(sent[0]).toContain('if ($apps.Id -contains $owner) { exit 0 }')
   expect(sent[0]).toContain('$f.dwFlags = 14')
+  // Only the desktop app's own (Electron) windows: never a console window of the claude command line.
+  expect(sent[0]).toContain('"Chrome_WidgetWin_1"')
 })
 
 test('off Windows, or for a short job, nothing flashes', async ($, on) => {
@@ -1287,4 +1342,471 @@ test('on Windows a job that took only seconds ends without a flash', async ($, o
   job.ended = true
   await clock.advance(1100)
   expect(flashes()).toEqual([])
+})
+
+// ---- the state machines: one writer, task and agent lives, the chat's phase, ends told once ------------------------
+
+/** A real pause, for what is timed by the real clock (a ttl, a turn's frozen time): the test clock moves timers only. */
+const realWait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+const notification = (id: string, status = 'completed') => ({
+  message: { type: 'user', content: [{ type: 'text', text: `<task-notification><task-id>${id}</task-id><status>${status}</status></task-notification>` }] },
+})
+
+test("a task's end that lands while the poll waits on a file is kept, not written over by the poll", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  backgroundBash(on)
+  let isSlow = false
+  let mtime = 1
+  const job = jobBody({ id: 'j-stills', name: 'Export the stills' })
+  on('fs.list', (_, e) => ({ value: pathOf(e).includes('/jobs') ? [{ name: 'j-stills.json', kind: 'file', size: 10, mtimeMs: mtime, isLink: false }] : [] }))
+  on('fs.read', async (_, e) => {
+    if (isSlow && pathOf(e).includes('/jobs/')) await clock.sleep(500)
+    return { value: JSON.stringify(job) }
+  })
+  on('fs.write', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the cut', status: 'in_progress' }, { content: 'Export the stills', status: 'pending' }] })
+  await $.tool.call({ tool: 'Bash', command: 'python3 render.py', description: 'Render the cut', run_in_background: true })
+  await clock.advance(1100)
+  // The job's file changes, and this time it takes a while to read: the poll waits on it…
+  isSlow = true
+  mtime = 2
+  await clock.advance(1000)
+  // …when the background command's end arrives, and is written first.
+  await $.session.append(notification('bg-late-1') as never)
+  await clock.advance(600)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'toggle-done' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Render the cut · ')
+  expect(drawn).toContain('Render the cut: done')
+  await ui.unmount()
+})
+
+test('a job past its ttl goes silent, not failed; it runs again when it reports, and its real end is logged and told once', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const { files } = jobFolder(on)
+  const began = Date.now() - 60_000
+  let state = 'running'
+  files.set('j-batch', { mtime: 1, body: () => jobBody({ id: 'j-batch', name: 'Batch the frames', ttl_ms: 200, started: began, state, ended: state === 'done' ? Date.now() : null }) })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Batch the frames', status: 'in_progress' }, { content: 'Check them', status: 'pending' }] })
+  await clock.advance(1100)
+  // Past its ttl with no report.
+  await realWait(300)
+  await clock.advance(6000)
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  let drawn = await drawnText(ui)
+  expect(drawn).toContain('Batch the frames: no report')
+  expect(drawn).not.toContain('stopped reporting')
+  expect(toasts).toEqual([])
+  await ui.unmount()
+  // It reports again: it runs.
+  const file = files.get('j-batch')
+  if (file) file.mtime = 2
+  await clock.advance(1000)
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('Batch the frames: 29%')
+  await ui.unmount()
+  // Its file says done: its real end, in "Done so far" and in one toast.
+  state = 'done'
+  if (file) file.mtime = 3
+  await clock.advance(1000)
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'toggle-done' })
+  drawn = await drawnText(ui)
+  expect(drawn).toContain('Batch the frames · 1m')
+  expect(drawn).not.toContain('stopped reporting')
+  expect(toasts.length).toBe(1)
+  expect(toasts[0]).toContain('Finished: Batch the frames')
+  await ui.unmount()
+})
+
+/**
+ * A Windows host whose job "Intro frames" (pid 4242) last wrote its heartbeat a minute ago (a laptop waking from sleep,
+ * say), and whose process list, looked up with tasklist (there is no ps), lists it, does not list it, or cannot be read.
+ */
+const windowsJob = async ($: Parameters<Parameters<typeof test>[1]>[0], on: On, tasklist: 'alive' | 'gone' | 'broken') => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x', APPDATA: 'C:/Users/me/AppData/Roaming' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { files, writes } = jobFolder(on)
+  on('process.run', (_, e) => {
+    const argv = (e as { argv: string[] }).argv
+    if (argv[0] === 'ps') throw new Error('no ps here')
+    if (argv[0] !== 'tasklist') return ran()
+    if (tasklist === 'broken') throw new Error('tasklist did not run')
+    const rows = ['"System","4","Services","0","4,316 K"', '"tasklist.exe","9000","Console","1","8,000 K"']
+    if (tasklist === 'alive') rows.push('"python.exe","4242","Console","1","52,000 K"')
+    return ran(rows.join('\r\n'))
+  })
+  const heard = Date.now() - 60_000
+  files.set('j-win', { mtime: 1, body: () => jobBody({ id: 'j-win', name: 'Intro frames', pid: 4242, heartbeat: true, ttl_ms: null, script: 'render.py', started: heard - 60_000, updated: heard }) })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the intro', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
+  await clock.advance(1100)
+  return { clock, writes }
+}
+
+test('on Windows a job unheard for a while whose process tasklist lists runs on', async ($, on) => {
+  await windowsJob($, on, 'alive')
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Intro frames: 29%')
+  expect(drawn).not.toContain('stopped')
+  await ui.unmount()
+})
+
+test('a job unheard for a while goes silent, not failed, when the process list cannot be read', async ($, on) => {
+  await windowsJob($, on, 'broken')
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Intro frames: no report')
+  expect(drawn).not.toContain('stopped')
+  await ui.unmount()
+})
+
+test('on Windows a job whose process is gone fails once, and its end is written to its file', async ($, on) => {
+  const { clock, writes } = await windowsJob($, on, 'gone')
+  await clock.advance(10_000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('"label":"▸ Done · 1"')
+  await ui.press({ key: 'toggle-done' })
+  expect(await drawnText(ui)).toContain('Intro frames · stopped (the script ended without finishing)')
+  await ui.unmount()
+  expect(writes.some(w => w.path.endsWith('/jobs/j-win.json') && w.text.includes('"state":"failed"'))).toBe(true)
+})
+
+/** A background command run through the helper (`progress.py run … -- python3 render.py`) and the helper's job for it. */
+const coveredRender = async ($: Parameters<Parameters<typeof test>[1]>[0], on: On) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  backgroundBash(on)
+  const { files } = jobFolder(on)
+  const job = { state: 'running' }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'python3 ~/.claude/progress/progress.py run --name "Render frames" -- python3 render.py', description: 'Render frames', run_in_background: true })
+  const began = Date.now()
+  files.set('j-run', {
+    mtime: 1,
+    body: () => jobBody({ id: 'j-run', name: 'Render frames', pid: 77, heartbeat: true, ttl_ms: null, script: 'render.py', started: began, state: job.state, ended: job.state === 'running' ? null : Date.now() }),
+  })
+  await clock.advance(1100)
+  return { clock, files, job }
+}
+
+test('a command its helper job reports is not counted itself: the bar finishes with the job', async ($, on) => {
+  const { clock, files, job } = await coveredRender($, on)
+  job.state = 'done'
+  const file = files.get('j-run')
+  if (file) file.mtime = 2
+  await clock.advance(1000)
+  // The command's own end has not come yet (it comes a moment after its job's).
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', isWorking: false } as never)
+  expect(await drawnText(ui)).toContain('Done ·')
+  await ui.unmount()
+})
+
+test('stopping a command its helper job reports stops the job too', async ($, on) => {
+  await coveredRender($, on)
+  await $.tool.call({ tool: 'TaskStop', task_id: 'bg-late-1' } as never)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'toggle-done' })
+  expect(await drawnText(ui)).toContain('Render frames · stopped')
+  await ui.unmount()
+})
+
+test("an agent is not taken for ended when its status can't be read or reads idle; its real end is logged once", async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
+  // null: the app's list does not answer.
+  let status: 'idle' | 'completed' | null = null
+  on('agent.list', () => (status === null ? { deny: 'not now' } : { value: [{ id: 'agent-1', description: 'Check the pack', type: 'general-purpose', status }] }))
+  on('turn.complete', () => ({ text: '' }))
+  const agentTurnEnds = () => $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'ta', agentId: 'agent-1', reason: 'answer' } as never)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Check the pack', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
+  await $.agent.spawn({ prompt: 'check it', description: 'Check the pack', subagentType: 'general-purpose' })
+  await agentTurnEnds()
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
+  expect(await drawnText(ui)).not.toContain('Check the pack: done')
+  await ui.unmount()
+  // Idle: between turns, not ended.
+  status = 'idle'
+  await agentTurnEnds()
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
+  expect(await drawnText(ui)).toContain('Check the pack: between turns')
+  await ui.unmount()
+  // It acts again, then the app says it completed: one line in "Done so far".
+  await $.tool.call({ tool: 'Read', file_path: '/notes.md', agentId: 'agent-1' } as never)
+  status = 'completed'
+  await agentTurnEnds()
+  await agentTurnEnds()
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('"label":"▸ Done · 1"')
+  expect(await drawnText(ui)).toContain('Check the pack: done')
+  await ui.unmount()
+})
+
+test("an agent's own step-by-step job is not ended with it, and shows again when the agent comes back", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
+  let status: 'running' | 'completed' = 'running'
+  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Animation notes on the walk', type: 'general-purpose', status }] }))
+  on('turn.complete', () => ({ text: '' }))
+  agentNotesJob(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Animation notes on the walk (parallel agent)', status: 'in_progress' }, { content: 'Cut-out notes', status: 'in_progress' }] })
+  await $.agent.spawn({ prompt: 'do the notes', description: 'Animation notes on the walk', subagentType: 'general-purpose' })
+  await clock.advance(1100)
+  // The app says it completed; then it acts again (a message woke it): its job is back on its bar, where it was.
+  status = 'completed'
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'ta', agentId: 'agent-1', reason: 'answer' } as never)
+  status = 'running'
+  await $.tool.call({ tool: 'Read', file_path: '/notes.md', agentId: 'agent-1' } as never)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('Fix arms · 2 / 5')
+  await ui.unmount()
+})
+
+test('a turn that ends with points still open reads as waiting for your reply, its time standing still', async ($, on) => {
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('turn.start', (_, e) => ({ turnId: (e as { turnId?: string }).turnId ?? 't' }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ turnId: 't1' } as never)
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build the page', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
+  await $.turn.complete({ answer: 'Which colour?', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  await realWait(1100)
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop', isWorking: false } as never)
+  await ui.press({ key: 'open-p:0' })
+  let drawn = await drawnText(ui)
+  expect(drawn).toContain('"alt":"1. Build the page: waiting for your reply · 0s')
+  expect(drawn).not.toContain('Claude working')
+  await ui.unmount()
+  // The person answers: Claude's turn runs, and its part moves again (the beat is still open).
+  await $.turn.start({ turnId: 't2' } as never)
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  drawn = await drawnText(ui)
+  expect(drawn).toContain('"alt":"1. Build the page: Claude working')
+  await ui.unmount()
+})
+
+test("the chat's phase is kept in the model the host holds, so a hot reload of the code mid-turn keeps it", async ($, on) => {
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('turn.start', (_, e) => ({ turnId: (e as { turnId?: string }).turnId ?? 't' }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  // What the plugin writes to the host's state (which a reload of its code keeps), the newest last.
+  const kept: { phase?: string }[] = []
+  on('state.set', (_, e, next) => {
+    const write = e as { key?: string; value?: { phase?: string } }
+    if (write.key === 'model' && write.value) kept.push(write.value)
+    return next(e)
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ turnId: 't1' } as never)
+  expect(kept.at(-1)?.phase).toBe('working')
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build the page', status: 'in_progress' }] })
+  await $.turn.complete({ answer: 'Which colour?', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  expect(kept.at(-1)?.phase).toBe('awaitingReply')
+})
+
+test('one shared word in a step does not start a waiting point; two words do', async ($, on) => {
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: PLAN,
+    scope: 'first_task',
+    items: [
+      { content: 'Look at the layout', status: 'in_progress' },
+      { content: 'Put the footer count back', status: 'pending' },
+      { content: 'Collapse what fills the panel', status: 'pending' },
+    ],
+  })
+  await $.tool.call({ tool: 'Bash', command: 'grep -n footer app.tsx', description: 'Check footer' })
+  await $.tool.call({ tool: 'Bash', command: 'python3 edit.py', description: 'Collapse the fills' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Put the footer count back: not started')
+  expect(drawn).toContain('Collapse what fills the panel: Claude working')
+  await ui.unmount()
+})
+
+test('an end worked out twice (its first write beaten by another) is told once', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const { files } = jobFolder(on)
+  files.set('j-long', { mtime: 1, body: () => jobBody({ id: 'j-long', name: 'Export the stills', started: Date.now() - 60_000 }) })
+  // The first write that ends the job is beaten (another write got in first): the end is worked out again.
+  let isArmed = false
+  on('state.set', (_, e, next) => {
+    const write = e as { key?: string; value?: { tasks?: { id: string; state: string }[] } }
+    if (isArmed && write.key === 'model' && write.value?.tasks?.some(t => t.id === 'j-long' && t.state === 'failed')) {
+      isArmed = false
+      return { value: { isSet: false, version: 0 } } as never
+    }
+    return next(e)
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1100)
+  isArmed = true
+  await $.tool.call({ tool: 'TaskStop', task_id: 'j-long' } as never)
+  expect(isArmed).toBe(false)
+  expect(toasts.filter(text => text.includes('Stopped: Export the stills')).length).toBe(1)
+})
+
+test('on Windows a long stretch that ends with a short job flashes too: the poll ends work by the same rule', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x', APPDATA: 'C:/Users/me/AppData/Roaming' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const runs: string[][] = []
+  on('process.run', (_, e) => {
+    runs.push((e as { argv: string[] }).argv)
+    return ran()
+  })
+  const { files } = jobFolder(on)
+  const now = Date.now()
+  let isDone = false
+  // A render that stopped a minute ago, and its redo, started 5 s ago: the stretch is long, the last job short.
+  files.set('old-walk', { mtime: 1, body: () => jobBody({ id: 'old-walk', name: 'Render the walk', started: now - 60_000, updated: now - 1000 }) })
+  files.set('new-walk', {
+    mtime: 1,
+    body: () => jobBody({ id: 'new-walk', name: 'Re-render the walk', redoes: 'Render the walk', started: now - 5000, state: isDone ? 'done' : 'running', ended: isDone ? Date.now() : null }),
+  })
+  const flashes = () => runs.filter(argv => argv[0] === 'powershell.exe')
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1100)
+  expect(flashes()).toEqual([])
+  isDone = true
+  const file = files.get('new-walk')
+  if (file) file.mtime = 2
+  await clock.advance(1000)
+  expect(flashes().length).toBe(1)
+})
+
+test("a job run by bash is not taken for an agent's own just because the agent's commands use bash too", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
+  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Fix the notes', type: 'general-purpose', status: 'running' as const }] }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.agent.spawn({ prompt: 'fix them', description: 'Fix the notes', subagentType: 'general-purpose' })
+  await $.tool.call({ tool: 'Bash', command: 'bash check.sh', description: 'Check the notes', agentId: 'agent-1' } as never)
+  // Another chat's agent, or Claude itself, runs a script through bash: the helper names its script "bash".
+  files.set('j-other', { mtime: 1, body: () => jobBody({ id: 'j-other', name: 'Render the stills', pid: 99, heartbeat: true, ttl_ms: null, script: 'bash', argv: 'bash render.sh' }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  // Its own track, not the agent's bar.
+  expect(await drawnText(ui)).toContain('Render the stills: 29%')
+  await ui.unmount()
+})
+
+test('a job the bar took for gone runs again when its own file reports after that, and its ✗ line goes', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { files } = jobFolder(on)
+  on('process.run', (_, e) => ((e as { argv: string[] }).argv[0] === 'ps' ? ran('', 1) : ran()))
+  let heard = Date.now() - 60_000
+  files.set('j-back', { mtime: 1, body: () => jobBody({ id: 'j-back', name: 'Intro frames', pid: 4242, heartbeat: true, ttl_ms: null, script: 'render.py', started: Date.now() - 120_000, updated: heard }) })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the intro', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
+  await clock.advance(1100)
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('Intro frames: stopped')
+  await ui.unmount()
+  // Its heartbeat comes in after all (ps missed it): it runs again.
+  heard = Date.now()
+  const file = files.get('j-back')
+  if (file) file.mtime = 2
+  await clock.advance(1000)
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('Intro frames: 29%')
+  expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a job the bar ended does not come back when its file is read again after the bar let it go; its end is written to the file', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { files, writes } = jobFolder(on)
+  // ps finds none of them (it answers 1).
+  on('process.run', (_, e) => ((e as { argv: string[] }).argv[0] === 'ps' ? ran('', 1) : ran()))
+  const heard = Date.now() - 60_000
+  files.set('j-dead', { mtime: 1, body: () => jobBody({ id: 'j-dead', name: 'Intro frames', pid: 4242, heartbeat: true, ttl_ms: null, script: 'render.py', started: heard - 60_000, updated: heard }) })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the intro', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
+  await clock.advance(1100)
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'toggle-done' })
+  expect(await drawnText(ui)).toContain('Intro frames · stopped (the script ended without finishing)')
+  await ui.unmount()
+  // A new list lets the ended job go; its file is read again (as after a reload), still saying running.
+  await $.tool.call({ tool: PLAN, scope: 'new_task', items: [{ content: 'Write the notes', status: 'in_progress' }, { content: 'Send them', status: 'pending' }] })
+  const file = files.get('j-dead')
+  if (file) file.mtime = 2
+  await clock.advance(6000)
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).not.toContain('Intro frames')
+  expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
+  await ui.unmount()
+  // And its file was told it ended, so not even a restart that forgets the model brings it back.
+  expect(writes.some(w => w.path.endsWith('/jobs/j-dead.json') && w.text.includes('"state":"failed"'))).toBe(true)
+})
+
+test('a job file left saying running long ago (its script gone in a crash or a power cut) is history at first sight', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { files } = jobFolder(on)
+  on('process.run', (_, e) => ((e as { argv: string[] }).argv[0] === 'ps' ? ran('', 1) : ran()))
+  const heard = Date.now() - 20 * 60_000
+  files.set('j-old', { mtime: 1, body: () => jobBody({ id: 'j-old', name: 'Intro frames', pid: 4242, heartbeat: true, ttl_ms: null, script: 'render.py', started: heard - 60_000, updated: heard }) })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the intro', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
+  await clock.advance(1100)
+  await clock.advance(6000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
+  expect(await drawnText(ui)).not.toContain('Intro frames')
+  await ui.unmount()
 })

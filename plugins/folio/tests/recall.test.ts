@@ -6,9 +6,11 @@ import type { SessionMessage } from 'claude-code'
 
 import { chunksOf, FOLD_MARK, splitChunks } from '../hooks/chunks'
 import { outlineText } from '../hooks/fold'
-import { emptyBrief, normaliseChunk } from '../hooks/store'
-import { callTool, savedOriginal, savedView, stubEngine, talk, start } from './engine'
-import type { On } from './engine'
+import { dropStalePins } from '../hooks/recall'
+import { EMPTY_VIEW, emptyBrief, normaliseChunk } from '../hooks/store'
+import type { PickerView } from '../types'
+import { callTool, DIR, mountPanel, savedOriginal, savedView, stubEngine, talk, start } from './engine'
+import type { Engine, On } from './engine'
 
 // The test chat's saved index, and each chunk's original by its id.
 function saved(chunks: object[], originals: Record<string, { text: string; messages?: string[] }>): Map<string, string> {
@@ -192,4 +194,75 @@ test('an answer names the parts that share its files, and a file the query names
   const term = JSON.stringify(await callTool($, { tool: 'mcp__folio__recall', query: 'what is a FolioPack', exact: true }))
   expect(term).toContain('Parts that name FolioPack: 4.')
   expect(JSON.stringify(await callTool($, { tool: 'mcp__folio__recall', query: 'see foliopack.ts', exact: true }))).not.toContain('name pack.ts')
+})
+
+// The three parts above, in a chat that goes on: `say` adds a newer turn, and
+// its turn's end saves it as a part of its own.
+async function goingOn($: Engine, on: On, answer: () => string) {
+  const chunks = parts.map(({ text: _t, messages: _m, ...c }) => ({ isSummarised: true, status: 'folded', sections: [], tokens: 3000, ...c }))
+  const files = saved(chunks, Object.fromEntries(parts.map(p => [p.id, { text: p.text, messages: p.messages }])))
+  const messages: SessionMessage[] = []
+  const { clock, prompts } = stubEngine(on, { files, messages, model: answer })
+  await start($)
+  await clock.advance(1000)
+  const ask = async (query: string) => JSON.stringify(await callTool($, { tool: 'mcp__folio__recall', query }))
+  const say = async (prompt: string, reply: string) => {
+    messages.push({ role: 'user', text: prompt, toolUses: [] }, { role: 'assistant', text: reply, toolUses: [] })
+    await $.turn.complete({ reason: 'answer', answer: reply, durationMs: 10, isAborted: false, turnId: `t${messages.length}` })
+    await clock.advance(1000)
+  }
+  const index = () => JSON.parse(files.get(`${DIR}/index.json`)!) as PickerView
+
+  return { ask, say, index, prompts, clock }
+}
+
+const found = (answer: string) => `{"found": true, "answer": "${answer}", "quotes": [], "confidence": "high"}`
+const QUESTION = 'where does the footer count sit relative to the button?'
+
+test('a pinned or cached answer a newer part may change is looked up again', async ($, on) => {
+  let now = 'after the button'
+  const { ask, say, index, prompts } = await goingOn($, on, () => found(now))
+  expect(await ask(QUESTION)).toContain('after the button')
+  // Asked again: from the cache, and pinned.
+  expect(await ask(QUESTION)).toContain('recall cache')
+  expect(index().pinned.map(p => p.text)).toEqual(['after the button'])
+  expect(await ask(QUESTION)).toContain('(pinned fact')
+  // A newer part moves the count: the pin goes, and the question is answered afresh.
+  now = 'before the button again'
+  // (A long reply, so the next prompt starts a part of its own.)
+  await say('move the footer count before the button again', `The footer count now sits before the button again. ${'Done. '.repeat(10_000)}`)
+  const asked = prompts.length
+  const fresh = await ask(QUESTION)
+  expect(fresh).toContain('before the button again')
+  expect(fresh).not.toContain('(pinned fact')
+  expect(prompts.length).toBeGreaterThan(asked)
+  expect(index().pinned.some(p => p.text === 'after the button')).toBe(false)
+  // A newer part about something else leaves the answer, then its pin, alone.
+  await say('what is the weather like', 'Sunny, nothing about the panel.')
+  expect(await ask(QUESTION)).toContain('recall cache')
+  await say('and tomorrow', 'Rain.')
+  expect(await ask(QUESTION)).toContain('(pinned fact')
+})
+
+test('Unpin sticks: the question is still answered, never pinned again by itself', async ($, on) => {
+  const { ask } = await goingOn($, on, () => found('after the button'))
+  await ask(QUESTION)
+  await ask(QUESTION)
+  const ui = await mountPanel($)
+  await ui.press({ key: 'open-brought-back' })
+  const unpin = await ui.find({ type: 'Button', text: 'Unpin' })
+  await ui.press({ key: unpin!.key! })
+  expect(await ui.find({ type: 'Button', text: 'Unpin' })).toBeFalsy()
+  // Asked twice more: answered afresh each time (its counts went with it), not pinned.
+  expect(await ask(QUESTION)).not.toContain('recall cache')
+  await ask(QUESTION)
+  await ask(QUESTION)
+  expect(await ui.find({ type: 'Button', text: 'Unpin' })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('a pin used at every fold still goes back after a while', () => {
+  const pin = { id: 'f1', kind: 'fact' as const, text: 'x', query: 'x', chunkIds: [], recalls: 9, pinnedAt: 0, lastUsedFold: 8, pinnedFold: 0 }
+  expect(dropStalePins({ ...EMPTY_VIEW, folds: 7, pinned: [pin] }).pinned).toHaveLength(1)
+  expect(dropStalePins({ ...EMPTY_VIEW, folds: 8, pinned: [pin] }).pinned).toHaveLength(0)
 })

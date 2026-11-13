@@ -8,7 +8,7 @@ import type { ChunkRecord, SideMessage } from '../types'
 import { chunksOf, currentChat, estimateTokens, hash, isInChat, messageTexts, splitChunks, textTokens, TIDY_MARK, toolRefs, toolResultsOf, TRIM_MARK } from './chunks'
 import { newestSummarised } from './measure'
 import { redact } from './private'
-import { change, EMPTY_VIEW, normaliseChunk, patchChunk, privateVault, readOriginal, savePrivate, setWorking, writeOriginal } from './store'
+import { change, EMPTY_VIEW, normaliseChunk, patchChunk, privateVault, readOriginal, savePrivate, sessionEpoch, setWorking, writeOriginal } from './store'
 import type { Original } from './store'
 import type { NumberedMessage } from './summarize'
 import { summariseChunk } from './summarize'
@@ -18,9 +18,35 @@ import { note } from './debug'
 
 const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
 
-let isSyncing = false
-let syncStarted = 0
+// A sync saves, then summarises. Saving runs on every sync, one save after
+// another, so each chunk has its original and its record from its first sync,
+// whatever else runs. Summarising runs one at a time (it waits on Haiku, a
+// minute a chunk at worst); a sync that comes meanwhile saves, notes that it
+// came, and the running one looks again once it is done. One running past
+// SUMMARY_LOCK_MS is taken as stuck: the next sync takes over, and the stuck
+// one stops at its next chunk.
+const SUMMARY_LOCK_MS = 20 * 60_000
+let saves: Promise<unknown> = Promise.resolve()
+let summariser: { since: number } | null = null
+let isMissed = false
 let isDeduped = false
+
+// A new session: nothing summarising for it yet, and its copies not looked for.
+export function resetSync() {
+  summariser = null
+  isMissed = false
+  isDeduped = false
+}
+
+// Saves the chat's chunks after any save already running, for the session
+// they were read in.
+function saveInTurn($: EngineInterface, messages: readonly SessionMessage[]): Promise<ReturnType<typeof chunksOf>> {
+  const epoch = sessionEpoch()
+  const run = saves.then(() => saveChunks($, messages, epoch))
+  saves = run.catch(() => {})
+
+  return run
+}
 
 // One stretch of chat saved twice (an older Folio read the transcript's copy of
 // the chat as new): a chunk out of the chat that starts like one in the chat,
@@ -91,8 +117,9 @@ function keepWords(saved: Original | null, now: Original): Original {
 }
 
 // Finds the chat's chunks and keeps each one's original on disk with private
-// items set apart.
-async function saveChunks($: EngineInterface, messages: readonly SessionMessage[]) {
+// items set apart. A session that ended meanwhile (`epoch` moved on) gets none
+// of it.
+async function saveChunks($: EngineInterface, messages: readonly SessionMessage[], epoch: number) {
   const records = (await read($, view)).chunks
   const known = new Map(records.map(c => [c.id, c]))
   const slices = chunksOf(splitChunks(messages, records))
@@ -103,6 +130,7 @@ async function saveChunks($: EngineInterface, messages: readonly SessionMessage[
   const refs = new Map<string, ReturnType<typeof toolRefs>>()
 
   for (const [i, slice] of slices.entries()) {
+    if (sessionEpoch() !== epoch) return []
     const part = messages.slice(slice.start, slice.end)
     const record = known.get(slice.id)
     refs.set(slice.id, toolRefs(part))
@@ -120,6 +148,7 @@ async function saveChunks($: EngineInterface, messages: readonly SessionMessage[
       fresh.push(normaliseChunk({ id: slice.id, anchor: slice.anchor, order, tokens: slice.tokens }))
     }
   }
+  if (sessionEpoch() !== epoch) return []
   if (Object.keys(vault).length !== vaultSize) await savePrivate($)
 
   const sizes = new Map(slices.map(s => [s.id, s]))
@@ -145,7 +174,7 @@ async function saveChunks($: EngineInterface, messages: readonly SessionMessage[
 // takes it out of the chat, where the next sync can't read it. A compaction can
 // land in the middle of a long turn; a sync only runs at a turn's end.
 export async function saveChat($: EngineInterface): Promise<void> {
-  await saveChunks($, currentChat(await $.session.messages()))
+  await saveInTurn($, currentChat(await $.session.messages()))
 }
 
 // Saves the chat's chunks and has Haiku summarise every closed chunk not
@@ -153,74 +182,98 @@ export async function saveChat($: EngineInterface): Promise<void> {
 // until the next one starts; a chunk that left the chat first is summarised
 // from its saved original.
 export async function syncChunks($: EngineInterface): Promise<void> {
-  if (isSyncing) {
-    // One running for minutes is stuck, most likely on Haiku.
-    const running = Math.round((Date.now() - syncStarted) / 1000)
-    if (running > 300) await note($, `sync skipped: one has been running for ${running} s`)
+  const epoch = sessionEpoch()
+  const messages = currentChat(await $.session.messages())
+  const slices = await saveInTurn($, messages)
+  // Nothing is awaited from the look at the lock to taking it.
+  const now = await $.clock.now()
+  if (summariser !== null) {
+    const running = now - summariser.since
+    if (running < SUMMARY_LOCK_MS) {
+      isMissed = true
 
-    return
+      return
+    }
+    void note($, `summarising let go after ${Math.round(running / 1000)} s, most likely stuck on Haiku; this sync takes over`)
   }
-  isSyncing = true
-  syncStarted = Date.now()
+  const me = { since: now }
+  summariser = me
+  const isMine = () => summariser === me && sessionEpoch() === epoch
   try {
-    const messages = currentChat(await $.session.messages())
-    const slices = await saveChunks($, messages)
-    const sizes = new Map(slices.map(s => [s.id, s]))
-    const vault = privateVault()
-
-    await dropCopies($, new Set(slices.map(s => s.id)))
-    const newest = slices.at(-1)?.id
-    const pending = (await read($, view)).chunks
-      .filter(c => !c.isSummarised && c.id !== newest && (sizes.has(c.id) || c.status === 'compacted'))
-      .sort((a, b) => a.order - b.order)
-    for (const [n, chunk] of pending.entries()) {
-      await setWorking($, `Summarising ${n + 1} of ${pending.length} chunks`)
-      const slice = sizes.get(chunk.id)
-      const part = slice ? messages.slice(slice.start, slice.end) : []
-      let numbered: NumberedMessage[]
-      if (slice) {
-        numbered = messageTexts(part).map((t, i) => ({ n: i, text: redact(t, vault), tokens: estimateTokens(part[i]!) }))
-      } else {
-        const original = await readOriginal($, chunk.id)
-        if (original === null) continue
-        const texts = original.messages.length > 0 ? original.messages : [original.text]
-        numbered = texts.map((t, i) => ({ n: i, text: t, tokens: textTokens(t) }))
-      }
-      const previous = newestSummarised((await read($, view)).chunks, chunk.order)
-      const summary = await summariseChunk(
-        $,
-        numbered,
-        previous ? { title: previous.title, topic: previous.topic, summary: previous.summary } : null,
-        previous?.brief.openTasks ?? [],
-      )
-      if (summary === null) {
-        await note($, `no summary came back for ${chunk.id}`)
-        continue
-      }
-      // Only plain messages can be tidied; Haiku's other picks are dropped.
-      const side: SideMessage[] = slice
-        ? summary.side
-            .filter(s => isTidyable(part, s.n))
-            .map(s => ({ n: s.n, why: s.why, opening: numbered[s.n]!.text.replace(/^(User|Claude): /, '').slice(0, 90), tokens: numbered[s.n]!.tokens }))
-        : []
-      await change($, v =>
-        patchChunk(v, chunk.id, {
-          title: summary.title,
-          // A chunk that carries on the previous one joins its topic, so a split
-          // between two chunks reads as one topic.
-          topic: summary.continuesPrevious && previous ? previous.topic : summary.topic,
-          summary: summary.summary,
-          sections: summary.sections,
-          brief: summary.brief,
-          exactReason: summary.exactReason,
-          side,
-          isSummarised: true,
-        }),
-      )
+    let chat = { messages, slices }
+    for (;;) {
+      isMissed = false
+      await summarisePending($, chat.messages, chat.slices, isMine)
+      // A sync came while this one summarised: its chunks are summarised now too.
+      if (!isMissed || !isMine()) break
+      const fresh = currentChat(await $.session.messages())
+      chat = { messages: fresh, slices: await saveInTurn($, fresh) }
     }
   } finally {
-    isSyncing = false
-    await setWorking($, null)
+    if (summariser === me) {
+      summariser = null
+      await setWorking($, null)
+    }
   }
-  await refreshBrief($).catch(() => {})
+  if (sessionEpoch() === epoch) await refreshBrief($).catch(() => {})
+}
+
+async function summarisePending($: EngineInterface, messages: readonly SessionMessage[], slices: ReturnType<typeof chunksOf>, isMine: () => boolean) {
+  if (!isMine()) return
+  const sizes = new Map(slices.map(s => [s.id, s]))
+  const vault = privateVault()
+
+  await dropCopies($, new Set(slices.map(s => s.id)))
+  const newest = slices.at(-1)?.id
+  const pending = (await read($, view)).chunks
+    .filter(c => !c.isSummarised && c.id !== newest && (sizes.has(c.id) || c.status === 'compacted'))
+    .sort((a, b) => a.order - b.order)
+  for (const [n, chunk] of pending.entries()) {
+    if (!isMine()) return
+    await setWorking($, `Summarising ${n + 1} of ${pending.length} chunks`)
+    const slice = sizes.get(chunk.id)
+    const part = slice ? messages.slice(slice.start, slice.end) : []
+    let numbered: NumberedMessage[]
+    if (slice) {
+      numbered = messageTexts(part).map((t, i) => ({ n: i, text: redact(t, vault), tokens: estimateTokens(part[i]!) }))
+    } else {
+      const original = await readOriginal($, chunk.id)
+      if (original === null) continue
+      const texts = original.messages.length > 0 ? original.messages : [original.text]
+      numbered = texts.map((t, i) => ({ n: i, text: t, tokens: textTokens(t) }))
+    }
+    const previous = newestSummarised((await read($, view)).chunks, chunk.order)
+    const summary = await summariseChunk(
+      $,
+      numbered,
+      previous ? { title: previous.title, topic: previous.topic, summary: previous.summary } : null,
+      previous?.brief.openTasks ?? [],
+    )
+    // A run taken over while it waited, or a session gone meanwhile, writes nothing.
+    if (!isMine()) return
+    if (summary === null) {
+      await note($, `no summary came back for ${chunk.id}`)
+      continue
+    }
+    // Only plain messages can be tidied; Haiku's other picks are dropped.
+    const side: SideMessage[] = slice
+      ? summary.side
+          .filter(s => isTidyable(part, s.n))
+          .map(s => ({ n: s.n, why: s.why, opening: numbered[s.n]!.text.replace(/^(User|Claude): /, '').slice(0, 90), tokens: numbered[s.n]!.tokens }))
+      : []
+    await change($, v =>
+      patchChunk(v, chunk.id, {
+        title: summary.title,
+        // A chunk that carries on the previous one joins its topic, so a split
+        // between two chunks reads as one topic.
+        topic: summary.continuesPrevious && previous ? previous.topic : summary.topic,
+        summary: summary.summary,
+        sections: summary.sections,
+        brief: summary.brief,
+        exactReason: summary.exactReason,
+        side,
+        isSummarised: true,
+      }),
+    )
+  }
 }
