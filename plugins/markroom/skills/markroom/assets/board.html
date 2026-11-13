@@ -2172,7 +2172,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const p = loc(e);
     if (a.type === "drag") {
       const m = marks.get(a.id); if (!m) return;
-      if (a.moved) { m.items.forEach(roundItem); undo.push({ t: "items", id: a.id, before: a.before }); saveNow(a.id, "items"); renderAll(); }
+      if (a.moved) { m.items.forEach(roundItem); undo.push({ t: "items", id: a.id, before: a.before }); touched(m); saveNow(a.id, "items"); renderAll(); }
       else if (a.was && !RO) openComment(a.id, true);            // a second click on the note in hand: type its comment
       return;
     }

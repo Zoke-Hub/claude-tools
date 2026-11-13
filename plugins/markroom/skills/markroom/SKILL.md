@@ -265,24 +265,34 @@ Reply to each note as you handle it, not all at the end. The board switches to a
 and the notes panel then lists that round's notes, so replies written only at the end land on a round nobody goes back
 to. Replies written as you go are read while the work happens, and a misread note can be put right before the render.
 
+Each note's fields say where it stands, so any chat (a new one, or after a compaction) can tell:
+
+| State | Fields |
+|---|---|
+| New | `status` open, no `reply` |
+| Replied, waiting for the new round | open, `reply`, `awaiting` set, `edited` empty |
+| Changed by the reviewer after the reply | open, `reply`, `edited` set (whatever `awaiting` says) |
+| Not acted on | open, `reply`, no `awaiting` |
+| Done | `status` done |
+
 - **As each note is handled:** once its change is made and checked (a still or a look at that spot; the full render can
-  wait), `update` the note with `{ "reply": "what changed, and that it shows in the next round" }`, pinned with the
-  `if_version` from the read. Leave its status open. Notes settled by the same change go in one `batch`. Keep the
-  version each write returns.
-- **A note you won't act on:** reply at once without changing the status, and say why.
-- **When the new round is up** (rendered, checked and added, §5): `list` the notes again, then mark the replied ones done
-  in **one** `batch` of `update` entries carrying `{ "status": "done" }`, each pinned with its current version. Correct a
-  reply in the same entry if the round shows something other than it says. A note whose version is no longer the one
-  your reply write returned was changed by the reviewer after the reply (the page sets `edited` and opens it again):
-  leave it out of the batch, read its current text and handle it as a new note.
+  wait), `update` it with `{ "reply": "what changed, and that it shows in the next round", "awaiting": "<next round's
+  label>", "edited": "" }`, pinned with the `if_version` from the read. Leave its status open. Notes settled by the same
+  change go in one `batch`. Clearing `edited` makes it mean "changed after this reply".
+- **A note you won't act on:** reply at once with `{ "reply": "why", "edited": "" }`: no `awaiting`, status unchanged.
+- **When the new round is up** (rendered, checked and added, §5): `list` the notes again, then in **one** `batch` of
+  `update` entries, each pinned with the version just read, mark done only the notes with `awaiting` set and `edited`
+  empty: `{ "status": "done", "awaiting": "" }`, plus a corrected `reply` if the round shows something other than it
+  says. Notes not acted on stay open; a note with `edited` set is handled again from its current text.
+- **A Send while you work** lists every open note. Skip the ones waiting for the round with `edited` empty: they are
+  handled.
 - **A change that doesn't come back as a round on this board** (a file delivered elsewhere, a fix outside the reviewed
   work): write the reply and `"status": "done"` together.
-- Mark a note done only when its change is in the round on the board.
-- Whole-image/video notes (`overall/<image id>`) get the same treatment. The page shows the reply under the box with an
-  Open/Done state and a Mark done / Reopen link; it writes the box with `update` once the doc exists, so a reply is never
-  wiped, and editing after a reply reopens it.
-- The page never writes `reply`, and it sends only the fields it changed, so a reviewer typing at the same time can't wipe a reply.
-- An open note with `edited` set and an existing `reply` was changed after that reply. Work from its current text.
+- Whole-image/video notes (`overall/<image id>`) get the same treatment and fields. The page shows the reply under the
+  box with an Open/Done state and a Mark done / Reopen link, and writes the box with `update` once the doc exists.
+- The page never writes `reply` or `awaiting`, and sends only the fields it changed, so a reviewer typing at the same time
+  can't wipe a reply. When the reviewer changes a note after a reply (its text, pictures or marks, a mark moved too), the
+  page sets `edited` and opens the note again.
 - In chat, summarise per note: what changed, any interpretation, and what to look at.
 
 ## 5. Next round
@@ -359,11 +369,12 @@ Database collections (the page subscribes to all five):
     { kind: "pen", color, p: [x0, y0, x1, y1, ...] } ],   // one freehand stroke
   status: "open" | "done", at: ISO, by: "<user id>", edited: ISO,   // edited: changed after Claude replied
   atts: ["<asset id>", ...],  // pictures pasted or dropped into the note (asset store, served at /_blob/<id>)
-  reply: "Claude's reply" }   // written by Claude only
+  reply: "Claude's reply",    // written by Claude only
+  awaiting: "<round label>" } // written by Claude only: replied, done once that round is up (§4)
 // video notes add: t (seconds, frame-rounded), tc ("MM:SS:FF"), t2 (end of a range, optional).
 // A video note may have no marks at all (items: []) - a comment at a timecode.
 // overall/<image id>: the "Notes on the whole image / video" box
-{ img, text, atts, at, status: "open" | "done", reply, edited }   // reply and status written by Claude; atts as in marks
+{ img, text, atts, at, status: "open" | "done", reply, edited, awaiting }   // reply, awaiting and status written by Claude; atts as in marks
 // rounds/<round id>: a round added live (§5), without republishing the page
 { id, label, src: "<asset id>", w, h, added: ISO, group?, type?: "video", poster?: "<asset id>", fps?, dur?, beats? }
 // tabs/<tab id with runs of other than [A-Za-z0-9._-] turned into "_">: a closed (or reopened) tab

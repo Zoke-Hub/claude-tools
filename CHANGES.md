@@ -8,6 +8,10 @@ date: the entries after the date a tool's copy was installed on a computer are n
 - **MarkRoom:** Claude replies to each note as soon as its change is made, instead of all at once at the end, so the
   replies can be read while the work goes on and a misread note can be put right before the render. Notes are marked
   done together once the new round is up; a note changed after its reply is picked up again instead of being closed.
+- **MarkRoom:** each note keeps where it stands in its own fields (replied and waiting for the round, changed since, not
+  acted on, done), so a new chat reads it the same way, a note Claude chose not to act on stays open, and a Send pressed
+  during the work doesn't start notes that are already handled over again. Moving a mark after Claude's reply now
+  counts as a change, like editing the text, and opens the note again.
 
 ## 2026-11-13 · Folio, PulseWise and MarkRoom 1.0.0 (numbers unchanged)
 
