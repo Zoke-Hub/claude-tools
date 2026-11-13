@@ -5,8 +5,9 @@ MarkRoom — your review room: mark it, note it, and Claude changes it.
 MarkRoom is a review board for still images and videos that Claude builds as a private claude.ai artifact. You draw
 markers, arrows, boxes, freehand lines and text on a picture or a paused video frame, gather the marks for one point
 into a numbered note and write what should change. Notes save as you type. Claude reads them from the board, draws each
-note onto its image or frame to see exactly what you pointed at, makes the changes, then replies to and closes each
-note on the same page. New rounds of the same file land in the same tab, with older rounds a click away, and video
+note onto its image or frame to see exactly what you pointed at, and makes the changes. Each note gets its reply on the
+same page as soon as its change is made, so you can read them while the work goes on, and is closed once the new round
+is up. New rounds of the same file land in the same tab, with older rounds a click away, and video
 notes are pinned to a timecode or a range.
 
 <picture>

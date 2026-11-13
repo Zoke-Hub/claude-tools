@@ -3,6 +3,12 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-14 · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom:** Claude replies to each note as soon as its change is made, instead of all at once at the end, so the
+  replies can be read while the work goes on and a misread note can be put right before the render. Notes are marked
+  done together once the new round is up; a note changed after its reply is picked up again instead of being closed.
+
 ## 2026-11-13 · Folio, PulseWise and MarkRoom 1.0.0 (numbers unchanged)
 
 Fixes for states that could get stuck or go out of step, each tested on the old and the new code, and a clean-up.

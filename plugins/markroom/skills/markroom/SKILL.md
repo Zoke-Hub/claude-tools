@@ -14,7 +14,8 @@ A claude.ai artifact page for reviewing still images and videos, from single fra
 and more). **Whenever the user asks for a review page, or for a place to mark up images or videos, build or open a
 MarkRoom board**: image tabs for stills, video tabs for cuts, both on one board when both are under review. The reviewer marks the image, gathers as many marks as a point needs into one numbered note, and writes
 that note's comment. Notes save to the artifact's database as the reviewer types. Claude reads them, renders them onto the image to see what each one points at, does
-the work, and writes a reply plus "Done" on each note, which the reviewer sees on the same page.
+the work, and replies to each note as soon as its change is made, then marks it "Done" once the new round is up. The
+reviewer sees each reply arrive on the same page while the work goes on.
 
 `${CLAUDE_SKILL_DIR}` in the commands below is this skill's own folder (filled in when the skill loads).
 
@@ -260,14 +261,28 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
 
 ## 4. Reply and resolve
 
-- After the change is really made and rendered, write back in **one** `ArtifactData` `batch` of `update` entries, each pinned
-  with the `if_version` from the read, carrying `{ "status": "done", "reply": "what changed, and where to see it" }`.
-- Whole-image/video notes (`overall/<image id>`) get the same treatment: `update` with `{ "status": "done", "reply": "…" }`
-  pinned with its `if_version`. The page shows the reply under the box with an Open/Done state and a Mark done / Reopen link;
-  it writes the box with `update` once the doc exists, so a reply is never wiped, and editing after a reply reopens it.
-- Mark a note done only when its change exists. For a note you didn't act on, reply without changing the status, and say why.
+Reply to each note as you handle it, not all at the end. The board switches to a new round as soon as it is added (§5),
+and the notes panel then lists that round's notes, so replies written only at the end land on a round nobody goes back
+to. Replies written as you go are read while the work happens, and a misread note can be put right before the render.
+
+- **As each note is handled:** once its change is made and checked (a still or a look at that spot; the full render can
+  wait), `update` the note with `{ "reply": "what changed, and that it shows in the next round" }`, pinned with the
+  `if_version` from the read. Leave its status open. Notes settled by the same change go in one `batch`. Keep the
+  version each write returns.
+- **A note you won't act on:** reply at once without changing the status, and say why.
+- **When the new round is up** (rendered, checked and added, §5): `list` the notes again, then mark the replied ones done
+  in **one** `batch` of `update` entries carrying `{ "status": "done" }`, each pinned with its current version. Correct a
+  reply in the same entry if the round shows something other than it says. A note whose version is no longer the one
+  your reply write returned was changed by the reviewer after the reply (the page sets `edited` and opens it again):
+  leave it out of the batch, read its current text and handle it as a new note.
+- **A change that doesn't come back as a round on this board** (a file delivered elsewhere, a fix outside the reviewed
+  work): write the reply and `"status": "done"` together.
+- Mark a note done only when its change is in the round on the board.
+- Whole-image/video notes (`overall/<image id>`) get the same treatment. The page shows the reply under the box with an
+  Open/Done state and a Mark done / Reopen link; it writes the box with `update` once the doc exists, so a reply is never
+  wiped, and editing after a reply reopens it.
 - The page never writes `reply`, and it sends only the fields it changed, so a reviewer typing at the same time can't wipe a reply.
-- An open note with `edited` set and an existing `reply` was changed after the last round. Work from its current text.
+- An open note with `edited` set and an existing `reply` was changed after that reply. Work from its current text.
 - In chat, summarise per note: what changed, any interpretation, and what to look at.
 
 ## 5. Next round
