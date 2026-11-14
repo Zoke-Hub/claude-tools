@@ -14,6 +14,9 @@ import { addActivity, change, EMPTY_VIEW, folioDir, homeDir, normaliseChunk, nor
 import { base, expandHome, relative, slash } from './paths'
 import { isClaudeReplying } from './actions'
 import { errorText } from './debug'
+import { currentChat } from './chunks'
+import { namedPaths, shellCommandsIn, shellCommandsOf } from './shell'
+import type { NamedPath, ShellCommand } from './shell'
 
 const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
 
@@ -45,7 +48,16 @@ const PROJECT_EXT: Array<[RegExp, string]> = [
   [/\.(blend|c4d|ma|mb|fig|sketch)$/i, '3D and design files'],
 ]
 
-type Found = { path: string; bytes: number }
+// A file the scan found: its size, and when it last changed.
+type Found = { path: string; bytes: number; mtimeMs: number }
+
+// A folder or a pattern a shell command names brings the files in it that
+// changed while the chat ran: down to one folder below it, at most this many
+// of them each, newest first. Some disks keep a file's time to 2 s.
+const SHELL_FOLDER_DEPTH = 1
+const SHELL_FOLDER_FILES = 500
+const SHELL_PATTERNS = 200
+const CLOCK_SLACK_MS = 2000
 
 // Windows says so in OS; a home folder on a drive letter says so too.
 async function isWindows($: EngineInterface, home: string): Promise<boolean> {
@@ -135,18 +147,20 @@ async function walk($: EngineInterface, root: string): Promise<{ files: Found[];
       if (entry.name.startsWith(`${PACK_PREFIX} - `) || entry.name.startsWith(`${FILES_PREFIX} - `)) continue
       let kind = entry.kind
       let size = entry.size
+      let mtimeMs = entry.mtimeMs
       if (kind === 'other') {
         try {
           const stat = await $.fs.stat(path, { resolve: true })
           kind = stat.kind
           size = stat.size
+          mtimeMs = stat.mtimeMs
         } catch {
           continue
         }
       }
-      if (kind === 'dir' && CACHE_DIR.test(entry.name)) caches.push({ path, bytes: 0 })
+      if (kind === 'dir' && CACHE_DIR.test(entry.name)) caches.push({ path, bytes: 0, mtimeMs: 0 })
       else if (kind === 'dir') await visit(path, depth + 1)
-      else if (kind === 'file') files.push({ path, bytes: size })
+      else if (kind === 'file') files.push({ path, bytes: size, mtimeMs })
     }
   }
   await visit(root, 0)
@@ -233,10 +247,11 @@ function roundLabel(files: Found[], round: string): string {
   return [`r${round}`, kind, size].filter(Boolean).join(' · ')
 }
 
-// One animation's renders, sorted the way renders are worked with: each round
-// (rNN) with its side files (beats, stills of that round) together, newest
-// first; then stills, data and logs, and other videos that belong to no round.
-function renderKinds(name: string, found: Found[], touched: Set<string>): PackGroup {
+// One animation's renders in one place, sorted the way renders are worked
+// with: each round (rNN) with its side files (beats, stills of that round)
+// together, newest first; then stills, data and logs, and other videos that
+// belong to no round. `name` is the group's id, `label` what it reads.
+function renderKinds(name: string, label: string, found: Found[], touched: Set<string>): PackGroup {
   const rounds = new Map<string, Found[]>()
   const stills: Found[] = []
   const data: Found[] = []
@@ -258,23 +273,56 @@ function renderKinds(name: string, found: Found[], touched: Set<string>): PackGr
   ]
   const newest = [...rounds.keys()].sort((a, b) => Number(b) - Number(a))[0]
   const extra = [rounds.size > 0 ? `${rounds.size} rounds, newest r${newest}` : '', stills.length > 0 ? `${stills.length} stills` : ''].filter(Boolean).join(', ')
-  if (kids.length < 2) return leafGroup(`renders:${name}`, name, 'files', found, touched, () => false, extra)
+  if (kids.length < 2) return leafGroup(`renders:${name}`, label, 'files', found, touched, () => false, extra)
 
-  return parentGroup(`renders:${name}`, name, kids, aboutOf(found, touched, extra))
+  return parentGroup(`renders:${name}`, label, kids, aboutOf(found, touched, extra))
 }
 
-// Renders by what they render: the folder that holds a renders folder (an
-// animation), or the folder they sit in; then by round and kind within it.
+// Folder names a working setup gives every animation alike: a renders folder
+// below one belongs to the animation folder above it (A19/anim/renders is A19's).
+// Render folders' names (RENDER_DIR) are working folders' too.
+const WORK_DIR = /^(anims?|animations?|comps?|compositions?|builds?|src|source|html|web|project|ae|aep|after[ _-]?effects|hyperframes|remotion|work|tmp|temp)$/i
+const isWorkDir = (s: string) => WORK_DIR.test(s) || RENDER_DIR.test(s)
+
+// Where a render belongs: its animation (the nearest folder above its renders
+// folder, or above the file when it sits in none, whose name isn't a working
+// folder's) and its place in it (the folders from there down to the renders
+// folder). A renders folder at the project's top is its own animation.
+function renderHome(segs: string[]): { name: string; place: string } {
+  const at = segs.findIndex(s => RENDER_DIR.test(s))
+  if (at === 0) return { name: segs[0]!, place: '' }
+  const from = at > 0 ? at - 1 : segs.length - 1
+  let i = from
+  while (i > 0 && isWorkDir(segs[i]!)) i -= 1
+  // Only working folders above it: the nearest names it, as it is.
+  if (i >= 0 && isWorkDir(segs[i]!)) i = from
+
+  return { name: i >= 0 ? segs[i]! : 'Project folder', place: segs.slice(i + 1, at >= 0 ? at + 1 : segs.length).join('/') }
+}
+
+// Renders by what they render: each animation's together, with a row for each
+// place it keeps renders in (renders, anim/renders), the nearest first; then
+// by round and kind within it.
 function renderGroups(found: Found[], root: string, touched: Set<string>): PackGroup[] {
-  const byName = new Map<string, Found[]>()
+  const byName = new Map<string, Map<string, Found[]>>()
   for (const f of found) {
-    const segs = relative(f.path, root).split('/').slice(0, -1)
-    const at = segs.findIndex(s => RENDER_DIR.test(s))
-    const name = at > 0 ? segs[at - 1]! : (segs.at(-1) ?? 'Project folder')
-    byName.set(name, [...(byName.get(name) ?? []), f])
+    const { name, place } = renderHome(relative(f.path, root).split('/').slice(0, -1))
+    const places = byName.get(name) ?? new Map<string, Found[]>()
+    places.set(place, [...(places.get(place) ?? []), f])
+    byName.set(name, places)
   }
 
-  return [...byName].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true })).map(([name, list]) => renderKinds(name, list, touched))
+  return [...byName]
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+    .map(([name, places]) => {
+      const all = [...places.values()].flat()
+      if (places.size === 1) return renderKinds(name, name, all, touched)
+      const rows = [...places]
+        .sort((a, b) => a[0].split('/').length - b[0].split('/').length || a[0].localeCompare(b[0], undefined, { numeric: true }))
+        .map(([place, list]) => renderKinds(`${name}:${place || '.'}`, place || `Files directly in ${name}`, list, touched))
+
+      return parentGroup(`renders:${name}`, name, rows, aboutOf(all, touched, `in ${places.size} places: ${rows.map(r => r.label).join(', ')}`))
+    })
 }
 
 // The project's files as the pack's groups, the way this project is laid out:
@@ -371,6 +419,97 @@ export async function projectFolder($: EngineInterface, cwd: string, home: strin
   return start
 }
 
+// The project's files this chat's shell commands made or used. The commands
+// come from every chunk's saved original, so a chat from before Folio read
+// them gets its files too, and from the chat as it stands. A chunk brought in
+// from a FolioPack is another chat's work, as its file paths are.
+async function shellTouched($: EngineInterface, v: PickerView, files: Found[], root: string, home: string): Promise<string[]> {
+  try {
+    const commands: ShellCommand[] = []
+    for (const c of [...v.chunks].filter(c => c.order >= 0).sort((a, b) => a.order - b.order)) {
+      const original = await readOriginal($, c.id)
+      if (original !== null) commands.push(...shellCommandsIn(original.text))
+    }
+    const keyOf = (c: ShellCommand) => `${c.tool}\u0000${c.command}`
+    const seen = new Set(commands.map(keyOf))
+    const live = await $.session.messages().then(currentChat, () => [])
+    for (const c of shellCommandsOf(live)) if (!seen.has(keyOf(c))) commands.push(c)
+    if (commands.length === 0) return []
+    // When the chat began (a resumed one's first launch): a folder's files count from then.
+    const since = await $.session.usage().then(
+      u => (Number.isFinite(u.startedAt) && u.startedAt > 0 ? u.startedAt : null),
+      () => null,
+    )
+    const cwd = slash(v.cwd).replace(/\/+$/, '') || root
+    const named = namedPaths(commands, { cwd, root, home, isWindows: await isWindows($, home) })
+
+    return namedFiles(named, files, { root, cwd, since })
+  } catch {
+    // Commands that can't be read leave the list as the file tools made it.
+    return []
+  }
+}
+
+// The project's files the paths named by shell commands stand for: a file by
+// itself; a folder's or a pattern's only those that changed since `since`, as
+// another chat may be writing nearby, and none when that time isn't known.
+// The project's folder, the chat's working folder and the folders above them
+// name too much, so they bring nothing. Paths compare as Windows and a Mac's
+// disks do, whatever the letters' case.
+function namedFiles(named: readonly NamedPath[], files: readonly Found[], o: { root: string; cwd: string; since: number | null }): string[] {
+  const low = (p: string) => p.toLowerCase()
+  const root = low(o.root)
+  const cwd = low(o.cwd)
+  // Each file with its path in small letters, worked out once.
+  const lows = files.map(f => [low(f.path), f] as const)
+  const byPath = new Map(lows)
+  const folders = new Set<string>()
+  for (const [p] of lows) {
+    for (let cut = p.lastIndexOf('/'); cut > root.length; cut = p.lastIndexOf('/', cut - 1)) folders.add(p.slice(0, cut))
+  }
+  const filesWhere = (isIt: (p: string) => boolean) => lows.filter(([p]) => isIt(p)).map(([, f]) => f)
+  const isAbove = (p: string) => p === root || root.startsWith(`${p}/`) || p === cwd || cwd.startsWith(`${p}/`)
+  const out = new Set<string>()
+  const takeRecent = (list: readonly Found[]) => {
+    if (o.since === null) return
+    const since = o.since - CLOCK_SLACK_MS
+    for (const f of list.filter(x => x.mtimeMs >= since).sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, SHELL_FOLDER_FILES)) out.add(f.path)
+  }
+  const tried = new Set<string>()
+  let patterns = 0
+  for (const { paths, isLook } of named) {
+    const key = `${isLook}\u0000${paths.join('\u0000')}`
+    if (tried.has(key)) continue
+    tried.add(key)
+    for (const path of paths) {
+      const p = low(path)
+      const wild = p.search(/[*?]/)
+      if (wild >= 0) {
+        const folder = p.slice(0, p.lastIndexOf('/', wild))
+        if (!folder.startsWith(`${root}/`) && folder !== root) continue
+        if (isLook || isAbove(folder) || ++patterns > SHELL_PATTERNS) break
+        const re = new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\/?|\*|\?/g, w => (w === '?' ? '[^/]' : w === '*' ? '[^/]*' : '.*'))}$`)
+        const hits = filesWhere(q => re.test(q))
+        if (hits.length === 0) continue
+        takeRecent(hits)
+        break
+      }
+      const file = byPath.get(p)
+      if (file !== undefined) {
+        out.add(file.path)
+        break
+      }
+      if (isAbove(p)) break
+      if (folders.has(p)) {
+        if (!isLook) takeRecent(filesWhere(q => q.startsWith(`${p}/`) && q.slice(p.length + 1).split('/').length <= SHELL_FOLDER_DEPTH + 1))
+        break
+      }
+    }
+  }
+
+  return [...out]
+}
+
 // Rules of the person's own (notes under ~/.claude) and skills the chat used
 // in at least RULE_USES chunks: these travel with the project.
 function usedRules(v: PickerView, home: string): { rules: PackDraft['rules']; skills: string[] } {
@@ -459,6 +598,8 @@ export async function scanProject($: EngineInterface): Promise<PackDraft> {
   const root = opened === home ? projectRoot(v, opened) : opened
   const touched = new Set(v.chunks.flatMap(c => c.paths.map(slash)))
   const { files, caches } = await walk($, root)
+  // What the chat's shell commands made or used counts as touched too.
+  for (const path of await shellTouched($, v, files, root, home)) touched.add(path)
   const chats = await projectChats($, root, await $.session.id())
   const { rules: used, skills } = usedRules(v, home)
   // Each rule's own one-line description, from its front matter.

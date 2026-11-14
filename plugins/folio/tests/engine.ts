@@ -5,6 +5,8 @@ import { mock } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { FsEntry, On, RenderSurface, SessionMessage } from 'claude-code'
 
+import { HISTORY_BLOCK } from '../hooks/fold'
+
 // What every test file builds on: the engine beneath Folio, the panel as a
 // surface mounts it, and the chats Folio works on. Not a test file itself.
 
@@ -112,6 +114,8 @@ export function stubEngine(on: On, o: StubOptions = {}) {
   })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: 'done' }))
+  // The context blocks as the plugins above leave them.
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   on('model.complete', async (_, e) => {
     prompts.push(e.prompt)
     const text = (await o.model?.(e.prompt)) ?? null
@@ -127,6 +131,14 @@ export function stubEngine(on: On, o: StubOptions = {}) {
 // in more depth than the type checker can follow, so the call goes in plain.
 export function callTool($: Engine, input: { tool: string } & Record<string, unknown>): Promise<unknown> {
   return ($.tool.call as unknown as (input: object) => Promise<unknown>)(input)
+}
+
+// The folded history Claude reads now: Folio's context block, as the engine
+// asks for the context blocks after a compaction; '' when there is none.
+export async function historyNow($: Engine): Promise<string> {
+  const { blocks } = await $.prompt.context({ blocks: [] })
+
+  return blocks.find(b => b.name === HISTORY_BLOCK)?.text ?? ''
 }
 
 // Opens the test chat in the desktop app, in `cwd`.

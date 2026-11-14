@@ -4,11 +4,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { afterTurn, compactNow, onCompact, REBUILD_ASK, resetActions, setReplying, showFolding } from './actions'
+import { afterTurn, compactNow, currentHistory, onCompact, REBUILD_ASK, resetActions, setReplying, showFolding } from './actions'
 import { shortTokens } from './chunks'
-import { refreshContext, workTokens } from './measure'
+import { refreshContext, setDueTokens, workTokens } from './measure'
 import { FILES_PREFIX, IMPORT_DESCRIPTION, IMPORT_SCHEMA, importPack, isPackBusy, notePackTurn, PACK_PREFIX, packTurnDone, resetPack } from './pack'
-import { RECALL_TOOL } from './fold'
+import { HISTORY_BLOCK, RECALL_TOOL } from './fold'
 import { drawPanel, resetPanel, worthALook } from './panel'
 import { RECALL_BLOCK, RECALL_DESCRIPTION, RECALL_SCHEMA, recall, resetRecall } from './recall'
 import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, openStore, setSettings, settingsOf } from './store'
@@ -49,12 +49,14 @@ async function rebind($: EngineInterface, id: string) {
 }
 
 // Lets go of everything one session holds: its store, waiting folds and packs,
-// recall's counts, the panel's opened chunk and its FolioPack form.
+// recall's counts, the history the meter waits on, the panel's opened chunk
+// and its FolioPack form.
 async function endSession($: EngineInterface, id: string) {
   await closeStore($, id)
   resetRecall()
   resetSync()
   resetPack()
+  setDueTokens(0)
   await resetActions($)
   await resetPanel($)
 }
@@ -191,7 +193,23 @@ export const register: Register = (on, options) => {
     return onCompact($, e, next)
   })
 
-  on('prompt.context', async ($, e, next) => next({ ...e, blocks: [...e.blocks, RECALL_BLOCK] }))
+  // The recall line, and once parts have folded, their history. After a
+  // compaction between replies the engine asks again once the compaction's
+  // hooks are done, so the history is the one the fold just wrote (one inside
+  // a reply goes on with the answer the reply began with: see foldOrPass). A
+  // history that can't be read leaves the recall line to go alone.
+  on('prompt.context', async ($, e, next) => {
+    const history = await ensureSession($).then(
+      () => currentHistory($),
+      err => {
+        void note($, `the chat's session could not be opened for the history's context block: ${errorText(err)}`)
+
+        return null
+      },
+    )
+
+    return next({ ...e, blocks: [...e.blocks, RECALL_BLOCK, ...(history === null ? [] : [{ name: HISTORY_BLOCK, text: history }])] })
+  })
 
   // A long shell output reaches Claude as its start, its end and a note on how
   // to recall the rest; the whole is saved first. The setting turns it off.

@@ -5,10 +5,10 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, SessionCompactInput, SessionCompactResult } from 'claude-code'
 
 import type { ActivityItem, ChunkRecord, PickerView } from '../types'
-import { currentChat, shortTokens } from './chunks'
-import { buildFolded, chunksIn, estimateAll, isPaired, joinFolded, noPlan, planFold, protectedIds } from './fold'
+import { currentChat, shortTokens, textTokens } from './chunks'
+import { buildFolded, chunksIn, estimateAll, historyBlock, isPaired, joinFolded, noPlan, planFold, protectedIds } from './fold'
 import { errorText, later, note } from './debug'
-import { needsFold, refreshContext, sideSaving, summaryTokens, workTokens } from './measure'
+import { hasHistory, needsFold, refreshContext, setDueTokens, sideSaving, summaryTokens, workTokens } from './measure'
 import { dropStalePins, dropSupersededPins } from './recall'
 import { refreshBrief } from './brief'
 import { addActivity, change, chunkOf, EMPTY_VIEW, patchChunk, readOriginal, setWorking, settingsOf, writeOriginal } from './store'
@@ -112,8 +112,10 @@ const isHeadless = (err: unknown) => /headless|not available/i.test(errorText(er
 // "/compact <ask>" as a slash command, once the chat is idle; Folio's own hook
 // recognises the ask and does the folding. The state changes before anything
 // is awaited, so a second press that comes before the panel redraws sees it.
-export async function compactNow($: EngineInterface, ask: Ask): Promise<Outcome> {
-  return shown($, enqueue($, ask))
+// `isAsked`: the person asked (a press, a pack opened), so a rebuild that
+// waits says so; Folio's own waits unsaid.
+export async function compactNow($: EngineInterface, ask: Ask, isAsked = true): Promise<Outcome> {
+  return shown($, enqueue($, ask, isAsked))
 }
 
 // An ask on its way, with Fold now's state drawn as it starts and as it ends.
@@ -125,7 +127,7 @@ async function shown($: EngineInterface, outcome: Outcome | Promise<Outcome>): P
   return done
 }
 
-function enqueue($: EngineInterface, ask: Ask): Outcome | Promise<Outcome> {
+function enqueue($: EngineInterface, ask: Ask, isAsked: boolean): Outcome | Promise<Outcome> {
   if (request.kind === 'compacting') {
     if (!request.isRead) {
       request = { ...request, asks: union(request.asks, [ask]) }
@@ -139,17 +141,17 @@ function enqueue($: EngineInterface, ask: Ask): Outcome | Promise<Outcome> {
   const asks = request.kind === 'queued' ? union(request.asks, [ask]) : [ask]
   // A chat compacts only between replies: while Claude is answering, the asks
   // wait for the reply's end (turn.complete comes even for a stopped reply).
-  if (isReplying) return waitForReply($, asks, ask)
+  if (isReplying) return waitForReply($, asks, ask, isAsked)
 
-  return send($, asks)
+  return send($, asks, isAsked)
 }
 
-// The asks wait for the reply's end; a rebuild says so.
-function waitForReply($: EngineInterface, asks: Ask[], ask: Ask): Outcome {
+// The asks wait for the reply's end; a rebuild the person asked for says so.
+function waitForReply($: EngineInterface, asks: Ask[], ask: Ask, isAsked: boolean): Outcome {
   request = { kind: 'queued', asks }
   if (ask === REBUILD_ASK) {
-    const why = 'Folio updates the chat after this reply.'
-    $.ui.toast(why)
+    const why = isAsked ? 'Folio updates the chat after this reply.' : ''
+    if (why !== '') $.ui.toast(why)
 
     return { isDone: false, why }
   }
@@ -158,7 +160,7 @@ function waitForReply($: EngineInterface, asks: Ask[], ask: Ask): Outcome {
 }
 
 // Sends the asks as one compaction: a fold when one of them is, else a rebuild.
-async function send($: EngineInterface, asks: Ask[]): Promise<Outcome> {
+async function send($: EngineInterface, asks: Ask[], isAsked = true): Promise<Outcome> {
   requestCount += 1
   const id = requestCount
   request = { kind: 'compacting', asks, id, isRead: false, after: [] }
@@ -180,7 +182,7 @@ async function send($: EngineInterface, asks: Ask[]): Promise<Outcome> {
     const why = errorText(err)
     // Refused as mid-reply all the same: the asks wait for the reply's end.
     if (/turn is running|between turns/i.test(why) && request.kind === 'compacting' && request.id === id) {
-      return waitForReply($, union(request.asks, request.after), ask)
+      return waitForReply($, union(request.asks, request.after), ask, isAsked)
     }
     const text = `Claude Code didn't start the fold (${why}). Try again between replies.`
     void note($, `fold refused by Claude Code: ${why}`)
@@ -315,6 +317,18 @@ function oursOf(e: SessionCompactInput): Ask | null {
   return ask === FOLD_ASK || ask === REBUILD_ASK ? ask : null
 }
 
+// The folded history as it stands: null when no part has folded, or when it
+// can't be read (that is logged).
+export async function currentHistory($: EngineInterface): Promise<string | null> {
+  return read($, view)
+    .then(v => historyBlock($, v))
+    .catch(err => {
+      void note($, `the folded history could not be read: ${errorText(err)}`)
+
+      return null
+    })
+}
+
 export async function onCompact(
   $: EngineInterface,
   e: SessionCompactInput,
@@ -325,6 +339,11 @@ export async function onCompact(
   try {
     const done = await foldOrPass($, e, next)
     why = done.skip === undefined ? '' : String(done.skip)
+    // Folio's or Claude Code's, a compaction that stands leaves the chat
+    // without its copy of the history block until the next request.
+    if (done.skip === undefined && e.agentId === undefined && e.trigger !== 'precompute') {
+      setDueTokens(textTokens((await currentHistory($)) ?? ''))
+    }
 
     return done
   } finally {
@@ -452,6 +471,13 @@ async function foldOrPass(
   }
   await change($, () => after)
   later($, () => refreshContext($))
+  // The engine's own compaction (its threshold, or a prompt too long) runs
+  // inside a reply, which goes on with the context blocks read as it began,
+  // before this fold: the new history comes in by a rebuild once it ends (at
+  // once when no reply is running). It is Folio's own ask, so nothing is said.
+  if (e.trigger === 'auto' && hasHistory(after)) {
+    void compactNow($, REBUILD_ASK, false).catch(err => note($, `the rebuild after a fold failed: ${errorText(err)}`))
+  }
 
   return { messages: built.messages, tokensBefore: before, tokensAfter: Math.max(0, before - saves) }
 }

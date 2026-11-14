@@ -5,7 +5,7 @@ import type { EngineInterface, SessionMessage } from 'claude-code'
 
 import type { ChunkRecord, Join, PickerView } from '../types'
 import { FOLD_MARK, TIDY_MARK, TRIM_MARK, chunksOf, estimateTokens, shortTokens, splitChunks, textTokens } from './chunks'
-import { briefLists, joinKey, openSides, openTasksOf, joinRuns, liveJoins, sidesSaving, summaryTokens } from './measure'
+import { briefLists, hasHistory, joinKey, openSides, openTasksOf, joinRuns, liveJoins, sidesSaving, summaryTokens } from './measure'
 import type { BriefLists } from './measure'
 import { readOriginal, settingsOf } from './store'
 import { joinSummaries } from './summarize'
@@ -237,12 +237,24 @@ export async function joinFolded($: EngineInterface, v: PickerView): Promise<Joi
   return made.filter((j): j is Join => j !== null)
 }
 
-// The one message that stands for every folded chunk: the brief kept from all
-// of them, what recall brought back, then each chunk's summary in order (a
-// restored chunk word for word), and how to get the originals back.
+// The context block that carries the folded history, beside the recall line's
+// own ('folio'): one context holds each name once. The engine sends every
+// plugin's blocks in one copy when the chat holds none, at its start and again
+// after each compaction, so the history reaches Claude without standing in the
+// chat as a message.
+export const HISTORY_BLOCK = 'folio-history'
+
+// The message a fold leaves in the chat: one line, starting with the mark the
+// next fold and the chunk names go by. The history itself is in the block.
+export const FOLD_LINE = `${FOLD_MARK} Earlier parts of this chat were folded by Folio; Claude has their history, and recall brings any of them back.`
+
+// The history that stands for every folded chunk, as Claude reads it in
+// HISTORY_BLOCK: the brief kept from all of them, what recall brought back,
+// then each chunk's summary in order (a restored chunk word for word), and how
+// to get the originals back.
 export async function historyBlock($: EngineInterface, v: PickerView): Promise<string | null> {
+  if (!hasHistory(v)) return null
   const folded = v.chunks.filter(c => c.status === 'folded').sort((a, b) => a.order - b.order)
-  if (folded.length === 0) return null
   const parts = [
     `${FOLD_MARK}`,
     `Earlier parts of this chat were folded by Folio to keep the context small. Their originals are kept; call the recall tool (${RECALL_TOOL}) with what you need, and it searches them for you. Ask with exact: true for wording, code, numbers or paths. Parts are numbered in chat order (1 is the oldest, a higher number came later), their sections lettered and points numbered: a query of just "32.B" returns section B of part 32 word for word, "31–33" parts 31 to 33, and "32.B2" point 2 of that section with the section. Where parts disagree, the higher number is the current state. ${NAME_NOTE}`,
@@ -290,12 +302,13 @@ function tidyNote(why: string): string {
 
 type Built = { messages: SessionMessage[]; tidiedRaw: Array<{ chunkId: string; n: number; text: string }> }
 
-// The conversation after a fold: the history block, then every chunk not
-// folded, with its old tool output trimmed and its side talk tidied where the
-// plan says. Messages the fold leaves alone keep the engine's handle and stand
-// exactly as they were; a changed one is rebuilt with the same tool call ids,
-// so every call keeps its result. A restored chunk gets its tool output back,
-// and a side message put back gets its words back.
+// The conversation after a fold: the fold's one line (the history goes to
+// Claude in its context block), then every chunk not folded, with its old tool
+// output trimmed and its side talk tidied where the plan says. Messages the
+// fold leaves alone keep the engine's handle and stand exactly as they were; a
+// changed one is rebuilt with the same tool call ids, so every call keeps its
+// result. A restored chunk gets its tool output back, and a side message put
+// back gets its words back.
 export async function buildFolded(
   $: EngineInterface,
   messages: readonly SessionMessage[],
@@ -307,11 +320,11 @@ export async function buildFolded(
   const records = new Map(v.chunks.map(c => [c.id, c]))
   const out: SessionMessage[] = []
   const tidiedRaw: Built['tidiedRaw'] = []
-  const history = await historyBlock($, v)
-  if (history !== null) out.push({ role: 'user', text: history, toolUses: [] })
+  if (hasHistory(v)) out.push({ role: 'user', text: FOLD_LINE, toolUses: [] })
 
   for (const piece of pieces) {
-    // The old history block is replaced by the new one above.
+    // The last fold's message (a line, or a whole history from before the
+    // history moved to its block) is replaced by the line above.
     if (piece.kind === 'folded') continue
     if (plan.foldIds.includes(piece.id)) continue
     const record = records.get(piece.id)

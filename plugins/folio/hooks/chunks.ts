@@ -188,6 +188,20 @@ export function chunksOf(pieces: Piece[]): ChunkSlice[] {
   return pieces.flatMap(p => (p.kind === 'chunk' ? [p] : []))
 }
 
+// A tool call as a chunk's original writes it, on a line of its own, and the
+// calls read back from such a text (FolioPack reads a chat's shell commands
+// this way). Originals saved long ago are in this form, so it never changes.
+const CALLED = 'Claude called '
+const CALL_LINE = new RegExp(`^${CALLED}(\\S+) (\\{[^\\n]*\\})$`, 'gm')
+
+export function callLine(tool: string, input: unknown): string {
+  return `${CALLED}${tool} ${JSON.stringify(input ?? {})}`
+}
+
+export function callLinesIn(text: string): Array<{ tool: string; json: string }> {
+  return [...text.matchAll(CALL_LINE)].map(m => ({ tool: m[1]!, json: m[2]! }))
+}
+
 // A chunk's messages written out in full, the way recall searches and quotes them.
 export function transcriptText(messages: readonly SessionMessage[]): string {
   const lines: string[] = []
@@ -196,7 +210,7 @@ export function transcriptText(messages: readonly SessionMessage[]): string {
       lines.push(`${m.role === 'user' ? 'User' : 'Claude'}: ${m.text}`)
     }
     for (const use of m.toolUses) {
-      lines.push(`Claude called ${use.tool} ${JSON.stringify(use.input ?? {})}`)
+      lines.push(callLine(use.tool, use.input))
       if (use.text !== undefined) {
         lines.push(`Result: ${use.text}`)
       }

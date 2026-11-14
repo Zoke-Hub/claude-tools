@@ -3,6 +3,17 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-14 · Folio 1.0.0 (number unchanged)
+
+- **Folio:** a fold no longer leaves its whole folded history in the chat. The fold's message is one short line
+  ("[folio: folded history] Earlier parts of this chat were folded by Folio; …"), and Claude gets the same history
+  in a context block of its own (`folio-history`), sent again after every fold, FolioPack rebuild and compaction.
+  Folds made before keep their long messages until the next fold folds them away.
+- **FolioPack:** "This chat" also lists files a shell command made or used (renders above all), from the chat's
+  commands, old chats included: a file a command names, and in a folder a command names, the files that changed
+  while the chat ran. Renders are grouped under their animation's name (the nearest folder above the renders folder
+  that isn't a working folder such as anim or comp), with a row per place when one animation has renders in several.
+
 ## 2026-11-14 · PulseWise 1.0.0 (number unchanged)
 
 - **PulseWise:** the beats' click and hover areas line up with the beats again. Each picture now sits in a box exactly

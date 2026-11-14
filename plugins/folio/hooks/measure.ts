@@ -15,13 +15,25 @@ const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
 // own fixed part.
 const NOT_FIXED = /^(messages|free space|autocompact buffer|since last update)/i
 
+// The folded history's tokens while the chat holds no copy of its context
+// block: from a compaction to the next reply, as the next request makes the
+// copy. The engine's estimate, all there is meanwhile, leaves the block out,
+// so they are counted in, as the fold's message once was. 0 otherwise.
+let dueTokens = 0
+export function setDueTokens(n: number) {
+  dueTokens = n
+}
+
 // The context's size as of the last reply (right after a compaction, before
 // the next reply, the engine's estimate of it, as the app's Context panel
-// shows), and the part of it Claude Code holds for itself.
+// shows, with the history it is about to send again), and the part of it
+// Claude Code holds for itself.
 export async function refreshContext($: EngineInterface) {
   const usage = await $.session.usage({ breakdown: 'summary' })
   const { window, breakdown } = usage.context
-  const tokens = usage.context.tokens ?? breakdown?.totalTokens
+  // A reply came: the request it answered carried the history.
+  if (usage.context.tokens !== undefined) dueTokens = 0
+  const tokens = usage.context.tokens ?? (breakdown === undefined ? undefined : breakdown.totalTokens + dueTokens)
   const fixedParts = (breakdown?.categories ?? [])
     .filter(c => !c.isDeferred && !NOT_FIXED.test(c.name) && c.tokens > 0)
     .map(c => ({ name: c.name, tokens: c.tokens }))
@@ -187,6 +199,11 @@ export function currentOpenTasks(chunks: readonly ChunkRecord[]): string[] {
   return newestSummarised(chunks)?.brief.openTasks ?? []
 }
 
+// Whether the chat has folded parts, so a history to send.
+export function hasHistory(v: PickerView): boolean {
+  return v.chunks.some(c => c.status === 'folded')
+}
+
 // What Folio keeps in view for good: chunks kept word for word, the folded
 // chunks' summaries, the brief, and what recall brought back. None of it
 // counts toward the ceiling; it aims to stay under the strategy's keptAim.
@@ -195,7 +212,7 @@ export function keptParts(v: PickerView): { keptChunks: number; summaries: numbe
   const keptChunks = tokensOf(kept)
   const joined = liveJoins(v).reduce((sum, j) => sum + j.saves, 0)
   const summaries = folded.reduce((sum, c) => sum + summaryTokens(c), 0) - joined
-  const brief = v.chunks.some(c => c.status === 'folded') ? briefTokens(v) : 0
+  const brief = hasHistory(v) ? briefTokens(v) : 0
   const pinned = v.pinned.reduce((sum, p) => sum + textTokens(p.text) + 10, 0)
 
   return { keptChunks, summaries, brief, pinned, total: keptChunks + summaries + brief + pinned }

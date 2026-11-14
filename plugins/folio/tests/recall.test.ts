@@ -4,8 +4,8 @@
 import { expect, test } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 
-import { chunksOf, FOLD_MARK, splitChunks } from '../hooks/chunks'
-import { outlineText } from '../hooks/fold'
+import { chunksOf, splitChunks } from '../hooks/chunks'
+import { FOLD_LINE, outlineText } from '../hooks/fold'
 import { dropStalePins } from '../hooks/recall'
 import { EMPTY_VIEW, emptyBrief, normaliseChunk } from '../hooks/store'
 import type { PickerView } from '../types'
@@ -66,8 +66,8 @@ test('the chunk right after a fold keeps its name, and takes none from a chunk o
   const messages = talk(8, 60_000)
   const before = chunksOf(splitChunks(messages))
   const records = before.map((s, order) => ({ id: s.id, anchor: s.anchor, order, status: order < 3 ? 'folded' : 'live' }))
-  // The first three fold: their history block now sits before the fourth.
-  const folded: SessionMessage[] = [{ role: 'user', text: `${FOLD_MARK}\nsummaries of parts 1-3`, toolUses: [] }, ...messages.slice(before[3]!.start)]
+  // The first three fold: the fold's line now sits before the fourth.
+  const folded: SessionMessage[] = [{ role: 'user', text: FOLD_LINE, toolUses: [] }, ...messages.slice(before[3]!.start)]
   const after = chunksOf(splitChunks(folded, records))
   expect(after.map(s => s.id)).toEqual(before.slice(3).map(s => s.id))
   // A saved chunk that has left the chat lends its name to nothing.

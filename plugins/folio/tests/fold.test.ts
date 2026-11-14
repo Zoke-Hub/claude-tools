@@ -5,7 +5,7 @@ import { expect, test } from 'claude-code/testing'
 import type { EngineInterface, SessionMessage } from 'claude-code'
 
 import { FOLD_MARK, TIDY_MARK, chunksOf, currentChat, splitChunks } from '../hooks/chunks'
-import { buildFolded, historyBlock, isPaired, partRef, planFold, protectedIds } from '../hooks/fold'
+import { buildFolded, FOLD_LINE, historyBlock, isPaired, partRef, planFold, protectedIds } from '../hooks/fold'
 import { briefLists, currentOpenTasks, isOneChatPath, openTasksOf, joinKey, joinRuns, keptParts, liveJoins } from '../hooks/measure'
 import { EMPTY_VIEW, normaliseChunk, normaliseView } from '../hooks/store'
 import type { ChunkRecord, PickerView } from '../types'
@@ -40,8 +40,11 @@ test('chunks keep their names after the chunks before them fold', () => {
   const before = chunksOf(splitChunks(messages))
   expect(before.length).toBeGreaterThan(2)
   const tail = messages.slice(before[2]!.start)
-  const after = chunksOf(splitChunks([{ role: 'user', text: `${FOLD_MARK}\nsummaries`, toolUses: [] }, ...tail]))
-  expect(after.map(s => s.id)).toEqual(before.slice(2).map(s => s.id))
+  // The fold's line, or the whole history an earlier Folio wrote into the chat.
+  for (const text of [FOLD_LINE, `${FOLD_MARK}\nsummaries`]) {
+    const after = chunksOf(splitChunks([{ role: 'user', text, toolUses: [] }, ...tail]))
+    expect(after.map(s => s.id)).toEqual(before.slice(2).map(s => s.id))
+  }
 })
 
 test('a fold keeps the newest work and every tool call paired with its result', async () => {
@@ -59,8 +62,10 @@ test('a fold keeps the newest work and every tool call paired with its result', 
   const folded = v.chunks.map(c => (plan.foldIds.includes(c.id) ? { ...c, status: 'folded' as const } : c))
   const { messages: out } = await buildFolded(noFs, messages, { ...v, chunks: folded }, plan)
   expect(isPaired(out)).toBe(true)
-  expect(out[0]!.text.startsWith(FOLD_MARK)).toBe(true)
-  expect(out[0]!.text).toContain('rule 0')
+  // The chat keeps the fold's one line; the brief is in the history Claude reads in its block.
+  expect(out[0]!.text).toBe(FOLD_LINE)
+  expect(out.some(m => m.text.includes('rule 0'))).toBe(false)
+  expect(await historyBlock(noFs, { ...v, chunks: folded })).toContain('rule 0')
   expect(out.at(-1)).toBe(messages.at(-1))
 })
 
