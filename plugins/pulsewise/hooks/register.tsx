@@ -697,8 +697,12 @@ const GAP = 4
 // The app's rows are about 20 px tall (measured on a screenshot: an area 40 px down at 18 px a row landed 5 px low);
 // the click windows are cut in rows.
 const ROW_PX = 20
-// The bar's height (10 px) in rows: the segments' click windows are cut to it.
-const BAR_ROWS = 10 / ROW_PX
+// The pulse's beats: how far down their picture they are drawn, and how tall. The drawing and the click windows both
+// read these, so the two can't drift apart.
+const MAIN_BAR_TOP = 1
+const MAIN_BAR_H = 10
+// The beats' height in rows: the segments' click windows are cut to it.
+const BAR_ROWS = MAIN_BAR_H / ROW_PX
 // The readout's × is centred in a square this big, its centre this far down the readout's picture.
 const CLOSE_SIZE = 18
 const CLOSE_CENTER_Y = 11
@@ -722,8 +726,8 @@ const toColumns = (px: number) => Math.max(0, Math.round((px / PX_PER_COLUMN) * 
 /** A percentage of the picture's width, so it fills whatever width the desktop gives it. */
 const pc = (px: number, width: number) => `${((px / width) * 100).toFixed(3)}%`
 
-const svgDoc = (width: number, height: number, body: string) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${height}" data-w="${width}">${SVG_STYLE}${body}</svg>`
+const svgDoc = (height: number, body: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${height}">${SVG_STYLE}${body}</svg>`
 
 /** Where each segment sits, in px of the estimated width: shares, 4 px gaps, room kept on the right. */
 function placeSegments(share: number[], width: number, right: number): { x: number; w: number }[] {
@@ -795,7 +799,7 @@ function mainPicture(segs: Seg[], share: number[], open: string | null, current:
   const [pct = '', ...rest] = right ? right.split(' · ') : []
   const after = rest.length ? ` · ${rest.join(' · ')}` : ''
   const value = pct ? `<text x="100%" y="10" text-anchor="end" font-size="12.5"><tspan class="t1" font-weight="500">${esc(pct)}</tspan><tspan class="t2">${esc(after)}</tspan></text>` : ''
-  return { source: svgDoc(width, 30, barMarkup(segs, spots, width, 1, 10, open, 'm') + labels + value), height: 30 }
+  return { source: svgDoc(30, barMarkup(segs, spots, width, MAIN_BAR_TOP, MAIN_BAR_H, open, 'm') + labels + value), height: 30 }
 }
 
 /** Room in px the pulse keeps on its right for the list's % and time left (12.5 px, about 7 px a character). */
@@ -818,7 +822,7 @@ function headerPicture(line: string, pct: string, width: number): { source: stri
     `<text class="t1" x="${pc(width - closeW, width)}" y="15" text-anchor="end" font-size="13" font-weight="500">${esc(pct)}</text>`,
     `<text class="t3" x="${pc(width - CLOSE_SIZE / 2, width)}" y="16" text-anchor="middle" font-size="14">×</text>`,
   ].join('')
-  return { source: svgDoc(width, 22, body), height: 22 }
+  return { source: svgDoc(22, body), height: 22 }
 }
 
 /** A beat's close-up: its own bar and a label with each part's status (its name, % and close mark are in the readout). */
@@ -835,10 +839,13 @@ function detailPicture(segs: Seg[], width: number): { source: string; height: nu
     `<rect class="track" x="0" y="0" width="100%" height="1" opacity="0.6"/>`,
     barMarkup(segs, spots, width, DETAIL_TOP, 8, null, 'd'),
   ].join('') + labels.replace(/y="45"/g, `y="${DETAIL_TOP + 23}"`)
-  return { source: svgDoc(width, DETAIL_TOP + 29, body), height: DETAIL_TOP + 29 }
+  return { source: svgDoc(DETAIL_TOP + 29, body), height: DETAIL_TOP + 29 }
 }
 
-// A track's bar height, 19 px into its 50 px row.
+// A row of small bars (the tracks, the other chats): its height, how far down it the bar is drawn, and the bar's
+// height. The drawing and the click strips both read these, so the two can't drift apart.
+const LANE_ROW = 50
+const LANE_BAR_TOP = 19
 const LANE_BAR = 5
 
 /** A job row's value on the right: its % (or time) bright while it runs, what follows it dimmer. */
@@ -851,23 +858,22 @@ function rightMarkup(row: Lane, top: number): string {
 
 /** Rows of small bars: a title and its % or time, a thin bar of its own parts, and one line of what runs. */
 function miniBarsPicture(rows: Lane[], width: number, id: string, caption = '', indent = 0): { source: string; height: number } {
-  const ROW = 50
   const offset = caption ? CAPTION_H : 0
   const head = caption ? `<text class="t3" x="0" y="12" font-size="11.5">${esc(fitLabel(caption, width, 6.1))}</text>` : ''
   const body = rows
     .map((row, n) => {
-      const top = offset + n * ROW
+      const top = offset + n * LANE_ROW
       const spots = placeSegments(shares(row.segs), width, 0)
       return [
         `<text x="${indent}" y="${top + 13}" font-size="12.5"><tspan class="t1">${esc(fitLabel(row.title, width - 40 - row.right.length * 7 - (row.kind ? 50 : 0), 6.8))}</tspan>${row.kind ? `<tspan class="t3"> · ${esc(row.kind)}</tspan>` : ''}</text>`,
         rightMarkup(row, top),
-        row.segs.length ? barMarkup(row.segs, spots, width, top + 19, LANE_BAR, null, `${id}${n}-`) : '',
+        row.segs.length ? barMarkup(row.segs, spots, width, top + LANE_BAR_TOP, LANE_BAR, null, `${id}${n}-`) : '',
         row.line ? `<text class="${row.isAlert ? 'warn' : 't3'}" x="0" y="${top + 40}" font-size="11">${esc(fitLabel(row.line, width, 6.1))}</text>` : '',
       ].join('')
     })
     .join('')
-  const height = offset + rows.length * ROW - 4
-  return { source: svgDoc(width, height, head + body), height }
+  const height = offset + rows.length * LANE_ROW - 4
+  return { source: svgDoc(height, head + body), height }
 }
 
 /** The project's other chats: each one's title and %, a thin bar of its own points, and what runs there now. */
@@ -903,7 +909,7 @@ function donePicture(entries: LogEntry[], width: number): { source: string; heig
     })
     .join('')
   const height = entries.length * 19 + 6
-  return { source: svgDoc(width, height, rows), height }
+  return { source: svgDoc(height, rows), height }
 }
 
 // ---- the module's own state and helpers ----------------------------------
@@ -2014,9 +2020,9 @@ async function openChat($: Api, host: string) {
   }
 }
 
-// An other-chat row's height in px (its 50 px row less the gap under it); its name's click area: from the row's top,
+// An other-chat row's height in px (its row less the 4 px gap under it); its name's click area: from the row's top,
 // this tall, round the 12.5 px name (caps from about 4 px, descenders to about 17).
-const CHAT_ROW = 46
+const CHAT_ROW = LANE_ROW - 4
 const CHAT_NAME_H = 18
 // Room each side of an other chat's name inside its click highlight.
 const NAME_PAD = 6
@@ -2172,12 +2178,14 @@ function otherPulses(ui: Ui, $: Api, chats: SideChat[], width: number) {
   const { Box, Svg } = ui
   const others = otherChatsPicture(chats, width)
   return (
-    <Box flexDirection="column">
-      <Svg source={others.source} alt={chats.map(chat => `${chat.title}: ${chatState(chat)}, ${chat.line}`).join('; ')} width={width} height={others.height} />
+    <Box flexDirection="column" width={toColumns(width)}>
+      <Svg source={others.source} alt={chats.map(chat => `${chat.title}: ${chatState(chat)}, ${chat.line}`).join('; ')} height={others.height} />
       <Box position="absolute" top={0} left={0} width="100%" flexDirection="column">
         {chats.map((chat, n) => (
-          <Box flexDirection="column" height={(n < chats.length - 1 ? 50 : CHAT_ROW) / ROW_PX}>
+          <Box flexDirection="column" height={(n < chats.length - 1 ? LANE_ROW : CHAT_ROW) / ROW_PX}>
             {chat.host && clickArea(ui, `chat-${n}-name`, Math.min(width, textWidth(chat.title) + NAME_PAD * 2), CHAT_NAME_H, () => void openChat($, chat.host ?? ''))}
+            {/* The bar's click area starts where miniBarsPicture draws it, LANE_BAR_TOP px into the row. */}
+            {chat.host && <Box height={(LANE_BAR_TOP - CHAT_NAME_H) / ROW_PX} />}
             {chat.host && clickArea(ui, `chat-${n}-bar`, width, LANE_BAR, () => void openChat($, chat.host ?? ''))}
           </Box>
         ))}
@@ -2560,6 +2568,10 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e)
     const { Box, Text, Button, Svg } = ui
     const width = Math.round(e.props.bodyColumns * PX_PER_COLUMN)
+    // Every picture with click areas over it sits in a box `band` columns wide and fills it (no px width of its own).
+    // The picture is drawn in percentages of its box and the click areas in the app's columns, so the two stretch
+    // together whatever width the app gives the band or a column; a picture sized in px drifts from its click areas.
+    const band = toColumns(width)
     // Nudge: always there while the band shows a task list, from the first moment (whatever runs or not; a list can
     // be behind at any time).
     const showNudge = m.points.length > 0
@@ -2627,8 +2639,8 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column" rowGap={1}>
         {(header || hasList) && (
-          <Box flexDirection="column">
-            {header && <Svg source={header.source} alt={`${readLine}${readRight ? `. ${readRight}` : ''}`} width={width} height={header.height} />}
+          <Box flexDirection="column" width={band}>
+            {header && <Svg source={header.source} alt={`${readLine}${readRight ? `. ${readRight}` : ''}`} height={header.height} />}
             {followed && (
               // The close area: a square window centred on the readout's ×, cut from a wider app button.
               <Box position="absolute" top={0} right={0} width={toColumns(CLOSE_SIZE)} flexDirection="column">
@@ -2637,8 +2649,11 @@ export const register: Register = (on, options) => {
               </Box>
             )}
             {hasList && <Box flexDirection="column">
-          <Svg source={main.source} alt={`Progress ${right}. ${segs.map(describe).join('; ')}`} width={width} height={main.height} />
-          <Box position="absolute" top={0} left={0} width="100%" height={BAR_ROWS} flexDirection="row">
+          <Svg source={main.source} alt={`Progress ${right}. ${segs.map(describe).join('; ')}`} height={main.height} />
+          <Box position="absolute" top={0} left={0} width="100%" flexDirection="column">
+          {/* The click areas start where mainPicture draws the beats, MAIN_BAR_TOP px down the picture. */}
+          <Box height={MAIN_BAR_TOP / ROW_PX} />
+          <Box width="100%" height={BAR_ROWS} flexDirection="row">
             {spots.map((spot, i) => {
               const s = segs[i]
               if (!s) return null
@@ -2652,12 +2667,13 @@ export const register: Register = (on, options) => {
               ]
             })}
           </Box>
+          </Box>
         </Box>}
           </Box>
         )}
         {opened && openSeg && (
-          <Box flexDirection="column">
-            <Svg source={opened.source} alt={`${openSeg.name} ${overall(detail)}%. ${detail.map(describe).join('; ')}`} width={width} height={opened.height} />
+          <Box flexDirection="column" width={band}>
+            <Svg source={opened.source} alt={`${openSeg.name} ${overall(detail)}%. ${detail.map(describe).join('; ')}`} height={opened.height} />
             <Box position="absolute" top={0} left={0} width="100%" flexDirection="column">
               {/* The close-up's bar is 8 px tall, DETAIL_TOP px down its picture. */}
               <Box height={DETAIL_TOP / ROW_PX} />
@@ -2666,12 +2682,12 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {jobs && (
-          <Box flexDirection="column">
-            <Svg source={jobs.source} alt={lanes.map(lane => `${lane.title}: ${lane.right}, ${lane.line}`).join('; ')} width={width} height={jobs.height} />
+          <Box flexDirection="column" width={band}>
+            <Svg source={jobs.source} alt={lanes.map(lane => `${lane.title}: ${lane.right}, ${lane.line}`).join('; ')} height={jobs.height} />
             <Box position="absolute" top={0} left={0} width="100%" flexDirection="column">
-              {/* Each track's bar is LANE_BAR px tall, 19 px into its 50 px row (the first row under the caption). */}
+              {/* Each track's bar is LANE_BAR px tall, LANE_BAR_TOP px into its LANE_ROW px row (the first under the caption). */}
               {lanes.map((lane, n) => [
-                <Box key={`ls${n}`} height={(n === 0 ? CAPTION_H + 19 : 50 - LANE_BAR) / ROW_PX} />,
+                <Box key={`ls${n}`} height={(n === 0 ? CAPTION_H + LANE_BAR_TOP : LANE_ROW - LANE_BAR) / ROW_PX} />,
                 <Box key={`lr${n}`}>
                   {hoverStrip(
                     lane.segs,
@@ -2726,7 +2742,11 @@ export const register: Register = (on, options) => {
             </Box>
           )}
         </Box>
-        {done && <Svg source={done.source} alt={m.log.map(entry => `${entry.ok ? 'done' : 'stopped'}: ${entry.text}`).join('; ')} width={width} height={done.height} />}
+        {done && (
+          <Box width={band}>
+            <Svg source={done.source} alt={m.log.map(entry => `${entry.ok ? 'done' : 'stopped'}: ${entry.text}`).join('; ')} height={done.height} />
+          </Box>
+        )}
         {isSideOpen && m.side.length > 0 && otherPulses(ui, $, m.side, width)}
       </Box>
     )

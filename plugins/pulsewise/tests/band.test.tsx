@@ -2,12 +2,15 @@
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
 import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+import type { AgentStatus, On } from 'claude-code'
 
 const BAND = {
   plugin: 'pulsewise',
   component: 'AbovePrompt',
   props: {
     hasSurvey: false,
+    isCollapsed: false,
     isWorking: true,
     maxRows: 30,
     bodyColumns: 90,
@@ -18,9 +21,6 @@ const BAND = {
 
 const PLAN = 'mcp__ccd_turn__update_plan'
 
-/** Everything a drawing holds, as text: Text rows, labels, and the pictures' descriptions. */
-type On = Parameters<Parameters<typeof test>[1]>[1]
-
 /** The chat every test runs in: its start, its id and its project folder. */
 const inProject = (on: On) => {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -28,7 +28,30 @@ const inProject = (on: On) => {
   on('session.root', () => ({ value: '/projects/demo' }))
 }
 
+/** Everything a drawing holds, as text: Text rows, labels, and the pictures' descriptions. */
 const drawnText = async (ui: { drawn: () => Promise<unknown> }) => JSON.stringify(await ui.drawn())
+
+// The test runner has setTimeout; the type check knows only the engine's names.
+declare const setTimeout: (callback: (...args: never[]) => void, ms: number) => unknown
+
+/** What the app passes when Claude starts an agent, filled in for a test (PulseWise reads only its description and type). */
+const spawnOf = (o: { prompt: string; description: string; subagentType: string }) => ({
+  ...o,
+  tool_use_id: 'toolu_test',
+  provider: { plugin: 'test', tier: 'user' as const },
+  parentModel: 'test-model',
+  background: false,
+  fork: false,
+})
+
+/** A task notification as the app appends it to the chat, for a test (PulseWise reads only its text). */
+let appendCount = 0
+const notification = (id: string, status = 'completed') => ({
+  message: { type: 'user' as const, content: [{ type: 'text' as const, text: `<task-notification><task-id>${id}</task-id><status>${status}</status></task-notification>` }] },
+  door: 'delivery' as const,
+  origin: { kind: 'task-notification' as const },
+  uuid: `test-row-${++appendCount}`,
+})
 
 /**
  * A file event's path as the test wrote it, on any system. The engine hands hooks the system's own form: on Windows,
@@ -84,12 +107,7 @@ test('the band follows the task list and its background work, on desktop and ter
   }
 
   // The background command ends: its notification marks it done.
-  await $.session.append({
-    message: {
-      type: 'user',
-      content: [{ type: 'text', text: '<task-notification><task-id>bg1</task-id><status>completed</status></task-notification>' }],
-    },
-  })
+  await $.session.append(notification('bg1'))
   await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'done' })
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
@@ -456,7 +474,7 @@ test('a point whose background jobs are done is not drawn full while Claude\'s o
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Load it in a fresh session', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
   await $.tool.call({ tool: 'Bash', command: 'claude -p hi', description: 'Load it in a fresh session', run_in_background: true })
-  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>bg1</task-id><status>completed</status></task-notification>' }] } })
+  await $.session.append(notification('bg1'))
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const drawn = await drawnText(ui)
@@ -475,7 +493,7 @@ test('work still running when a new list is written joins the new point named li
   on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Analyse the interview footage', type: 'general-purpose', status: 'running' }] }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Plan the cut', status: 'in_progress' }, { content: 'Write the notes', status: 'pending' }] })
-  await $.agent.spawn({ prompt: 'analyse', description: 'Analyse the interview footage', subagentType: 'general-purpose' })
+  await $.agent.spawn(spawnOf({ prompt: 'analyse', description: 'Analyse the interview footage', subagentType: 'general-purpose' }))
   // A rewritten list: the agent's work now has a point of its own.
   await $.tool.call({
     tool: PLAN,
@@ -510,7 +528,7 @@ test('two background jobs get a bar each; a finished one says done while the oth
   expect(drawn).toContain('Render the animation round: ')
   await ui.unmount()
 
-  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>bg1</task-id><status>completed</status></task-notification>' }] } })
+  await $.session.append(notification('bg1'))
   ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   drawn = await drawnText(ui)
   expect(drawn).toContain('Cut out the pieces: done')
@@ -550,7 +568,7 @@ test("a background agent's named step-by-step job shows on the agent's own bar",
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Animation notes on the walk (parallel agent)', status: 'in_progress' }, { content: 'Cut-out notes', status: 'in_progress' }] })
-  await $.agent.spawn({ prompt: 'do the notes', description: 'Animation notes on the walk', subagentType: 'general-purpose' })
+  await $.agent.spawn(spawnOf({ prompt: 'do the notes', description: 'Animation notes on the walk', subagentType: 'general-purpose' }))
   await clock.advance(1100)
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
@@ -574,7 +592,7 @@ test('a background agent waiting on its own background command stays on the bar 
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Check the pack', status: 'in_progress' }] })
-  await $.agent.spawn({ prompt: 'check it', description: 'Check the pack', subagentType: 'general-purpose' })
+  await $.agent.spawn(spawnOf({ prompt: 'check it', description: 'Check the pack', subagentType: 'general-purpose' }))
   await $.tool.call({ tool: 'Bash', command: 'claude -p hi', description: 'Headless run', run_in_background: true, agentId: 'agent-1' } as never)
   await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 't1', agentId: 'agent-1', reason: 'answer' } as never)
   // The main list is done; the agent still waits on its command.
@@ -596,14 +614,14 @@ test('a background agent that ran its own background command leaves the bar once
     e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1' } } : { result: {} },
   )
   on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
-  let status = 'waiting'
+  let status: AgentStatus | 'gone' = 'waiting'
   // A finished agent may be gone from the app's list altogether.
   on('agent.list', () => ({ value: status === 'gone' ? [] : [{ id: 'agent-1', description: 'Check the pack', type: 'general-purpose', status }] }))
   on('turn.complete', () => ({ text: '' }))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Check the pack', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
-  await $.agent.spawn({ prompt: 'check it', description: 'Check the pack', subagentType: 'general-purpose' })
+  await $.agent.spawn(spawnOf({ prompt: 'check it', description: 'Check the pack', subagentType: 'general-purpose' }))
   // Its own command's end goes to the agent, not this chat: the bar never hears it.
   await $.tool.call({ tool: 'Bash', command: 'claude -p hi', description: 'Headless run', run_in_background: true, agentId: 'agent-1' } as never)
   await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 't1', agentId: 'agent-1', reason: 'answer' } as never)
@@ -726,6 +744,59 @@ test('the opened bar and each job bar get click areas; a hover box shows only wh
   await ui.press({ key: 'press-hl0-0' })
   expect(await ui.find({ key: 'press-hl0-0' })).toBeUndefined()
   expect(await drawnText(ui)).not.toContain('Tracks')
+  await ui.unmount()
+})
+
+test('every picture and its click areas share one ruler: a beat is pressed where it is drawn', async ($, on) => {
+  type Node = { type?: string; props?: Record<string, unknown>; children?: Node[] }
+  inProject(on)
+  let next = 0
+  on('tool.call', (_, e) =>
+    e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: `bg${++next}` } } : { result: {} },
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: PLAN,
+    scope: 'first_task',
+    items: ['Gather', 'Build the long middle part', 'Check', 'Tidy', 'Ship'].map((content, i) => ({ content, status: i === 0 ? 'completed' : i === 1 ? 'in_progress' : 'pending' })),
+  })
+  await $.tool.call({ tool: 'Bash', command: 'render', description: 'Render the frames', run_in_background: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  // The band's width in columns, as the hook works it out from bodyColumns.
+  const band = Math.round((Math.round(BAND.props.bodyColumns * 8.8) / 8.8) * 100) / 100
+  const pictures = (node: Node, boxWidth: number | null, out: { svg: Node; boxWidth: number | null; overlay?: Node }[]) => {
+    const kids = node.children ?? []
+    const width = node.type === 'Box' && typeof node.props?.width === 'number' ? (node.props.width as number) : boxWidth
+    for (const kid of kids) {
+      if (kid.type === 'Svg') out.push({ svg: kid, boxWidth: width, overlay: kids.find(k => k.type === 'Box' && k.props?.position === 'absolute') })
+      else pictures(kid, width, out)
+    }
+    return out
+  }
+  for (const opened of [null, 'open-p:1']) {
+    if (opened) await ui.press({ key: opened })
+    const found = pictures((await ui.drawn()) as Node, null, [])
+    expect(found.length).toBeGreaterThan(opened ? 2 : 1)
+    for (const { svg, boxWidth } of found) {
+      // A px width of its own would let the picture stretch apart from its click areas' columns.
+      expect(svg.props?.width).toBeUndefined()
+      expect(boxWidth).toBe(band)
+    }
+    // The pulse: each beat's click area starts where the beat is drawn, and 1 px down, level with the beat.
+    const pulse = found.find(f => String(f.svg.props?.alt).startsWith('Progress'))
+    const source = String(pulse?.svg.props?.source)
+    const beats = [...source.matchAll(/<clipPath id="m\d+"><rect x="([\d.]+)%" y="(\d+)"/g)].map(b => ({ x: (Number(b[1]) / 100) * band, y: Number(b[2]) }))
+    const [spacer, row] = pulse?.overlay?.children ?? []
+    expect(spacer?.props?.height).toBe(beats[0]!.y / 20)
+    let at = 0
+    const starts: number[] = []
+    for (const kid of row?.children ?? []) {
+      if (String(kid.props?.key ?? '').startsWith('open-')) starts.push(at)
+      at += Number(kid.props?.width ?? 0)
+    }
+    expect(starts.length).toBe(beats.length)
+    starts.forEach((start, i) => expect(Math.abs(start - beats[i]!.x)).toBeLessThan(0.1))
+  }
   await ui.unmount()
 })
 
@@ -1349,10 +1420,6 @@ test('on Windows a job that took only seconds ends without a flash', async ($, o
 /** A real pause, for what is timed by the real clock (a ttl, a turn's frozen time): the test clock moves timers only. */
 const realWait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
-const notification = (id: string, status = 'completed') => ({
-  message: { type: 'user', content: [{ type: 'text', text: `<task-notification><task-id>${id}</task-id><status>${status}</status></task-notification>` }] },
-})
-
 test("a task's end that lands while the poll waits on a file is kept, not written over by the poll", async ($, on) => {
   const clock = mock.clock(on, { now: Date.now() })
   mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
@@ -1376,7 +1443,7 @@ test("a task's end that lands while the poll waits on a file is kept, not writte
   mtime = 2
   await clock.advance(1000)
   // …when the background command's end arrives, and is written first.
-  await $.session.append(notification('bg-late-1') as never)
+  await $.session.append(notification('bg-late-1'))
   await clock.advance(600)
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
@@ -1438,7 +1505,7 @@ test('a job past its ttl goes silent, not failed; it runs again when it reports,
  * A Windows host whose job "Intro frames" (pid 4242) last wrote its heartbeat a minute ago (a laptop waking from sleep,
  * say), and whose process list, looked up with tasklist (there is no ps), lists it, does not list it, or cannot be read.
  */
-const windowsJob = async ($: Parameters<Parameters<typeof test>[1]>[0], on: On, tasklist: 'alive' | 'gone' | 'broken') => {
+const windowsJob = async ($: Engine, on: On, tasklist: 'alive' | 'gone' | 'broken') => {
   const clock = mock.clock(on, { now: Date.now() })
   mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x', APPDATA: 'C:/Users/me/AppData/Roaming' })
   inProject(on)
@@ -1491,7 +1558,7 @@ test('on Windows a job whose process is gone fails once, and its end is written 
 })
 
 /** A background command run through the helper (`progress.py run … -- python3 render.py`) and the helper's job for it. */
-const coveredRender = async ($: Parameters<Parameters<typeof test>[1]>[0], on: On) => {
+const coveredRender = async ($: Engine, on: On) => {
   const clock = mock.clock(on, { now: Date.now() })
   mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
   inProject(on)
@@ -1542,7 +1609,7 @@ test("an agent is not taken for ended when its status can't be read or reads idl
   const agentTurnEnds = () => $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'ta', agentId: 'agent-1', reason: 'answer' } as never)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Check the pack', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
-  await $.agent.spawn({ prompt: 'check it', description: 'Check the pack', subagentType: 'general-purpose' })
+  await $.agent.spawn(spawnOf({ prompt: 'check it', description: 'Check the pack', subagentType: 'general-purpose' }))
   await agentTurnEnds()
   let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
@@ -1578,7 +1645,7 @@ test("an agent's own step-by-step job is not ended with it, and shows again when
   agentNotesJob(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Animation notes on the walk (parallel agent)', status: 'in_progress' }, { content: 'Cut-out notes', status: 'in_progress' }] })
-  await $.agent.spawn({ prompt: 'do the notes', description: 'Animation notes on the walk', subagentType: 'general-purpose' })
+  await $.agent.spawn(spawnOf({ prompt: 'do the notes', description: 'Animation notes on the walk', subagentType: 'general-purpose' }))
   await clock.advance(1100)
   // The app says it completed; then it acts again (a message woke it): its job is back on its bar, where it was.
   status = 'completed'
@@ -1600,7 +1667,7 @@ test('a turn that ends with points still open reads as waiting for your reply, i
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build the page', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
   await $.turn.complete({ answer: 'Which colour?', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
   await realWait(1100)
-  let ui = await $.ui.mount({ ...BAND, surface: 'desktop', isWorking: false } as never)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop', isWorking: false } as never)
   await ui.press({ key: 'open-p:0' })
   let drawn = await drawnText(ui)
   expect(drawn).toContain('"alt":"1. Build the page: waiting for your reply · 0s')
@@ -1608,10 +1675,10 @@ test('a turn that ends with points still open reads as waiting for your reply, i
   await ui.unmount()
   // The person answers: Claude's turn runs, and its part moves again (the beat is still open).
   await $.turn.start({ turnId: 't2' } as never)
-  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  drawn = await drawnText(ui)
+  const again = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  drawn = await drawnText(again)
   expect(drawn).toContain('"alt":"1. Build the page: Claude working')
-  await ui.unmount()
+  await again.unmount()
 })
 
 test("the chat's phase is kept in the model the host holds, so a hot reload of the code mid-turn keeps it", async ($, on) => {
@@ -1725,7 +1792,7 @@ test("a job run by bash is not taken for an agent's own just because the agent's
   on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Fix the notes', type: 'general-purpose', status: 'running' as const }] }))
   const { files } = jobFolder(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await $.agent.spawn({ prompt: 'fix them', description: 'Fix the notes', subagentType: 'general-purpose' })
+  await $.agent.spawn(spawnOf({ prompt: 'fix them', description: 'Fix the notes', subagentType: 'general-purpose' }))
   await $.tool.call({ tool: 'Bash', command: 'bash check.sh', description: 'Check the notes', agentId: 'agent-1' } as never)
   // Another chat's agent, or Claude itself, runs a script through bash: the helper names its script "bash".
   files.set('j-other', { mtime: 1, body: () => jobBody({ id: 'j-other', name: 'Render the stills', pid: 99, heartbeat: true, ttl_ms: null, script: 'bash', argv: 'bash render.sh' }) })

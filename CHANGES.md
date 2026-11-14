@@ -3,6 +3,14 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-14 · PulseWise 1.0.0 (number unchanged)
+
+- **PulseWise:** the beats' click and hover areas line up with the beats again. Each picture now sits in a box exactly
+  as wide as the columns its click areas use and fills it, so the two stretch together whatever width the app gives
+  the band; before, a picture sized in pixels could come out wider than its click areas, which then sat further left
+  the further right a beat was. The pulse's and the other chats' bars are also pressed level with where they are drawn
+  (they sat 1 px high).
+
 ## 2026-11-14 · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom:** Claude replies to each note as soon as its change is made, instead of all at once at the end, so the
