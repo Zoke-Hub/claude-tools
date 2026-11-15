@@ -148,6 +148,16 @@ const NUDGE =
 // How long the Nudge button reads "Nudged ✓" after a press (in place of a toast, which the app labels in lowercase).
 const NUDGED_MS = 4000
 
+// The longest name the bar and its hover boxes show whole: a point's, a job's, a command's or an agent's.
+const NAME_LIMIT = 32
+
+// Read by Claude (never shown to the person) when a list it sends has names over NAME_LIMIT: send them summarised.
+// The list sent so is the same list renamed in place (renameShortened), so its points keep their times.
+const longNamesNote = (names: string[]) => {
+  const one = names.length === 1
+  return `PulseWise (the progress bar): ${one ? "this point's name is" : "these points' names are"} longer than ${NAME_LIMIT} characters, so the bar and its hover boxes cut ${one ? 'it' : 'them'}: ${names.map(name => `"${name}"`).join(', ')}. With your next tool call, send the list again with the same points in the same order and the same statuses, ${one ? 'that name' : 'those names'} summarised to ${NAME_LIMIT} characters or fewer (the same meaning in fewer words, never cut off). The bar keeps each point's times.`
+}
+
 // Read by Claude (never shown to the person) when points are added to the current list: the new ones get the same check.
 // Sent only while the "sideBySide" setting is on; `rules` is the path of the bundled cheaper-agents.md.
 const addedNote = (names: string[], rules: string) =>
@@ -167,6 +177,7 @@ export const LONG_JOBS_BLOCK = {
     '- a command or a tool that prints its own progress: `python3 ~/.claude/progress/progress.py run --name "<what it does>" -- <command>` (it reads ffmpeg\'s `time=`, `NN%` and `done/total` lines; a quick inline script just prints one `done/total` line per item, flushed);',
     '- a Python script: `sys.path.insert(0, os.path.expanduser("~/.claude/progress")); import progress`, then `with progress.job(name, steps=[...]):`, `progress.step(name, done, total)`, `progress.track(items, name)`;',
     '- step by step from a shell: `progress.py start "<name>" --steps "A,B,C"`, then `progress.py step "<name>" B 2 5`, then `progress.py finish "<name>"`.',
+    `Names: every task-list point, every job name (\`--name\`, \`start "<name>"\`) and every background command's or agent's description is ${NAME_LIMIT} characters at most, so the bar and its hover boxes show it whole. Summarise it (the same meaning in fewer words: "Cursor pack on every page", not "Cursor pack on every page and site (cursor helper)"); never cut it off.`,
     'Each background job gets its own name. A background agent\'s brief tells it to report its steps under its own description that way, so its bar shows real steps. A redo of a job that stopped passes `--redoes "<old name>"` (in Python, `redoes=`), so its bar takes the stopped one\'s place.',
     'Keep the task list current: mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch; points running side by side are each marked in progress the moment their own work starts. Then every beat of the bar shows its real start and finish.',
   ].join('\n'),
@@ -283,21 +294,9 @@ function leftText(ms: number): string {
 
 /** A running task's status, with its time left when it can tell (left out where the time left shows beside it). */
 function taskStatus(m: Model, t: Task, now: number, withLeft = true): string {
-  const status = isLeftRunning(m, t) ? leftRunningStatus(t, now) : taskStatusBare(t, now)
+  const status = taskStatusBare(t, now)
   const left = withLeft ? taskLeft(t, now) : null
   return left !== null ? `${status} · ${leftText(left)}` : status
-}
-
-/**
- * A command still running after Claude ended its turn with every point done: nothing Claude is still working on, only
- * something it left to run (a local server on a timer, say), so its line says so instead of looking like work.
- */
-const isLeftRunning = (m: Model, t: Task) =>
-  m.phase !== 'working' && t.state === 'running' && t.kind !== 'agent' && !t.owner && m.points.every(p => p.state === 'done')
-
-function leftRunningStatus(t: Task, now: number): string {
-  const counted = t.steps.length > 0
-  return `left running after Claude finished · ${counted ? taskStatusBare(t, now) : fmt(now - t.started)}`
 }
 
 function taskStatusBare(t: Task, now: number): string {
@@ -1228,21 +1227,31 @@ function isLateTicked(m: Model, name: string, started: number, from: number, to:
 
 /**
  * The point a job belongs to: the one it names, else the one running when it started, or the point the list ticked over
- * to just after that (a late tick).
+ * to just after that (a late tick). With several running side by side, the one its name fits best; on a tie, or when
+ * it fits none, the one listed last.
  */
 function pointFor(m: Model, name: string | null, at: number, job: string): number {
   if (name) {
     const found = m.points.findIndex(p => namesPoint(name, p))
     if (found >= 0) return found
   }
-  let running = runningPoint(m)
-  for (let i = m.points.length - 1; i >= 0; i -= 1) {
-    const p = m.points[i]
-    if (p && p.started !== null && p.started <= at && (p.ended === null || p.ended >= at)) {
-      running = i
-      break
+  const mine = taskWords(job)
+  const bestOf = (isCandidate: (p: Point) => boolean) => {
+    let best = -1
+    let bestFit = -1
+    for (let i = m.points.length - 1; i >= 0; i -= 1) {
+      const p = m.points[i]
+      if (!p || !isCandidate(p)) continue
+      const fit = nameFit(mine, nameWords(p.name))
+      if (fit > bestFit) {
+        best = i
+        bestFit = fit
+      }
     }
+    return best
   }
+  const atStart = bestOf(p => p.started !== null && p.started <= at && (p.ended === null || p.ended >= at))
+  const running = atStart >= 0 ? atStart : bestOf(p => p.state === 'running')
   // A point started after `at` was ticked over to then (one whose matched steps came earlier counts as running at `at`).
   const late = m.points.findIndex((p, i) => isLateTicked(m, job, at, running, i, p.started))
   return late >= 0 ? late : running
@@ -1288,6 +1297,27 @@ function startPoint(m: Model, i: number, now: number) {
 function isSameList(old: Point[], items: { content?: unknown }[]): boolean {
   const shared = items.filter(item => old.some(p => p.name === item.content)).length
   return old.some(p => p.state !== 'done') && shared * 2 >= items.length
+}
+
+/** The names in a list Claude sends that are longer than the bar shows whole. */
+const longNames = (items: { content?: unknown }[]) => items.map(item => String(item.content ?? '')).filter(name => name.length > NAME_LIMIT)
+
+/**
+ * The current list sent again with its long names summarised, as longNamesNote asks: as many points, each in its place
+ * either named as before or a name over NAME_LIMIT now within it, at least one of them. Those points are renamed where
+ * they are, so they keep their times and their work and the list reads as the current one updated. False, and nothing
+ * changed, for any other list.
+ */
+function renameShortened(m: Model, items: { content?: unknown }[]): boolean {
+  if (items.length !== m.points.length || !m.points.some(p => p.state !== 'done')) return false
+  const names = items.map(item => String(item.content ?? ''))
+  const isShortened = (p: Point, name: string) => p.name.length > NAME_LIMIT && name.length > 0 && name.length <= NAME_LIMIT
+  if (!m.points.every((p, i) => p.name === names[i] || isShortened(p, names[i] ?? ''))) return false
+  if (m.points.every((p, i) => p.name === names[i])) return false
+  m.points.forEach((p, i) => {
+    p.name = names[i] ?? p.name
+  })
+  return true
 }
 
 /**
@@ -1577,6 +1607,9 @@ function applyJobFile(m: Model, d: JobFile, now: number, fx: Effect[]): boolean 
     reopenJob(m, existing)
   }
   Object.assign(existing, { ...progressOf(d), updated: Math.max(existing.updated, d.updated) })
+  // Not yet linked to the command that runs it (the bar read the job before the command came in, or saw it before a
+  // reload brought this rule in): tried again at each report.
+  if (existing.state === 'running' && !m.tasks.some(t => t.coveredBy === existing.id)) linkToShell(m, existing)
   if (existing.state === 'silent' && hasReported) resume(existing)
   if (d.state !== 'running') endTask(m, existing, d.state === 'done', d.ended ?? now, fx, d.message ?? undefined, true)
   return true
@@ -1585,6 +1618,21 @@ function applyJobFile(m: Model, d: JobFile, now: number, fx: Effect[]): boolean 
 /** A job's script name too common to tell which command started it: an interpreter or a shell, with or without .exe. */
 const isGenericScript = (script: string) => /^(python[\d.]*|py|node|deno|bun|npx|npm|bash|sh|zsh|cmd|powershell|pwsh|claude|-c)(\.exe)?$/i.test(script.trim())
 
+/**
+ * The script that tells which command started a job: the one its helper names, or, when that is only an interpreter or
+ * a shell ("bash", "python"), the first file its command line runs ("bash C:/tmp/retest.sh" gives "retest.sh"). Empty
+ * when neither tells.
+ */
+function jobScript(job: Task): string {
+  const script = (job.script ?? '').trim()
+  if (script && !isGenericScript(script)) return script
+  for (const word of (job.command ?? '').split(/\s+/)) {
+    const file = word.replace(/^["']+|["']+$/g, '').split(/[\\/]/).pop() ?? ''
+    if (!file.startsWith('-') && /\.[A-Za-z0-9]+$/.test(file) && !isGenericScript(file)) return file
+  }
+  return ''
+}
+
 /** A job started by a background agent (named like it, or started by one of its commands) joins the agent's bar. */
 function linkToAgent(m: Model, job: Task) {
   if (job.owner) return
@@ -1592,8 +1640,8 @@ function linkToAgent(m: Model, job: Task) {
   for (const agent of m.tasks) {
     if (agent.kind !== 'agent' || isFinal(agent)) continue
     const isNamed = isNamedLike(mine, taskWords(agent.name))
-    const script = job.script ?? ''
-    const isStartedByIt = (agent.commands ?? []).some(command => command.includes(job.name) || (!!script && script !== 'progress.py' && !isGenericScript(script) && command.includes(script)))
+    const script = jobScript(job)
+    const isStartedByIt = (agent.commands ?? []).some(command => command.includes(job.name) || (!!script && script !== 'progress.py' && command.includes(script)))
     if (!isNamed && !isStartedByIt) continue
     job.owner = agent.id
     if (!job.pointName) job.point = agent.point
@@ -1628,12 +1676,16 @@ function linkRedo(m: Model, job: Task, redoes: string | null, now: number, fx: E
   if (redoes && !job.pointName) job.point = old.point
 }
 
-/** A helper job started by a background command reports that command's progress. */
+/**
+ * A helper job started by a background command reports that command's progress. The command runs the job's script, or
+ * names the job (progress.py run --name "<name>"), and started before it.
+ */
 function linkToShell(m: Model, job: Task) {
-  const script = (job.script ?? '').trim()
-  if (!script || isGenericScript(script)) return
+  const script = jobScript(job)
+  const names = [`"${job.name}"`, `'${job.name}'`]
+  const isItsCommand = (command: string) => (!!script && command.includes(script)) || names.some(name => command.includes(name))
   const shell = m.tasks.find(
-    t => t.kind === 'shell' && t.state === 'running' && !t.coveredBy && (t.command ?? '').includes(script) && t.started <= job.started + 2000,
+    t => t.kind === 'shell' && t.state === 'running' && !t.coveredBy && isItsCommand(t.command ?? '') && t.started <= job.started + 2000,
   )
   if (!shell) return
   shell.coveredBy = job.id
@@ -2261,11 +2313,15 @@ export const register: Register = (on, options) => {
     if (!agentId && tool.includes('ccd_turn__')) {
       let note = ''
       if (tool.endsWith('__update_plan')) {
+        const items = Array.isArray(input.items) ? (input.items as { content?: unknown }[]) : null
+        // The list sent again with its long names summarised: renamed in place first, so it reads as the same list.
+        if (items) await mutate($, m => renameShortened(m, items))
         const before = view(await read($, model))
         const added = addedPoints(before, input)
         const rules = `${$.plugin.root}/progress/cheaper-agents.md`
         note = !isSideBySide ? '' : isNewPlan(before, input) ? parallelPlan(rules) : added.length ? addedNote(added, rules) : ''
-        const items = Array.isArray(input.items) ? (input.items as { content?: unknown }[]) : null
+        const long = items ? longNames(items) : []
+        if (long.length) note = [note, longNamesNote(long)].filter(Boolean).join('\n\n')
         await mutate($, (m, now) => {
           applyPlan(m, input, now)
           // A list Claude ticked done earlier in this same turn is still the work in hand (see isClaudeOnList).

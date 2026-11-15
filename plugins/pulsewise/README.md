@@ -47,9 +47,12 @@ To update, run `claude plugin update pulsewise@zoke` and restart the app.
 ## What it tells Claude
 
 - **Long jobs (always on).** Once per conversation, and again after every compaction, PulseWise gives Claude a short
-  instruction (about 300 tokens): any script or command expected to run longer than about half a minute reports its
+  instruction (about 350 tokens): any script or command expected to run longer than about half a minute reports its
   counts through the helper, so it gets a track that shows real progress and time left. The same instruction asks
-  Claude to keep the task list current, one point at a time.
+  Claude to keep the task list current, one point at a time, and to keep every name the bar shows (a point, a job, a
+  command, an agent) to 32 characters, summarised, so the bar and its hover boxes show it whole.
+- **Long names.** When a task list comes in with names longer than 32 characters, Claude gets a short ask (about 100
+  tokens) to send it again with them summarised. The list it sends keeps each beat's times.
 - **Nudge.** When you press Nudge, Claude gets a one-line reminder (about 30 tokens) at its next step.
 - **Side-by-side planning (on unless you turn it off).** When Claude writes a new task list, PulseWise asks it to start the points that need nothing from each other at the same time, as background agents or commands, without being asked. See Settings to turn it off.
 

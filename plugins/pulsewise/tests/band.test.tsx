@@ -1087,7 +1087,7 @@ test('an up-to-date helper in ~/.claude/progress is left alone', async ($, on) =
   expect(writes.filter(path => path.includes('/.claude/progress/') && path.endsWith('.py'))).toEqual([])
 })
 
-test('a command still running after Claude finished with every point done says it was left running', async ($, on) => {
+test('a command still running after Claude finished shows only its name and its own status, no "left running" note', async ($, on) => {
   inProject(on)
   on('tool.call', (_, e) =>
     e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1' } } : { result: {} },
@@ -1104,7 +1104,8 @@ test('a command still running after Claude finished with every point done says i
   await during.unmount()
   await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
   const after = await $.ui.mount({ ...BAND, surface: 'desktop', isWorking: false } as never)
-  expect(await drawnText(after)).toContain('left running after Claude finished')
+  expect(await drawnText(after)).toContain('Run the receiver · running')
+  expect(await drawnText(after)).not.toContain('left running')
   await after.unmount()
 })
 
@@ -1875,5 +1876,104 @@ test('a job file left saying running long ago (its script gone in a crash or a p
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
   expect(await drawnText(ui)).not.toContain('Intro frames')
+  await ui.unmount()
+})
+
+/** Two points running side by side: a retest, and a helper's point listed after it. */
+const SIDE_BY_SIDE = [
+  { content: 'Full retest, 38 suites', status: 'in_progress' },
+  { content: 'Cursor pack on every page (cursor helper)', status: 'in_progress' },
+  { content: 'Report back', status: 'pending' },
+]
+
+/** A chat with SIDE_BY_SIDE running and a background command started for its first point; returns the job folder. */
+const sideBySide = async ($: Engine, on: On, command: string) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  backgroundBash(on)
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: SIDE_BY_SIDE })
+  if (command) await $.tool.call({ tool: 'Bash', command, description: 'Run the full retest of round 4', run_in_background: true })
+  return { clock, files }
+}
+
+test('a job whose helper names only the shell that runs its script takes over the command that runs that script', async ($, on) => {
+  const { clock, files } = await sideBySide($, on, 'bash /tmp/scratch/full_retest4.sh')
+  // The script reports its own counts; the helper names the shell running it ("bash") as its script, the file after it.
+  files.set('j-bash', { mtime: 1, body: () => jobBody({ id: 'j-bash', name: 'Round 4 checks', pid: 88, heartbeat: true, ttl_ms: null, script: 'bash', argv: 'bash C:/tmp/scratch/full_retest4.sh' }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  // The counts show on the command's own point, not on the point listed after it…
+  expect(await drawnText(ui)).toContain('Full retest, 38 suites: Round 4 checks · 4 / 14')
+  // …and the command is not drawn a second time as a track with no count.
+  await ui.press({ key: 'open-p:0' })
+  expect(await drawnText(ui)).not.toContain('gives no count')
+  await ui.unmount()
+})
+
+test('a job takes over the command that names it, when its script is only an interpreter', async ($, on) => {
+  const { clock, files } = await sideBySide($, on, 'python3 ~/.claude/progress/progress.py run --name "Round 4 checks" -- npm test')
+  files.set('j-npm', { mtime: 1, body: () => jobBody({ id: 'j-npm', name: 'Round 4 checks', pid: 89, heartbeat: true, ttl_ms: null, script: 'npm', argv: 'npm test' }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('Full retest, 38 suites: Round 4 checks · 4 / 14')
+  await ui.press({ key: 'open-p:0' })
+  expect(await drawnText(ui)).not.toContain('gives no count')
+  await ui.unmount()
+})
+
+test('with two points running, a job no command reports joins the one its name fits, not just the one listed last', async ($, on) => {
+  const { clock, files } = await sideBySide($, on, '')
+  files.set('j-fit', { mtime: 1, body: () => jobBody({ id: 'j-fit', name: 'TV Mode full retest, round 4', pid: 90, heartbeat: true, ttl_ms: null, script: 'retest.mjs', argv: 'node retest.mjs' }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Full retest, 38 suites: TV Mode full retest, round 4 · 4 / 14')
+  expect(drawn).not.toContain('Cursor pack on every page (cursor helper): TV Mode')
+  await ui.unmount()
+})
+
+test('a list with names longer than 32 characters asks Claude to send it again summarised; the list sent so keeps its points', async ($, on) => {
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const long = 'Cursor pack on every page and site (cursor helper)'
+  const items = [
+    { content: 'Full retest, 38 suites', status: 'in_progress' },
+    { content: long, status: 'in_progress' },
+    { content: 'Report back', status: 'pending' },
+  ]
+  const first = await $.tool.call({ tool: PLAN, scope: 'first_task', items })
+  expect(JSON.stringify(first)).toContain('longer than 32 characters')
+  expect(JSON.stringify(first)).toContain(long)
+  expect(JSON.stringify(first)).not.toContain('Full retest, 38 suites\\"')
+  // Sent again with that name summarised: the same list, renamed in place (not a point added beside the old one, which
+  // would start its times again), so no note at all.
+  const again = await $.tool.call({ tool: PLAN, scope: 'continuation', items: items.map(item => (item.content === long ? { ...item, content: 'Cursor pack on every page' } : item)) })
+  expect(JSON.stringify(again)).not.toContain('this task list is new')
+  expect(JSON.stringify(again)).not.toContain('a point was added')
+  expect(JSON.stringify(again)).not.toContain('PulseWise (the progress bar)')
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('2. Cursor pack on every page')
+  expect(await drawnText(ui)).not.toContain('cursor helper')
+  await ui.unmount()
+})
+
+test('a job read before the command that runs it is linked to that command at its next report', async ($, on) => {
+  const { clock, files } = await sideBySide($, on, '')
+  files.set('j-early', { mtime: 1, body: () => jobBody({ id: 'j-early', name: 'Round 4 checks', pid: 91, heartbeat: true, ttl_ms: null, script: 'bash', argv: 'bash /tmp/scratch/full_retest4.sh' }) })
+  await clock.advance(1100)
+  // The command comes in only now: the bar read its job first (or a reload brought this rule in while both ran).
+  await $.tool.call({ tool: 'Bash', command: 'bash /tmp/scratch/full_retest4.sh', description: 'Run the full retest of round 4', run_in_background: true })
+  const file = files.get('j-early')
+  if (file) file.mtime = 2
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  // One piece of work, counted once: the job's counts on the command's point, the command not a second bar.
+  expect(await drawnText(ui)).toContain('Full retest, 38 suites: Round 4 checks · 4 / 14')
+  await ui.press({ key: 'open-p:0' })
+  expect(await drawnText(ui)).not.toContain('gives no count')
   await ui.unmount()
 })

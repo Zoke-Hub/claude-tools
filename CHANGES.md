@@ -3,6 +3,18 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-15 · PulseWise 1.0.0 (number unchanged)
+
+- **PulseWise:** a job's counts land on its own point. A job whose helper names only the shell or interpreter running
+  it ("bash", "python") is matched to its command by the script file it runs, or by its name in the command
+  (`progress.py run --name "..."`), so the command and its job show as one bar instead of two. With two points running
+  side by side, a job that no command reports joins the one its name fits, not just the one listed last.
+  A job first read before its command came in is linked at its next report, so the point's % counts that work once.
+- **Shorter names:** Claude is asked to keep every point, job and background description to 32 characters, summarised,
+  so the bar and its hover boxes show them whole; a list with longer names gets a note asking for it again with them
+  summarised, and the list sent so keeps its points' times. A command still running after Claude finished no longer
+  carries "left running after Claude finished" in its label.
+
 ## 2026-11-14 · Folio 1.0.0 (number unchanged)
 
 - **Folio:** a fold no longer leaves its whole folded history in the chat. The fold's message is one short line
