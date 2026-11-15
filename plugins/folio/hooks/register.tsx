@@ -221,8 +221,9 @@ export const register: Register = (on, options) => {
     })
   }
 
-  // The Custom slider's value when the pointer comes up. It came from drawn
-  // code, so it is checked before it is kept.
+  // Each stop the Custom slider posts during a drag (the panel shows the last
+  // when the pointer comes up). It came from drawn code, so it is checked
+  // before it is kept.
   on('ui.message', async ($, e, next) => {
     const done = await next(e)
     const ceiling = (e.data as { ceiling?: unknown } | null)?.ceiling

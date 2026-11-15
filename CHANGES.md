@@ -3,6 +3,15 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-15 · Folio 1.0.0 (number unchanged)
+
+- **Folio:** the Custom slider's knob is a larger disc (about 10 px, a little past the 8 px track) and sits on the
+  track's centre; before, it was smaller than the track and 1 px low. The knob travels the whole slider on a layer of
+  its own, so at the lowest or highest stop it covers that rounded end, with nothing past it. The fill is a gradient
+  fixed to the track, blue up to 500k and blending to amber at 550k, so neither rounded end changes colour during a
+  drag. After the code is reloaded the slider sets its pointer listener again, once, so the knob can't stay where it
+  was dragged while the panel keeps its old value.
+
 ## 2026-11-15 · PulseWise 1.0.0 (number unchanged)
 
 - **PulseWise:** a job's counts land on its own point. A job whose helper names only the shell or interpreter running

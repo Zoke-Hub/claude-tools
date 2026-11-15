@@ -10,7 +10,7 @@ import { compactNow, decide, FOLD_ASK, isFoldPending, isTidied, isUndoable, putB
 import { isInChat, shortTokens, textTokens } from './chunks'
 import { briefLists, keptAndFolded, keptParts, liveJoins, newestInChat, openTasksOf, summaryTokens, tokensOf, workChunks, workTokens } from './measure'
 import type { BriefLists } from './measure'
-import { CAP_PX, capSvg, drawBar, MIN_PART_COLUMNS, PART_HEIGHT, PART_PX } from './bars'
+import { drawBar, MIN_PART_COLUMNS, PART_PX } from './bars'
 import type { Tick } from './pack'
 import { alwaysLines, bytesText, filesName, filesOf, folderState, groupsOf, isPackBusy, packFolder, packName, packTitle, packUp, privateLine, privateList, scanProject, tickedBytes, tickOf, toggleGroup, writeSaveTo } from './pack'
 import { partNo, partNos, partRef } from './fold'
@@ -179,6 +179,16 @@ const BAR_INSET = 8
 const CUSTOM_HIGH = 550_000
 const SLIDER_EMPTY = DIM
 const SLIDER_CLOSED = '#333333'
+// The slider's rounded ends, under the region's free ends (6.5 px: 1 px and
+// half the 11 px knob): a half-disc as tall as the track whose tip stops 1.5
+// px in from the edge, so the knob covers it whole at the lowest or highest
+// stop, then straight to 1 px under the track, so no gap shows between them.
+const SLIDER_END_PX = 7.5
+function sliderEndSvg(color: string, side: 'left' | 'right'): string {
+  const d = side === 'left' ? 'M7.5 0H5.5A4 4 0 0 0 5.5 8H7.5Z' : 'M0 0H2A4 4 0 0 1 2 8H0Z'
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${SLIDER_END_PX}" height="8"><path d="${d}" fill="${color}"/></svg>`
+}
 
 // `isShort` draws an opened chunk's parts without their points, and `isShut`
 // every section but the chunks and FolioPack shut, to
@@ -241,7 +251,8 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
   const canSlide = hasSvg && 'Client' in elements
   const hasSlider = isCustom && canCustom && canSlide && columns >= SLIDER_MIN_COLUMNS
   const hasSteppers = isCustom && canCustom && !canSlide
-  // The slider's end: closed past what this chat can take, else open.
+  // The slider's far rounded end: closed past what this chat can take, else
+  // open. (Its start is the bars' blue, where the fill's gradient starts.)
   const sliderEnd = customTop < CUSTOM_MAX ? SLIDER_CLOSED : SLIDER_EMPTY
   const ceilingText = (
     <Text size="footnote" tabular>
@@ -384,28 +395,31 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
             ))}
           </Box>
           {/* Custom's slider sits beside the buttons, only while Custom is
-              chosen and there is room. The panel draws its rounded ends, the
-              same half-discs as the bars; the region between them draws itself. */}
+              chosen and there is room. The panel draws its two rounded ends
+              (under the region's edges); the region over them draws the track
+              and the knob, which covers an end at the lowest or highest stop.
+              The ends' colours never change during a drag (the panel redraws
+              only when the pointer comes up), so neither depends on the
+              value. The app loads ./slider.tsx again only when the plugin
+              reloads, which a change to this file does; a change to the
+              slider alone shows after the next reload or a restart. */}
           {hasSlider && (
             <Box flexDirection="row" alignItems="center" gap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
-              <Box flexDirection="row" alignItems="center" flexGrow={1} flexShrink={1} minWidth={0} height={1}>
-                {/* The ends never shrink, and the region takes only the room left:
-                    a region that pushes against them squeezes them away. */}
-                <Box flexShrink={0}>
-                  <elements.Svg source={capSvg(settings.ceiling >= CUSTOM_HIGH ? HIGH : FULL, 'left')} alt="start" width={CAP_PX} height={PART_PX} />
+              <Box key="folio-slider-ends" position="relative" flexDirection="row" alignItems="center" flexGrow={1} flexShrink={1} minWidth={0} height={1}>
+                <Box position="absolute" top={0} left={0} height={1} flexDirection="column" justifyContent="center">
+                  <elements.Svg source={sliderEndSvg(FULL, 'left')} alt="start" width={SLIDER_END_PX} height={PART_PX} />
                 </Box>
-                {/* A strip of the track's colour sits behind the region: it stops
-                    a pixel short of the end cap, and this closes that gap. */}
-                <Box flexDirection="row" alignItems="center" flexGrow={1} flexShrink={1} width={0} minWidth={0} height={PART_HEIGHT} backgroundColor={sliderEnd}>
+                <Box position="absolute" top={0} right={0} height={1} flexDirection="column" justifyContent="center">
+                  <elements.Svg source={sliderEndSvg(sliderEnd, 'right')} alt="end" width={SLIDER_END_PX} height={PART_PX} />
+                </Box>
+                {/* Positioned too, and after the ends, so the region is drawn over them. */}
+                <Box position="relative" flexGrow={1} flexShrink={1} width={0} minWidth={0} height={1}>
                   <elements.Client
                     key="folio-custom-slider"
                     module="./slider.tsx"
                     props={{ value: settings.ceiling, min: CUSTOM_MIN, max: CUSTOM_MAX, top: customTop, step: CUSTOM_STEP, highAt: CUSTOM_HIGH, colors: { fill: FULL, high: HIGH, empty: SLIDER_EMPTY, closed: SLIDER_CLOSED, thumb: LIGHT } }}
                     width="100%"
                   />
-                </Box>
-                <Box flexShrink={0}>
-                  <elements.Svg source={capSvg(sliderEnd, 'right')} alt="end" width={CAP_PX} height={PART_PX} />
                 </Box>
               </Box>
               {columns >= VALUE_MIN_COLUMNS && <Box flexShrink={0}>{ceilingText}</Box>}

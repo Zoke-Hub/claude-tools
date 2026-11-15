@@ -32,11 +32,11 @@ export type BarMark = { key: string; mark: true; wide?: boolean }
 // so the caps and the box are the same height. The row's height is set, so
 // the caps never decide it. A cap changes only with its colour, so a part
 // resizing never redraws a picture.
-export const PART_HEIGHT = '40%'
+const PART_HEIGHT = '40%'
 // The strip's height in pixels at 40% of a line (measured in the app), so
 // each cap is a half-disc exactly as tall as the box between them.
 export const PART_PX = 8
-export const CAP_PX = PART_PX / 2
+const CAP_PX = PART_PX / 2
 // The narrowest a part may be, in cells: its two ends and a small gap, so a
 // thin part never vanishes and the bar never leaves its box.
 export const MIN_PART_COLUMNS = 2
@@ -44,7 +44,7 @@ export const MIN_PART_COLUMNS = 2
 // Kept short: every part draws two, and the panel's whole drawing must stay
 // small for the app to take it.
 // A half-disc as tall as the strip, its flat side against the box.
-export function capSvg(color: string, side: 'left' | 'right'): string {
+function capSvg(color: string, side: 'left' | 'right'): string {
   const d = side === 'left' ? `M${CAP_PX} 0A${CAP_PX} ${CAP_PX} 0 0 0 ${CAP_PX} ${PART_PX}Z` : `M0 0A${CAP_PX} ${CAP_PX} 0 0 1 0 ${PART_PX}Z`
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CAP_PX}" height="${PART_PX}"><path d="${d}" fill="${color}"/></svg>`
