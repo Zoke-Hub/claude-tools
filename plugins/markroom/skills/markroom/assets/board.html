@@ -5,6 +5,10 @@ Claude: on someone else's computer, fix only what stops this working (a path, a 
 <title>__TITLE__</title>
 <meta name="author" content="Zoke">
 <meta name="generator" content="MarkRoom by Zoke">
+<!-- The page's version. Claude reads it from a board's published copy to choose the form of the links it sends:
+     1 (no stamp, no #open- handling): plain #<file id> only; 2 (no stamp): #open-<file id> links too;
+     3: a plain #<file id> opens a live round and wins over a newer round, as #open- does. -->
+<meta name="markroom-page" content="3">
 <meta name="description" content="MarkRoom — your review room: mark it, note it, and Claude changes it.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -773,7 +777,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   vid.addEventListener("loadedmetadata", () => { if (pendingSeek && VID()) applySeek(); });
   // ---------- your place, kept in this browser ----------
   // The Claude app reloads the board when you come back to its chat, and that reload doesn't keep the page's #<file id>
-  // anchor (it may bring back an old #open-<id> link instead). So each viewer's browser remembers the file they were on and,
+  // anchor (it may bring back an old link instead). So each viewer's browser remembers the file they were on and,
   // for each file, its zoom and spot and a video's moment: a reload or a return to the chat opens where they left off.
   const PLACE_KEY = LOCAL_KEY + ":place";
   const place = (() => { try { const p = JSON.parse(localStorage.getItem(PLACE_KEY) || "null"); if (p && typeof p === "object") return p; } catch (_) {} return {}; })();
@@ -2606,18 +2610,22 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     $(".notes-head p").textContent = "A saved copy of this board's marks and notes. It is read-only: pan, zoom and click any number to read its note.";
   }
   // A link sent to open one file names it as #open-<file id> (claude.ai passes an anchor of letters, digits and hyphens
-  // only); the page's own #<file id> keeps your place.
+  // only). Links to boards whose page came before that name it as a plain #<file id>, and older messages keep them, so a
+  // plain anchor opens its file too, unless it names the file this browser was last on: then it is the page's own anchor
+  // (the page writes one as files open; a reload in a browser brings it back), which keeps your place.
   function linkedFile(hash) { const m = /^open-([a-z0-9-]+)$/.exec(hash || ""); return m ? m[1] : ""; }
   // The file an anchor names (a link's or the page's own), among IMAGES or among rounds just arrived.
   function anchored(hash, list) { const id = linkedFile(hash) || hash; return id ? (list || IMAGES).find((i) => i.id === id) : undefined; }
   const START_HASH = location.hash.slice(1);                  // a live round in the link arrives later, from the database
-  // A link opens its file once in each browser: the Claude app brings the same #open-<id> back whenever it reloads the board
+  // A link opens its file once in each browser: the Claude app brings the same link back whenever it reloads the board
   // (coming back to the chat), and that reload is a plain visit, which goes back to where the viewer left off.
   const LINK_KEY = LOCAL_KEY + ":link";
   let lastLink = null; try { lastLink = localStorage.getItem(LINK_KEY); } catch (_) {}
-  const isLink = !!linkedFile(START_HASH), newLink = isLink && (RO || START_HASH !== lastLink), fromAnchor = anchored(START_HASH);
-  const fromLink = newLink ? fromAnchor : undefined, ownAnchor = isLink ? undefined : fromAnchor;
-  const noteLink = (h) => { if (linkedFile(h) && !RO) try { localStorage.setItem(LINK_KEY, h); } catch (_) {} };
+  // (A saved copy keeps no place, so any anchor in it is a link.)
+  const isLink = !!START_HASH && (!!linkedFile(START_HASH) || RO || START_HASH !== place.id);
+  const newLink = isLink && (RO || START_HASH !== lastLink), fromAnchor = anchored(START_HASH);
+  const fromLink = newLink ? fromAnchor : undefined;
+  const noteLink = (h) => { if (h && !RO) try { localStorage.setItem(LINK_KEY, h); } catch (_) {} };
   if (newLink) noteLink(START_HASH);
   measure();
   new ResizeObserver(() => {
@@ -2629,15 +2637,15 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // A new link to one file opens that file, whatever else is new; a newer round it passes over still opens on the next plain
   // visit. Otherwise a new round since this viewer last opened the board opens on that round, whatever the anchor says
   // (a republish reloads the page with the old round's anchor), with the notice and Back to where they were. Otherwise the
-  // page's own anchor (a plain reload in a browser), else the place this browser kept, opens as it was left: the same
-  // zoom and spot, a video at the same moment, paused. A kept live round opens when the rounds arrive (onRounds).
+  // place this browser kept (which the page's own anchor names) opens as it was left: the same zoom and spot, a video at
+  // the same moment, paused. A kept live round opens when the rounds arrive (onRounds).
   let seen = null; try { seen = localStorage.getItem(SEEN_KEY); } catch (_) {}
   const fresh = !RO && !!NEWEST && seen !== NEWEST.id;
   try { if (NEWEST && !RO && (!fromLink || fromLink === NEWEST)) localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {}
   const keptFile = !RO && place.id ? IMAGES.find((i) => i.id === place.id) : undefined;
-  if (!RO && place.id && !keptFile && !fromLink && !fresh && !ownAnchor) placeWait = place.id;
-  const startAt = fromLink || (fresh ? NEWEST : (ownAnchor || keptFile || cur));
-  const keptStart = fromLink ? undefined : fresh ? keptFile : startAt === keptFile || startAt === ownAnchor ? startAt : undefined;
+  if (!RO && place.id && !keptFile && !fromLink && !fresh) placeWait = place.id;
+  const startAt = fromLink || (fresh ? NEWEST : (keptFile || cur));
+  const keptStart = fromLink ? undefined : fresh ? keptFile : startAt === keptFile ? startAt : undefined;
   const openAt = fresh && keptStart ? keptStart : startAt;    // the file opened first (a newer round follows with landOn)
   showImage(openAt, fromLink ? undefined : keptPlace(openAt));
   if (fresh && keptStart && keptStart !== NEWEST) landOn(NEWEST);

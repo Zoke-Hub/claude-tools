@@ -14,6 +14,12 @@
 //                     collection, so open views pick it up live and nobody is moved off what they are doing.
 //   --asset <round id>=<asset id>[,<poster asset id>]   step 2 of --live: records the uploaded asset ids, writes
 //                     <board dir>/live/<round id>.json (the `rounds` doc to set) and bakes the round into index.html.
+//   --link <file id>  prints the link that opens that file, in the form the board's published page reads: the board's
+//                     url with #open-<file id> (page 2 and later), or with #<file id> (page 1, before #open- links).
+//   --published [<saved page>]   records which page the published board runs (board.json "page"), for --link: with no
+//                     file, the index.html just published (run it right after each publish); with one, a copy of the
+//                     published page saved by the Artifact tool's read (url, path "index.html"), for a board that has
+//                     no "page" yet.
 //
 // Images and videos can share one board (each is a tab). A video (.mp4 .mov .m4v .webm .mkv) is remuxed with
 // faststart, or re-encoded to H.264 (max 1920 px wide, CRF 23 -> 26 -> 29 -> 32) until it fits the 15 MB publish
@@ -38,7 +44,7 @@ const MAX_SIDE = 16000;                 // browsers draw bigger images unreliabl
 
 // ---------- args ----------
 const args = process.argv.slice(2);
-const opt = { out: null, title: null, subtitle: null, key: null, append: false, group: null, live: false, assets: [], images: [] };
+const opt = { out: null, title: null, subtitle: null, key: null, append: false, group: null, live: false, assets: [], images: [], link: null, published: null };
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--out") opt.out = args[++i];
@@ -49,11 +55,49 @@ for (let i = 0; i < args.length; i++) {
   else if (a === "--group") opt.group = args[++i];
   else if (a === "--live") opt.live = true;
   else if (a === "--asset") opt.assets.push(args[++i]);
+  else if (a === "--link") opt.link = args[++i];
+  else if (a === "--published") opt.published = args[i + 1] && !args[i + 1].startsWith("--") ? args[++i] : true;
   else if (a === "-h" || a === "--help") {   // the header comment: every line before the first import
     const lines = fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
     console.log(lines.slice(1, lines.findIndex((l) => l.startsWith("import "))).join("\n")); process.exit(0);
   }
   else opt.images.push(a);
+}
+// ---------- links: which page the published board runs, and the link form it reads ----------
+// A page's version: its markroom-page stamp, else 2 when it reads #open- links, else 1; null when it isn't a MarkRoom page.
+function pageOf(html) {
+  if (!html.includes('<meta name="generator" content="MarkRoom')) return null;
+  const m = /<meta name="markroom-page" content="(\d+)">/.exec(html);
+  return m ? +m[1] : html.includes("function linkedFile(") ? 2 : 1;
+}
+if (opt.link || opt.published) {
+  const file = opt.out && path.join(path.resolve(opt.out), "board.json");
+  if (!file || !fs.existsSync(file)) { console.error("--link and --published need --out <board dir> (its board.json)."); process.exit(1); }
+  const b = JSON.parse(fs.readFileSync(file, "utf8")), save = () => fs.writeFileSync(file, JSON.stringify(b, null, 2) + "\n");
+  if (opt.published) {
+    const src = opt.published === true ? path.join(path.dirname(file), "index.html") : path.resolve(opt.published);
+    const page = fs.existsSync(src) ? pageOf(fs.readFileSync(src, "utf8")) : null;
+    if (page == null) { console.error(`${src} isn't a MarkRoom page.`); process.exit(1); }
+    b.page = page; save();
+    console.log(`Recorded: the published board runs MarkRoom page ${page}, so its links end in ${page >= 2 ? "#open-<file id>" : "#<file id>"}.`);
+  }
+  if (opt.link) {
+    if (!b.url) { console.error("board.json has no url: publish the board first."); process.exit(1); }
+    if (!b.images.some((im) => im.id === opt.link)) { console.error(`No file with id ${opt.link} on this board (board.json).`); process.exit(1); }
+    if (b.page == null) {
+      console.error(`board.json doesn't say which page the published board runs. Read it once with the Artifact tool (action "read", url ${b.url},\npath "index.html"), then: node "${fileURLToPath(import.meta.url)}" --out "${path.dirname(file)}" --published <the saved file>`);
+      process.exit(2);
+    }
+    console.log(b.url + (b.page >= 2 ? "#open-" : "#") + opt.link);
+    if (b.page < 2 && !b.oldPageTold) {
+      console.log("\nThis board's published page came before #open- links (page 1). The plain link above opens a live round, but a\n"
+        + "file baked into the page only once the viewer has seen the newest round. Tell the user once, in this message, that\n"
+        + "one republish brings the board's page up to date (build_board.mjs --append --out <board dir>, publish, then\n"
+        + "--published), and republish only on their OK: it brings the board to the front of their screen.");
+      b.oldPageTold = new Date().toISOString(); save();
+    }
+  }
+  process.exit(0);
 }
 // --append with no files re-renders index.html from the current template (after a template update)
 if (opt.assets.length) opt.append = true;
@@ -261,3 +305,4 @@ console.log("  files: " + JSON.stringify(files));
 console.log(board.url
   ? `  url: ${board.url}  (redeploy: same file_path; pass url from another conversation; omit icon)\n  capabilities: ${CAPS}  (pass the full set on EVERY publish: a board missing "comments" can't send to Claude)`
   : `  capabilities: ${CAPS}\n  icon: "pencil"\nThen save the artifact URL into board.json ("url") so later rounds reuse it.`);
+console.log(`Right after it is published, record the page it runs (for the links: --link <file id>):\n  node "${fileURLToPath(import.meta.url)}" --out "${out}" --published`);

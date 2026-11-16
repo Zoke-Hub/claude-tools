@@ -3,6 +3,16 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-17 · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom:** a link Claude sends opens the file it names on every board, whatever page the board was published
+  with. A board only gets new page code from a republish, and pages from before `#open-<file id>` links opened the
+  first tab for them. The page now carries its version (`markroom-page`), `build_board.mjs --published` records
+  which one a board's published copy runs, and `--link <file id>` prints the link in the form that page reads: the
+  plain `#<file id>` for an older page (with a one-time note that a republish would update it), else `#open-`.
+  The current page also opens a plain `#<file id>`, a live round included, so links in older messages keep
+  working after a republish; the page's own anchor still keeps your place.
+
 ## 2026-11-15 · Folio 1.0.0 (number unchanged)
 
 - **Folio:** the Custom slider's knob is a larger disc (about 10 px, a little past the 8 px track) and sits on the
