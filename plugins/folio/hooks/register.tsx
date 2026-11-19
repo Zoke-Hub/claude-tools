@@ -9,6 +9,7 @@ import { shortTokens } from './chunks'
 import { refreshContext, setDueTokens, workTokens } from './measure'
 import { FILES_PREFIX, IMPORT_DESCRIPTION, IMPORT_SCHEMA, importPack, isPackBusy, notePackTurn, PACK_PREFIX, packTurnDone, resetPack } from './pack'
 import { HISTORY_BLOCK, RECALL_TOOL } from './fold'
+import { currentLayout, LAYOUT_BLOCK, readLayout } from './layout'
 import { drawPanel, resetPanel, worthALook } from './panel'
 import { RECALL_BLOCK, RECALL_DESCRIPTION, RECALL_SCHEMA, recall, resetRecall } from './recall'
 import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, openStore, setSettings, settingsOf } from './store'
@@ -97,6 +98,8 @@ export const register: Register = (on, options) => {
     await $.tool.register({ name: 'import_pack', description: IMPORT_DESCRIPTION, inputSchema: IMPORT_SCHEMA, isDeferred: true })
     await ensureSession($)
     await change($, v => ({ ...v, cwd: e.cwd }))
+    // Where this project keeps its files, for the note the first message carries.
+    if (options.projectLayout !== false) readLayout($, e.cwd)
     later($, async () => {
       await ensureSession($)
       await refreshContext($).catch(() => {})
@@ -208,7 +211,12 @@ export const register: Register = (on, options) => {
       },
     )
 
-    return next({ ...e, blocks: [...e.blocks, RECALL_BLOCK, ...(history === null ? [] : [{ name: HISTORY_BLOCK, text: history }])] })
+    const layout = options.projectLayout === false ? '' : await currentLayout($).catch(() => '')
+
+    return next({
+      ...e,
+      blocks: [...e.blocks, RECALL_BLOCK, ...(layout === '' ? [] : [{ name: LAYOUT_BLOCK, text: layout }]), ...(history === null ? [] : [{ name: HISTORY_BLOCK, text: history }])],
+    })
   })
 
   // A long shell output reaches Claude as its start, its end and a note on how

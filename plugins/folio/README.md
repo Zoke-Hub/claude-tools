@@ -39,6 +39,14 @@ original stays on your computer word for word, and Claude can bring any of it ba
 - **FolioPack.** Packs this chat or the whole project into one folder and zip: the summaries, the brief, the outline
   and the originals, plus any files you tick. Use it to carry the work to a new chat or another computer. A chat with
   Folio opens a pack with its `import_pack` tool; without Folio, the pack's `START-HERE.md` tells Claude how to read it.
+- **Where new files go.** As a chat starts, Folio reads where the project already keeps each kind of file (renders,
+  editing and design projects, references, sound) and tells Claude in a short note (about 150 tokens) to save new
+  files of each kind there. Folders that differ in one name only read as one place: `segments/A16/renders` and
+  `segments/A19/renders` become `segments/<animation>/renders`, and renders numbered `r01_…` keep being numbered. A
+  skill's own place still wins. Auto-save, backup and scratch folders don't count. In a folder of several projects, a
+  place counts as `<project>/…` only when every project keeps that kind there. Folio never moves, renames or tidies a
+  file; a project with no clear layout, one too big to read whole, and the home folder get no note. The note is saved
+  per folder, so a chat that starts before its read is done uses the last one.
 
 ## Install
 
@@ -74,11 +82,12 @@ Open a new chat afterwards. To update: `claude plugin update folio@zoke`, then r
 In the panel: Watch or Automatic, the strategy and Custom's ceiling are kept for each chat. FolioPack's **Saves to** is
 kept for every chat.
 
-One plugin setting, **Shorten long shell outputs** (`shortenOutputs`), is on by default. Turn it off in Claude Code's
-plugin settings, or in `~/.claude/settings.json`:
+Two plugin settings, both on by default: **Shorten long shell outputs** (`shortenOutputs`) and **Tell Claude where
+this project keeps its files** (`projectLayout`). Turn one off in Claude Code's plugin settings, or in
+`~/.claude/settings.json`:
 
 ```json
-"pluginConfigs": { "folio@zoke": { "options": { "shortenOutputs": false } } }
+"pluginConfigs": { "folio@zoke": { "options": { "shortenOutputs": false, "projectLayout": false } } }
 ```
 
 ## Uninstall

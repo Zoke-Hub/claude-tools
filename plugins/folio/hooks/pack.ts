@@ -36,11 +36,11 @@ const RULE_USES = 3
 const TEXT_EXT = /\.(md|txt|json|jsonc|js|mjs|cjs|ts|tsx|jsx|py|html|css|csv|tsv|ya?ml|toml|sh|srt|vtt|xml|svg|ini|cfg)$/i
 // Folders tools rebuild or keep for themselves, hidden folders included.
 const CACHE_DIR = /^(\..+|node_modules|venv|env|__pycache__|site-packages|dist|build)$/
-const RENDER_DIR = /^(renders?|outputs?|exports?)$/i
-const REFERENCE_DIR = /^(references?|refs?|inspiration|moodboards?)$/i
-const VIDEO_EXT = /\.(mp4|mov|webm|mkv|avi|m4v|mxf)$/i
-const AUDIO_EXT = /\.(wav|mp3|aac|m4a|aiff?|flac|ogg)$/i
-const PROJECT_EXT: Array<[RegExp, string]> = [
+export const RENDER_DIR = /^(renders?|outputs?|exports?)$/i
+export const REFERENCE_DIR = /^(references?|refs?|inspiration|moodboards?)$/i
+export const VIDEO_EXT = /\.(mp4|mov|webm|mkv|avi|m4v|mxf)$/i
+export const AUDIO_EXT = /\.(wav|mp3|aac|m4a|aiff?|flac|ogg)$/i
+export const PROJECT_EXT: Array<[RegExp, string]> = [
   [/\.aepx?$/i, 'After Effects projects'],
   [/\.prproj$/i, 'Premiere projects'],
   [/\.(psd|psb)$/i, 'Photoshop files'],
@@ -49,7 +49,7 @@ const PROJECT_EXT: Array<[RegExp, string]> = [
 ]
 
 // A file the scan found: its size, and when it last changed.
-type Found = { path: string; bytes: number; mtimeMs: number }
+export type Found = { path: string; bytes: number; mtimeMs: number }
 
 // A folder or a pattern a shell command names brings the files in it that
 // changed while the chat ran: down to one folder below it, at most this many
@@ -128,7 +128,10 @@ export function bytesText(n: number): string {
   return `${n} B`
 }
 
-async function walk($: EngineInterface, root: string): Promise<{ files: Found[]; caches: Found[] }> {
+// The project's files and cache folders, down to SCAN_DEPTH and up to SCAN_LIMIT
+// entries (`isCut` when it stopped there). Folders whose names `skip` matches
+// are not gone into.
+export async function walk($: EngineInterface, root: string, skip?: RegExp): Promise<{ files: Found[]; caches: Found[]; isCut: boolean }> {
   const files: Found[] = []
   const caches: Found[] = []
   let seen = 0
@@ -159,13 +162,13 @@ async function walk($: EngineInterface, root: string): Promise<{ files: Found[];
         }
       }
       if (kind === 'dir' && CACHE_DIR.test(entry.name)) caches.push({ path, bytes: 0, mtimeMs: 0 })
-      else if (kind === 'dir') await visit(path, depth + 1)
+      else if (kind === 'dir' && skip?.test(entry.name) !== true) await visit(path, depth + 1)
       else if (kind === 'file') files.push({ path, bytes: size, mtimeMs })
     }
   }
   await visit(root, 0)
 
-  return { files, caches }
+  return { files, caches, isCut: seen > SCAN_LIMIT }
 }
 
 const ext = (p: string) => (/\.([A-Za-z0-9]+)$/.exec(p)?.[1] ?? 'other').toUpperCase()
@@ -234,7 +237,7 @@ function folderGroup(path: string, label: string, found: Found[], root: string, 
 }
 
 // A render's round, from a name like "r13_preview_1080p.mp4" or "r4-final.mov".
-const ROUND = /^r(\d+)(?=[_\-. ])/i
+export const ROUND = /^r(\d+)(?=[_\-. ])/i
 const STILL_EXT = /\.(png|jpe?g|webp|tiff?|exr|gif)$/i
 const DATA_EXT = /\.(json|md|txt|csv|log|srt|vtt)$/i
 
@@ -288,7 +291,7 @@ const isWorkDir = (s: string) => WORK_DIR.test(s) || RENDER_DIR.test(s)
 // folder, or above the file when it sits in none, whose name isn't a working
 // folder's) and its place in it (the folders from there down to the renders
 // folder). A renders folder at the project's top is its own animation.
-function renderHome(segs: string[]): { name: string; place: string } {
+export function renderHome(segs: string[]): { name: string; place: string } {
   const at = segs.findIndex(s => RENDER_DIR.test(s))
   if (at === 0) return { name: segs[0]!, place: '' }
   const from = at > 0 ? at - 1 : segs.length - 1

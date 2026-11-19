@@ -3,6 +3,16 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-19 · Folio 1.0.0 (number unchanged)
+
+- **Folio:** where new files go. As a chat starts, Folio reads where the project already keeps renders, editing and
+  design projects, references and sound, and tells Claude in a short note to save new files of each kind there (a
+  skill's own place still wins). Folders that differ in one name only read as one place (`segments/<animation>/renders`),
+  and renders numbered by round keep their numbering. Auto-save, backup and scratch folders don't count, and in a
+  folder of several projects a place counts only when every project keeps that kind there. Nothing is moved or
+  renamed; a project with no clear layout, one too big to read whole, and the home folder get no note. A new setting,
+  `projectLayout`, turns it off.
+
 ## 2026-11-19 · PulseWise 1.0.0 (number unchanged)
 
 - **PulseWise:** a beat fills from what it is told. Claude counts its own work on a point through a new `count` tool
