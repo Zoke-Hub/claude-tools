@@ -3,8 +3,8 @@
 PulseWise — a live bar for everything Claude is doing.
 
 PulseWise draws a progress bar under the chat's task list. Each point of the list is one beat of the bar, as wide as
-the time it takes. Every background agent, command or counted script gets its own track. Other chats open in the same
-project show their own bars behind an "Other pulses" button, and clicking one takes you to that chat. The bars fill
+the time it takes. Every background agent, command or counted script gets its own track. The other chats open on this
+computer (local ones, from any project) show their own bars behind an "Other pulses" button, and clicking one takes you to that chat. The bars fill
 from real work (the task list, Claude's tool calls, background jobs and scripts' own counts), not from Claude
 remembering to update anything. It spends no Claude tokens while it runs.
 
@@ -42,19 +42,50 @@ To update, run `claude plugin update pulsewise@zoke` and restart the app.
 | readout | the line above the pulse while a beat is open: its name, status and %, with a × to close it |
 | track | a background job's bar, under "Tracks" |
 | sweep | the light block moving through a bar: work going on that has no count to measure |
-| Other pulses, Done, Nudge | the buttons under the band. Nudge asks Claude to bring the task list up to date |
+| Other pulses, Done, Nudge | the buttons under the band. Nudge asks Claude to bring the task list and its counts up to date |
+
+## How a beat fills
+
+A beat fills from what it is told, never from a guess:
+
+- **Claude's own work** fills by Claude's count: when a point starts, Claude sizes it by its pieces (files to change,
+  cases to run) and sends the count through PulseWise's `count` tool as the pieces finish, in the same message as its
+  other calls. The close-up shows it as "Claude · 2 / 5 edits". If more pieces turn up, the total grows and the fill
+  steps back a little: it stays honest. A point Claude can't size shows as moving, with no fill.
+- **Background jobs** fill by the counts their scripts report through the helper. A command and the job it starts
+  show as one bar, and a job that names its point (`--point 3`) joins that point.
+- **Servers and watchers** (a preview server, a file watcher) are not progress: they show under Tracks as "serving"
+  and never hold the bar open.
+- A point whose jobs are done but whose own work has no count stops just short of full until it is ticked.
+- Changes to the task list (points added, taken off, renamed) show at once; a point renamed in place keeps its time
+  and its count.
+- A name longer than 32 characters gets a short label for the bar, written by a small model (Haiku), once per name.
+  It is the only thing PulseWise asks a model for, and Haiku is the model it uses for anything like it.
 
 ## What it tells Claude
 
-- **Long jobs (always on).** Once per conversation, and again after every compaction, PulseWise gives Claude a short
-  instruction (about 350 tokens): any script or command expected to run longer than about half a minute reports its
-  counts through the helper, so it gets a track that shows real progress and time left. The same instruction asks
-  Claude to keep the task list current, one point at a time, and to keep every name the bar shows (a point, a job, a
-  command, an agent) to 32 characters, summarised, so the bar and its hover boxes show it whole.
-- **Long names.** When a task list comes in with names longer than 32 characters, Claude gets a short ask (about 100
-  tokens) to send it again with them summarised. The list it sends keeps each beat's times.
-- **Nudge.** When you press Nudge, Claude gets a one-line reminder (about 30 tokens) at its next step.
+- **The standing instruction (always on).** Once per conversation, and again after every compaction, PulseWise gives
+  Claude a short instruction (about 450 tokens): keep the task list current, one point at a time; count its own work
+  with the `count` tool; estimate a new list with the `estimate` tool; report any script or command expected to run
+  longer than about half a minute through the helper, naming its point.
+- **Count reminders.** A point in progress that has gone 8 of Claude's calls without a count, or a background command
+  still running 20 calls on with none, gets a one-line note at Claude's next step (about 60 tokens), at most once per
+  8 calls a point (40 a command). For background work Claude can answer that it keeps running (a server) or is done.
+- **Estimates.** When Claude writes a new task list, it is asked (about 60 tokens) for its estimate: minutes for the
+  whole list and for each point. See "The time log".
+- **Nudge.** When you press Nudge, Claude gets a one-line reminder (about 60 tokens) at its next step: the list, the
+  counts and any background work that is done or keeps running.
 - **Side-by-side planning (on unless you turn it off).** When Claude writes a new task list, PulseWise asks it to start the points that need nothing from each other at the same time, as background agents or commands, without being asked. See Settings to turn it off.
+
+## The time log
+
+Each task list that ran is written, once finished (or when a new list replaces it), as one line of
+`~/.claude/progress/eta-log.jsonl`: Claude's estimate beside the real time, for the list and for each point, with the
+time spent waiting for your replies left out, the point's count, which computer and which model. When Claude is next
+asked for an estimate, it is told how its past ones turned out (the median of real time over estimated, once three
+lists are on record), so its estimates get better. The bar doesn't show estimates or time left from them yet.
+
+To bring in the log from another computer, append its lines to this file: each line names its computer.
 
 ## The helper
 
@@ -72,14 +103,17 @@ or `done/total` lines. A Python script can `import progress` from that folder an
 
 ## Where it keeps data
 
-Everything stays in `~/.claude/progress/` on your computer. PulseWise sends nothing anywhere.
+Everything stays in `~/.claude/progress/` on your computer. The one thing PulseWise sends anywhere is a name longer
+than 32 characters, to Haiku through Claude Code's own connection, for its short label on the bar.
 
 - `jobs/`: one small status file per job. Finished ones are removed after a day.
-- `chats/`: each chat's progress, which other chats in the same project read for "Other pulses". A file nobody has
+- `chats/`: each chat's progress, which the other local chats read for "Other pulses". A file nobody has
   touched for two days is removed. `chats/.seen.json` remembers which finished chats you have already seen.
 - `history.json`: how long each step of a job took, used to size the job's next run.
+- `eta-log.jsonl`: each task list's estimates beside its real times (see "The time log").
 
-PulseWise also reads the desktop app's own record of each chat (its title, and when you last opened it).
+PulseWise also reads the desktop app's own record of each local chat (its title, when you last opened it, and whether
+it is archived). A finished chat leaves "Other pulses" once you open it, or if you were on it when it finished.
 
 ## Settings
 

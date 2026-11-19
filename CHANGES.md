@@ -3,6 +3,31 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-19 · PulseWise 1.0.0 (number unchanged)
+
+- **PulseWise:** a beat fills from what it is told. Claude counts its own work on a point through a new `count` tool
+  ("Claude · 2 / 5 edits"), and the empty "no count for Claude's own work" part is gone: an uncounted Claude part
+  never shows beside jobs, and a point whose jobs are done stops just short of full until it is ticked.
+- **PulseWise:** Claude is reminded to count a point after 8 of its calls without one, and asked about a background
+  command still running 20 calls on with no count (it keeps running, or it is done). Nudge asks for the list, the
+  counts and that background work.
+- **PulseWise:** servers and watchers stay off the pulse: a track that says "serving", never holding the bar open.
+  A command and the helper job its script starts show as one bar, and a job can name its point (`--point 3`).
+  Background work started right after Claude counts a point joins that point.
+- **PulseWise:** list changes show at once (points added, taken off, renamed); a point renamed in place keeps its
+  time and count. A long name gets a short label from Haiku instead of Claude being asked to send the list again.
+- **PulseWise:** a new list asks Claude for an estimate (an `estimate` tool), and each finished list is written to
+  `~/.claude/progress/eta-log.jsonl` with the real times, waits for the person left out; the next estimate ask says
+  how the past ones turned out. The helper is version 6 (`--point` takes the point's number).
+- **PulseWise:** Other pulses shows every local chat on this computer, from any project (a chat in another project
+  names its folder on its row). It finds the Claude app's chat records where the app from the Microsoft Store now
+  keeps them (`%LOCALAPPDATA%\Claude-Data`), so other chats' titles show again and a finished chat leaves once you
+  open it, or if you were on it when it finished, instead of staying up to two hours; an archived chat leaves at once.
+- **PulseWise:** the end of Claude's turn (wrap_up) no longer ticks every point while this chat's background work
+  still runs, so a point waiting on that work (an install after a retest) stays open. A script that starts its
+  helper jobs one after another keeps them all on its command's point, and one piece of work outside the list
+  names its own beat instead of "Other work".
+
 ## 2026-11-19 · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom:** a link to a live round now opens it when the link opens a closed board. The page used to look for the

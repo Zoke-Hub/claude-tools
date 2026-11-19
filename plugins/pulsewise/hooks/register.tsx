@@ -16,9 +16,11 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, Hook, Register, RenderChildren } from 'claude-code'
 
-import type { ChatPhase, LogEntry, Model, Point, SideChat, Task, TaskState, TaskStep } from '../types'
+import type { ChatPhase, ListInfo, LogEntry, Model, Point, SideChat, Task, TaskState, TaskStep } from '../types'
 
 type Api = Parameters<Hook<'session.start'>>[0]
+/** A tool PulseWise declares for Claude (its count, its estimate). */
+type ToolSpec = Parameters<Api['tool']['register']>[0]
 /** The app's word on each background agent, as `$.agent.list()` gives it. */
 type AgentInfo = Awaited<ReturnType<Api['agent']['list']>>[number]
 // The desktop's elements, as $.ui.resolve hands them out.
@@ -120,7 +122,7 @@ function resume(t: Task) {
  * and not a command of an agent that is no longer running (its ends go to that agent, never to this chat).
  */
 function isWorkRunning(m: Model, t: Task): boolean {
-  if (t.state !== 'running' || t.coveredBy) return false
+  if (t.state !== 'running' || t.coveredBy || t.service) return false
   if (!t.owner || t.pid !== null) return true
   return m.tasks.some(agent => agent.id === t.owner && agent.state === 'running')
 }
@@ -144,19 +146,81 @@ const OTHER = 'Other work'
 const CREDIT = 'PulseWise · by Zoke'
 
 const NUDGE =
-  'PulseWise: the person pressed Nudge, so the task list is behind. Update it now to match the real state, then tick each point as it really finishes.'
+  'PulseWise: the person pressed Nudge, so the bar is behind. Bring the task list up to the real state (tick each point as it really finishes), send mcp__pulsewise__count for each point in progress, and for background work still on the bar that is done or keeps running (a server), send it with work and finished: true or service: true.'
 // How long the Nudge button reads "Nudged ✓" after a press (in place of a toast, which the app labels in lowercase).
 const NUDGED_MS = 4000
 
-// The longest name the bar and its hover boxes show whole: a point's, a job's, a command's or an agent's.
+// The longest name the bar and its hover boxes show whole: a point's, a job's, a command's or an agent's. A longer one
+// gets a short label from a small model (shortenLong), shown on the bar in its place.
 const NAME_LIMIT = 32
 
-// Read by Claude (never shown to the person) when a list it sends has names over NAME_LIMIT: send them summarised.
-// The list sent so is the same list renamed in place (renameShortened), so its points keep their times.
-const longNamesNote = (names: string[]) => {
-  const one = names.length === 1
-  return `PulseWise (the progress bar): ${one ? "this point's name is" : "these points' names are"} longer than ${NAME_LIMIT} characters, so the bar and its hover boxes cut ${one ? 'it' : 'them'}: ${names.map(name => `"${name}"`).join(', ')}. With your next tool call, send the list again with the same points in the same order and the same statuses, ${one ? 'that name' : 'those names'} summarised to ${NAME_LIMIT} characters or fewer (the same meaning in fewer words, never cut off). The bar keeps each point's times.`
+// The small model PulseWise uses whenever it needs one (short labels): the cheapest that does the job.
+const SMALL_MODEL = 'haiku'
+// The small model is told to answer with the label alone; it can still think aloud, so the reply's last line that fits
+// is taken (cleanLabel).
+const LABEL_SYSTEM = 'You shorten progress-bar labels. Reply with the shortened label alone, on one line: no counting, no notes, no quotes.'
+// The small model overshoots a length limit: it is asked for LABEL_ASK characters, and a label up to NAME_LIMIT is taken;
+// an answer still too long is sent back once with its own length.
+const LABEL_ASK = 28
+const labelPrompt = (name: string, tooLong = '') =>
+  `Shorten this label to ${LABEL_ASK} characters or fewer (it has ${name.length}). Keep its meaning and its key words (names, numbers, codes); plain words, no full stop.${tooLong ? ` Your last answer, "${tooLong}", has ${tooLong.length}: shorter.` : ''}\n\nLabel: ${name}`
+
+// Claude's own tools: its count for a point's own work, and its estimate for a new list.
+const COUNT_TOOL = 'mcp__pulsewise__count'
+const ESTIMATE_TOOL = 'mcp__pulsewise__estimate'
+const COUNT_SPEC: ToolSpec = {
+  name: 'count',
+  description:
+    "PulseWise's bar for your own work on a task-list point. When a point starts, size it by its pieces (files to change, cases to run, pages to check) and send {point, done: 0, total, unit}; send it again as pieces finish. Send it in the same message as another call, never on its own. Raise total when more pieces turn up (the bar shows that honestly). A point that can't be sized (tracking down a cause): send {point, none: true} once. Background scripts report through the progress helper instead; for background work the bar can't follow, send {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      point: { type: 'integer', minimum: 1, description: "The point's number in the task list, from 1." },
+      work: { type: 'string', description: 'Instead of a point: a background command or agent, by its name on the bar.' },
+      service: { type: 'boolean', description: 'With work: it keeps running (a server, a watcher), so it leaves the bar.' },
+      finished: { type: 'boolean', description: 'With work: its work is done.' },
+      done: { type: 'integer', minimum: 0, description: 'Pieces finished.' },
+      total: { type: 'integer', minimum: 1, description: 'All the pieces found so far.' },
+      unit: { type: 'string', description: 'What a piece is, plural: edits, files, cases, pages.' },
+      none: { type: 'boolean', description: "True: this point can't be counted." },
+    },
+  },
+  isDeferred: false,
 }
+const ESTIMATE_SPEC: ToolSpec = {
+  name: 'estimate',
+  description:
+    "Your estimate for a new task list, sent once, in the same message as its first call: minutes for the whole list and for each point, in list order, as long as they will really take you (waits for the person left out). PulseWise logs it against the real times so later estimates get better; the bar doesn't show it yet.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      minutes: { type: 'number', exclusiveMinimum: 0, description: 'The whole list, in minutes.' },
+      points: { type: 'array', items: { type: 'number', minimum: 0 }, description: 'Each point, in minutes, in list order.' },
+    },
+    required: ['minutes'],
+  },
+  isDeferred: false,
+}
+
+// Read by Claude once per new list: its estimate, with how its past estimates on this computer turned out (etaHint).
+const estimateNote = (hint: string) =>
+  `PulseWise: a new task list. With your next call, send ${ESTIMATE_TOOL}: minutes for the whole list and for each point, as long as they will really take you (waits for the person left out).${hint ? ` ${hint}` : ''}`
+
+// Read by Claude when a point in progress has gone a while without its count, or background work runs on with none.
+const progressNote = (points: string[], work: string[]) =>
+  [
+    points.length ? `PulseWise: ${points.join('; ')}. Send ${COUNT_TOOL} with your next call (or none: true for a point that can't be counted).` : '',
+    work.length
+      ? `PulseWise: ${work.join('; ')}, so the bar can't show it moving. With your next call send ${COUNT_TOOL} {work: "<its name>"} with service: true if it keeps running (a server, a watcher: it leaves the bar) or finished: true if its work is done; real work runs through the progress helper next time.`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+// Background work with no count is asked about after this many of Claude's calls, and again after twice as many.
+const STALE_CALLS = 20
+// A point is reminded after this many of Claude's own calls without a count, and again no sooner than as many calls on:
+// measured in Claude's calls, not minutes, so one long build is never nagged about.
+const REMIND_CALLS = 8
 
 // Read by Claude (never shown to the person) when points are added to the current list: the new ones get the same check.
 // Sent only while the "sideBySide" setting is on; `rules` is the path of the bundled cheaper-agents.md.
@@ -167,19 +231,21 @@ const addedNote = (names: string[], rules: string) =>
 const parallelPlan = (rules: string) =>
   `PulseWise (the progress bar): this task list is new. Before starting it, check which open points need nothing from each other (no result, file or decision of another point) and start those side by side now, without waiting to be asked: background agents or background commands named like their points, each point marked in progress as its work starts and kept there until that work is finished and checked; join the results at a later point. A point that needs another one waits for it. Say in one line which points run side by side. A big but mechanical point may go to an agent on a cheaper model only as ${rules} allows: read it before handing one off, and never for judgement, design or words the user reads.`
 
-// Sent to Claude once per conversation (again after every compaction): how long jobs get a bar. The helper's
-// stable copy is ~/.claude/progress/progress.py, which the mod puts there from its own bundled one.
+// Sent to Claude once per conversation (again after every compaction): what the bar is told, and by what. The
+// helper's stable copy is ~/.claude/progress/progress.py, which the mod puts there from its own bundled one.
 export const LONG_JOBS_BLOCK = {
   name: 'pulsewise',
   text: [
-    'PulseWise (the progress bar under the task list) shows long jobs only when they report their counts.',
-    'Any script or command you expect to run longer than about half a minute (builds, renders, batch file or image jobs, quick inline scripts too) reports through PulseWise\'s helper, `~/.claude/progress/progress.py` (run it with `python3`; on Windows, `python`):',
-    '- a command or a tool that prints its own progress: `python3 ~/.claude/progress/progress.py run --name "<what it does>" -- <command>` (it reads ffmpeg\'s `time=`, `NN%` and `done/total` lines; a quick inline script just prints one `done/total` line per item, flushed);',
-    '- a Python script: `sys.path.insert(0, os.path.expanduser("~/.claude/progress")); import progress`, then `with progress.job(name, steps=[...]):`, `progress.step(name, done, total)`, `progress.track(items, name)`;',
-    '- step by step from a shell: `progress.py start "<name>" --steps "A,B,C"`, then `progress.py step "<name>" B 2 5`, then `progress.py finish "<name>"`.',
-    `Names: every task-list point, every job name (\`--name\`, \`start "<name>"\`) and every background command's or agent's description is ${NAME_LIMIT} characters at most, so the bar and its hover boxes show it whole. Summarise it (the same meaning in fewer words: "Cursor pack on every page", not "Cursor pack on every page and site (cursor helper)"); never cut it off.`,
-    'Each background job gets its own name. A background agent\'s brief tells it to report its steps under its own description that way, so its bar shows real steps. A redo of a job that stopped passes `--redoes "<old name>"` (in Python, `redoes=`), so its bar takes the stopped one\'s place.',
-    'Keep the task list current: mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch; points running side by side are each marked in progress the moment their own work starts. Then every beat of the bar shows its real start and finish.',
+    'PulseWise (the progress bar under the task list) shows what it is told:',
+    '- The task list: mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch (points running side by side each the moment their work starts).',
+    `- Your own work on a point: its count, through ${COUNT_TOOL} (when the point starts, then as pieces finish), and a new list's estimate, through ${ESTIMATE_TOOL}. Both ride along with your other calls.`,
+    '- Any script or command you expect to run longer than about half a minute (builds, renders, batch file or image jobs, quick inline scripts too) reports through `~/.claude/progress/progress.py` (`python3`; on Windows, `python`), with `--point <its point\'s number>`:',
+    '  - a command or tool that prints its own progress: `progress.py run --name "<what it does>" --point N -- <command>` (it reads ffmpeg\'s `time=`, `NN%` and `done/total` lines; a quick inline script prints one `done/total` line per item, flushed);',
+    '  - a Python script: `sys.path.insert(0, os.path.expanduser("~/.claude/progress")); import progress`, then `with progress.job(name, steps=[...], point="N"):`, `progress.step(name, done, total)`, `progress.track(items, name)`;',
+    '  - step by step from a shell: `progress.py start "<name>" --point N --steps "A,B,C"`, then `progress.py step "<name>" B 2 5`, then `progress.py finish "<name>"`.',
+    '- Each background job, command and agent gets its own name; a background agent\'s brief tells it to report its steps under its own description the same way. A redo of a stopped job passes `--redoes "<old name>"` (in Python, `redoes=`). Background work joins the point you last counted, so send that point\'s count in the same message that starts it.',
+    '- A server or watcher left running is not progress: it stays off the bar (or tell the count tool so, with work and service: true).',
+    `- Names (points, jobs, commands, agents) of ${NAME_LIMIT} characters or fewer read whole on the bar; a longer one is shortened there for you.`,
   ].join('\n'),
 }
 
@@ -200,6 +266,32 @@ async function installHelper($: Api) {
     const text = await $.fs.read(`${from}/${file}`).catch(() => '')
     if (text) await $.fs.write(`${to}/${file}`, String(text))
   }
+}
+
+// Claude's two tools are declared once the session binds (and again at a turn after a reload, until they are).
+let toolsReady = false
+
+async function registerTools($: Api) {
+  if (toolsReady) return
+  try {
+    await $.tool.register(COUNT_SPEC)
+    await $.tool.register(ESTIMATE_SPEC)
+    toolsReady = true
+  } catch {
+    // The session isn't bound yet: the next turn tries again.
+  }
+}
+
+/** This computer's name and the chat's model, for the time log (where a line comes from), and the log's hint. */
+async function learnMachine($: Api) {
+  machine = ((await $.env.get('COMPUTERNAME')) ?? (await $.env.get('HOSTNAME')) ?? '').trim()
+  if (!machine)
+    machine = await $.process
+      .run(['hostname'], { timeoutMs: 5000 })
+      .then(ran => ran.stdout.trim())
+      .catch(() => '')
+  modelName = await $.session.model().catch(() => '')
+  await readEtaLog($)
 }
 
 // Theme colour names: the desktop draws a box's background only from these (raw hex or rgba draws nothing).
@@ -227,6 +319,9 @@ const esc = (text: string) =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
 const copy = (m: Model): Model => JSON.parse(JSON.stringify(m)) as Model
+
+/** The name the bar shows: the short label the small model wrote for a long name (shortenLong), else the name. */
+const labelOf = (m: Model, name: string) => m.labels?.[name] ?? name
 
 function blockText(content: unknown): string {
   if (typeof content === 'string') return content
@@ -318,7 +413,7 @@ function taskStatusBare(t: Task, now: number): string {
   return `${prefix}working ${since}`
 }
 
-const pointTasks = (m: Model, index: number) => m.tasks.filter(t => t.point === index && !t.coveredBy && !t.owner)
+const pointTasks = (m: Model, index: number) => m.tasks.filter(t => t.point === index && !t.coveredBy && !t.owner && !t.service)
 
 /** The task whose progress stands for this one: an agent's newest job that counts or has steps, else itself. */
 function sourceOf(m: Model, t: Task): Task {
@@ -381,7 +476,18 @@ const isWaitingForReply = (m: Model) =>
 const heldWords = (m: Model) =>
   m.phase === 'stoppedByPerson' ? 'stopped' : isAnyWorkRunning(m) ? 'waiting on its background work' : 'waiting for your reply'
 
-/** A point's share of the time: its real time once done; while it runs, its time so far or what it is expected to take. */
+/** Claude's own counted share of a point, 0..1, or null when it sent no count (or said the point can't be counted). */
+const countFraction = (p: Point | undefined) =>
+  p?.count && !p.count.none ? Math.min(1, p.count.done / Math.max(1, p.count.total)) : null
+
+/** Claude's count for a point in words ("Claude · 2 / 5 edits"), or null without one. */
+const countWords = (p: Point | undefined) =>
+  p?.count && !p.count.none ? `Claude · ${p.count.done} / ${p.count.total}${p.count.unit ? ` ${p.count.unit}` : ''}` : null
+
+/**
+ * A point's share of the time: its real time once done; while it runs, its time so far stretched by Claude's count
+ * (once a little of it is done), else what it is expected to take.
+ */
 function pointWeight(m: Model, index: number, now: number): number {
   const p = m.points[index]
   if (!p) return averageDone(m)
@@ -389,10 +495,17 @@ function pointWeight(m: Model, index: number, now: number): number {
   const start = p.started ?? p.seenAt ?? null
   if (start === null) return expected
   const own = ownNow(m, now)
-  let end = p.ended ?? (isHeld(m) ? own : p.state === 'running' || p.seenAt != null ? Math.max(own, start + expected) : own)
+  const f = countFraction(p)
+  const isOpen = p.state === 'running' || p.seenAt != null
+  let end =
+    p.ended ??
+    (isHeld(m) ? own : isOpen && f !== null && f >= 0.03 ? Math.max(own, start + (own - start) / f) : isOpen ? Math.max(own, start + expected) : own)
   for (const t of pointTasks(m, index)) end = Math.max(end, t.started + taskWeight(t, now))
   return Math.max(1000, end - start)
 }
+
+// The most an uncounted point still open is drawn filled, its jobs all done.
+const UNCOUNTED_CAP = 0.9
 
 function pointFill(m: Model, index: number, now: number): number {
   const p = m.points[index]
@@ -400,9 +513,12 @@ function pointFill(m: Model, index: number, now: number): number {
   const tasks = pointTasks(m, index)
   const isDone = p.state === 'done' && tasks.every(t => t.state !== 'running')
   if (isDone) return 1
-  if (!tasks.length) return 0
-  // The same sum as the beat's close-up: finished jobs never fill the beat while Claude's own part is still open.
-  return overall(detailSegs(m, `p:${index}`, now)) / 100
+  if (!tasks.length) return countFraction(p) ?? 0
+  // The same sum as the beat's close-up: its jobs, and Claude's own part when it is counted. Uncounted and still open,
+  // a point stops short of full however its jobs went (it is not done until ticked), without sinking as time passes.
+  const sum = overall(detailSegs(m, `p:${index}`, now)) / 100
+  const isOwnOpen = p.state !== 'done' && countFraction(p) === null
+  return isOwnOpen ? Math.min(UNCOUNTED_CAP, sum) : sum
 }
 
 function pointStatus(m: Model, index: number, now: number): string {
@@ -415,12 +531,12 @@ function pointStatus(m: Model, index: number, now: number): string {
     return p.seenAt != null
       ? isHeld(m)
         ? `${heldWords(m)} · ${fmt(ownNow(m, now) - p.seenAt)}`
-        : `Claude working ${fmt(now - p.seenAt)} · not yet marked in progress`
+        : `${countWords(p) ?? `Claude working ${fmt(now - p.seenAt)}`} · not yet marked in progress`
       : 'not started'
   if (running.length > 1) return `${running.length} at once · ${Math.round(pointFill(m, index, now) * 100)}%`
   if (running.length === 1 && only) return `${only.name} · ${taskStatus(m, sourceOf(m, only), now)}`
   if (p.state === 'running' && isHeld(m)) return `${heldWords(m)} · ${fmt(ownNow(m, now) - (p.started ?? now))}`
-  if (p.state === 'running') return `Claude working ${fmt(now - (p.started ?? now))}`
+  if (p.state === 'running') return countWords(p) ?? `Claude working ${fmt(now - (p.started ?? now))}`
   const end = Math.max(p.ended ?? now, ...tasks.map(t => t.ended ?? now))
   return `done · ${fmt(end - (p.started ?? end))}`
 }
@@ -462,7 +578,7 @@ function taskSeg(t: Task, now: number, m: Model): Seg {
   const fraction = taskFraction(source)
   return {
     key: `t:${t.id}`,
-    name: t.name,
+    name: labelOf(m, t.name),
     weight: taskWeight(source, now),
     fill: isFinal(t) ? 1 : (fraction ?? 0),
     state: t.state === 'done' || t.state === 'failed' ? t.state : 'running',
@@ -471,7 +587,7 @@ function taskSeg(t: Task, now: number, m: Model): Seg {
   }
 }
 
-const otherTasks = (m: Model) => m.tasks.filter(t => t.point === -1 && !t.coveredBy && !t.owner)
+const otherTasks = (m: Model) => m.tasks.filter(t => t.point === -1 && !t.coveredBy && !t.owner && !t.service)
 
 /** The pulse: one beat per task-list point; without a list, one per task. */
 function mainSegs(m: Model, now: number, isWorking: boolean): Seg[] {
@@ -481,7 +597,7 @@ function mainSegs(m: Model, now: number, isWorking: boolean): Seg[] {
     const isDone = p.state === 'done' && tasks.every(t => t.state !== 'running')
     return {
       key: `p:${i}`,
-      name: p.name,
+      name: labelOf(m, p.name),
       weight: pointWeight(m, i, now),
       fill: pointFill(m, i, now),
       state: isDone ? (tasks.some(t => t.state === 'failed') ? 'failed' : 'done') : p.state === 'pending' && !tasks.length && p.seenAt == null ? 'pending' : 'running',
@@ -493,14 +609,16 @@ function mainSegs(m: Model, now: number, isWorking: boolean): Seg[] {
   const others = otherTasks(m)
   if (others.some(t => t.state === 'running')) {
     const parts = others.map(t => taskSeg(t, now, m))
+    // One piece of work outside the list is named by its own name; several are "Other work".
+    const only = parts.length === 1 ? parts[0] : undefined
     segs.push({
       key: 'p:-1',
-      name: OTHER,
+      name: only ? only.name.replace(/^Agent:\s*/, '') : OTHER,
       weight: Math.max(...parts.map(s => s.weight)),
       fill: parts.reduce((a, s) => a + s.fill, 0) / parts.length,
       state: 'running',
       stripe: parts.some(s => s.stripe),
-      status: `${parts.filter(s => s.state === 'running').length} running`,
+      status: only ? only.status : `${parts.filter(s => s.state === 'running').length} running`,
     })
   }
   return segs
@@ -536,7 +654,10 @@ function stepSegs(t: Task, now: number): Seg[] {
   }
 }
 
-/** The bar a click opens: a point's tasks (and Claude's own part), or a job's steps. */
+/**
+ * The bar a click opens: a point's tasks, and Claude's own part when it is counted (or is all the point has), or a
+ * job's steps. An uncounted Claude part beside jobs is left out: it would only sit empty and drag the beat down.
+ */
 function detailSegs(m: Model, key: string, now: number): Seg[] {
   if (key.startsWith('t:')) {
     const t = m.tasks.find(one => `t:${one.id}` === key)
@@ -547,21 +668,34 @@ function detailSegs(m: Model, key: string, now: number): Seg[] {
   const index = Number(key.slice(2))
   const tasks = index === -1 ? otherTasks(m) : pointTasks(m, index)
   const single = tasks.length === 1 ? tasks[0] : undefined
-  if (single && sourceOf(m, single).steps.length > 1) return stepSegs(sourceOf(m, single), now)
-  const segs = tasks.map(t => taskSeg(t, now, m))
   const p = m.points[index]
-  if (p) {
+  const f = countFraction(p)
+  // One job with steps of its own: its steps make the bar (beside Claude's part when counted).
+  const segs = single && sourceOf(m, single).steps.length > 1 ? stepSegs(sourceOf(m, single), now) : tasks.map(t => taskSeg(t, now, m))
+  if (p && (f !== null || !segs.length)) {
     const begun = p.started ?? p.seenAt ?? null
     const elapsed = begun !== null ? (p.ended ?? ownNow(m, now)) - begun : 0
     const isStill = isHeld(m) && p.state !== 'done' && begun !== null
+    const isOpen = p.state === 'running' || (p.state === 'pending' && p.seenAt != null)
+    const counted = countWords(p)?.replace(/^Claude · /, '')
     segs.unshift({
       key: `c:${index}`,
       name: 'Claude',
-      weight: Math.max(1000, p.state === 'pending' && p.seenAt == null ? expectedMs(m, p.name) : elapsed),
-      fill: p.state === 'done' ? 1 : 0,
-      state: p.state === 'pending' && p.seenAt != null ? 'running' : p.state,
-      stripe: !isStill && (p.state === 'running' || (p.state === 'pending' && p.seenAt != null)),
-      status: p.state === 'done' ? `done · ${fmt(elapsed)}` : isStill ? `${heldWords(m)} · ${fmt(elapsed)}` : p.state === 'running' ? (isWaitingOnPerson(m) ? 'waiting for your answer' : `working ${fmt(elapsed)} · no count for Claude's own work`) : 'not started',
+      weight: Math.max(1000, p.state === 'pending' && p.seenAt == null ? expectedMs(m, p.name) : f !== null && f >= 0.03 && isOpen && !isStill ? elapsed / f : elapsed),
+      fill: p.state === 'done' ? 1 : (f ?? 0),
+      state: isOpen ? 'running' : p.state,
+      // Uncounted work shows as moving; counted work fills instead.
+      stripe: !isStill && isOpen && f === null,
+      status:
+        p.state === 'done'
+          ? `done · ${fmt(elapsed)}`
+          : isStill
+            ? `${heldWords(m)} · ${fmt(elapsed)}`
+            : isOpen
+              ? isWaitingOnPerson(m)
+                ? 'waiting for your answer'
+                : (counted ?? `working ${fmt(elapsed)}`)
+              : 'not started',
     })
   }
   return segs
@@ -588,7 +722,7 @@ function isOwnVisible(m: Model, now: number): boolean {
   return isBusy(m) || (m.finishedAt !== null && now - m.finishedAt < LINGER_MS)
 }
 
-/** The band shows for this chat's own work, or while another chat in the project still has something to show. */
+/** The band shows for this chat's own work, or while another local chat still has something to show. */
 const isVisible = (m: Model, now: number) => isOwnVisible(m, now) || m.side.length > 0
 
 /** Claude's newest action still running, if any. */
@@ -648,7 +782,7 @@ function laneRows(m: Model, now: number): Lane[] {
       let segs = source.steps.length > 1 ? stepSegs(source, now) : [taskSeg(t, now, m)]
       // Ended: full, green or red. Quiet (silent, between turns): as far as it got, nothing moving.
       if (isEnded) segs = segs.map(seg => ({ ...seg, fill: 1, state: t.state === 'failed' ? 'failed' : 'done', stripe: false }))
-      else if (!isBusy) segs = segs.map(seg => ({ ...seg, stripe: false }))
+      else if (!isBusy || t.service) segs = segs.map(seg => ({ ...seg, stripe: false }))
       const fraction = taskFraction(source)
       const elapsed = fmt((t.ended ?? t.pausedAt ?? now) - t.started)
       const left = isBusy ? taskLeft(source, now) : null
@@ -666,8 +800,8 @@ function laneRows(m: Model, now: number): Lane[] {
       // The time left shows on the right, so the line under the bar leaves it out.
       const what = !isBusy ? taskStatusBare(t, now) : source !== t ? taskStatus(m, source, now, false) : t.kind === 'agent' ? 'working, no steps reported' : taskStatus(m, t, now, false)
       const forPoint = t.point >= 0 && m.points[t.point] ? `point ${t.point + 1} · ` : ''
-      const line = isEnded ? `${forPoint}${t.state === 'failed' ? 'stopped' : 'done'} · ${elapsed}` : `${forPoint}${what}`
-      return { key: `l:${t.id}`, title: t.name.replace(/^Agent:\s*/, ''), kind: t.kind === 'agent' ? 'agent' : undefined, right, isBusy, segs, line, point: t.point, isAlert: t.state === 'silent' }
+      const line = isEnded ? `${forPoint}${t.state === 'failed' ? 'stopped' : 'done'} · ${elapsed}` : t.service ? `${forPoint}serving · running ${elapsed}` : `${forPoint}${what}`
+      return { key: `l:${t.id}`, title: labelOf(m, t.name).replace(/^Agent:\s*/, ''), kind: t.kind === 'agent' ? 'agent' : undefined, right: t.service && !isEnded ? 'serving' : right, isBusy: isBusy && !t.service, segs, line, point: t.point, isAlert: t.state === 'silent' }
     })
 }
 
@@ -875,7 +1009,10 @@ function miniBarsPicture(rows: Lane[], width: number, id: string, caption = '', 
   return { source: svgDoc(height, head + body), height }
 }
 
-/** The project's other chats: each one's title and %, a thin bar of its own points, and what runs there now. */
+/** What runs in another chat, after its project folder's name when that is not this chat's. */
+const sideLine = (chat: SideChat) => [chat.place, chat.line || (chat.busy ? 'working' : '')].filter(Boolean).join(' · ')
+
+/** The other local chats: each one's title and %, a thin bar of its own points, and what runs there now. */
 function otherChatsPicture(chats: SideChat[], width: number): { source: string; height: number } {
   const rows: Lane[] = chats.map((chat, n) => ({
     key: `x${n}`,
@@ -883,7 +1020,7 @@ function otherChatsPicture(chats: SideChat[], width: number): { source: string; 
     right: chat.needsInput ? 'needs input' : chat.busy ? mainRight(chat.pct, chat.left != null ? Math.max(0, chat.left - (Date.now() - chat.updated)) : null) : chatState(chat),
     isBusy: chat.busy,
     isAlert: !!chat.needsInput,
-    line: chat.line || (chat.busy ? 'working' : ''),
+    line: sideLine(chat),
     segs: chat.segs.map((seg, i) => ({
       key: `x${n}-${i}`,
       name: seg.name,
@@ -922,14 +1059,16 @@ let lastAgentCheck = 0
 let lastTick = 0
 let home = ''
 let appData = ''
-// This chat's project folder: other chats in the same folder show behind "Other pulses".
+let localAppData = ''
+// This chat's project folder: a chat in another folder names its folder on its row under "Other pulses".
 let project = ''
-// The chat that started this one, and this chat's title, from the app's own record of this chat.
-let parentHost = ''
+// This chat's title, from the app's own record of this chat.
 let chatTitle = ''
 let lastRecordCheck = 0
-let recordPath = ''
-let recordMtime = 0
+// The app's folder of chat records (the one holding this chat's), found once (findRecordDir), looked for at most
+// once a minute while not found (a terminal session has no record there).
+let recordDir = ''
+let lastRecordSearch = 0
 // When the person last opened this chat, from the app's record of it.
 let focusedAt: number | null = null
 // The last time PulseWise asked the app to draw the band again, and the opening of this chat it last answered.
@@ -944,9 +1083,9 @@ let answeredFocus: number | null = null
 const seenDone = new Map<string, { finished: number; at: number }>()
 let isSeenDirty = false
 let seenFileMtime = 0
-// Other chats' own records in the app (host id -> path), and when the person last opened each, read every 5 s.
-const otherRecords = new Map<string, { path: string; mtime: number; focusedAt: number | null }>()
-let lastOtherRecordCheck = 0
+// Every local chat's record in the app (host id -> what it says), read again when it changed (readRecords).
+type ChatRecord = { title: string; focusedAt: number | null; isArchived: boolean; mtime: number }
+const records = new Map<string, ChatRecord>()
 // How long a finished chat stays after it was seen in the panel; one never seen nor opened leaves after this cap.
 const SEEN_GRACE_MS = 20_000
 const UNSEEN_CAP_MS = 2 * 60 * 60_000
@@ -969,6 +1108,82 @@ type Effect =
   | { kind: 'toast'; text: string }
   | { kind: 'attention' }
   | { kind: 'closeFile'; id: string; ok: boolean; ended: number; message: string | null; seen: number }
+  | { kind: 'logList'; record: EtaRecord }
+
+/**
+ * One line of the time log (~/.claude/progress/eta-log.jsonl): a task list's estimates beside its real times, waits
+ * for the person left out. Lines from another computer (its `machine`) can be appended to the same file.
+ */
+type EtaRecord = {
+  v: 1
+  at: string
+  machine: string
+  model: string
+  chat: string
+  project: string
+  complete: boolean
+  estimate_min: number | null
+  actual_min: number
+  waited_min: number
+  points: { name: string; done: boolean; estimate_min: number | null; actual_min: number | null; count: { done: number; total: number; unit: string | null } | null; jobs: number }[]
+}
+
+// The time log, and what it says about Claude's estimates so far (read at the start and after each line written).
+const etaLog = () => `${home}/.claude/progress/eta-log.jsonl`
+let machine = ''
+let modelName = ''
+let etaHint = ''
+
+/** The middle value of some numbers. */
+const median = (values: number[]) => {
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? (sorted[mid] as number) : ((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2
+}
+
+/**
+ * What the time log says about Claude's estimates, as one line for the next estimate: real time over estimated, the
+ * median over finished lists (and points) that had both, with how many; nothing until three lists have.
+ */
+function hintFrom(lines: string[]): string {
+  const lists: number[] = []
+  const points: number[] = []
+  for (const line of lines) {
+    try {
+      const r = JSON.parse(line) as Partial<EtaRecord>
+      if (r.complete && r.estimate_min && r.actual_min) lists.push(r.actual_min / r.estimate_min)
+      for (const p of r.points ?? []) if (p.done && p.estimate_min && p.actual_min) points.push(p.actual_min / p.estimate_min)
+    } catch {
+      // A line cut short or from a newer format: skipped.
+    }
+  }
+  if (lists.length < 3) return ''
+  const ratio = (x: number) => `${Math.round(x * 100) / 100}×`
+  return `Your estimates on record so far: a list took ${ratio(median(lists))} what you estimated (median of ${lists.length})${points.length >= 5 ? `, a point ${ratio(median(points))} (median of ${points.length})` : ''}; estimate with that in mind.`
+}
+
+/** Reads the time log again (its last 400 lines) for the next estimate's hint. */
+async function readEtaLog($: Api) {
+  if (!home) return
+  try {
+    const text = String(await $.fs.read(etaLog()))
+    etaHint = hintFrom(text.split('\n').filter(Boolean).slice(-400))
+  } catch {
+    etaHint = ''
+  }
+}
+
+/** Adds a line to the time log (the file read and written whole: one short line per list). */
+async function appendEtaLog($: Api, record: EtaRecord) {
+  if (!home) return
+  try {
+    const before = (await $.fs.exists(etaLog())) ? String(await $.fs.read(etaLog())) : ''
+    await $.fs.write(etaLog(), `${before}${before && !before.endsWith('\n') ? '\n' : ''}${JSON.stringify(record)}\n`)
+    await readEtaLog($)
+  } catch {
+    // Not written this time: the list's times are lost, nothing else.
+  }
+}
 
 /**
  * Every change to the model, from the hooks and the poll alike: `fn` changes a copy of the newest model (true when it
@@ -996,6 +1211,8 @@ async function mutate($: Api, fn: (m: Model, now: number, fx: Effect[]) => boole
 
 /** After a change: the time everything finished (with the flash when that ends a long stretch), or none while work runs. */
 function settle(before: Model, m: Model, now: number, fx: Effect[]) {
+  // Every point ticked: the list goes to the time log.
+  if (m.points.length && m.points.every(p => p.state === 'done')) logList(m, now, fx)
   if (isBusy(m)) m.finishedAt = null
   else if (m.finishedAt === null && (m.points.length || m.tasks.length)) m.finishedAt = now
   if (before.finishedAt === null && m.finishedAt !== null && isLongFinish(m, now)) fx.push({ kind: 'attention' })
@@ -1015,6 +1232,7 @@ function runEffects($: Api, fx: Effect[]) {
   for (const effect of fx) {
     if (effect.kind === 'toast') void Promise.resolve($.ui.toast(effect.text)).catch(() => undefined)
     else if (effect.kind === 'attention') drawAttention($, now)
+    else if (effect.kind === 'logList') void appendEtaLog($, effect.record)
     else void closeJobFile($, effect)
   }
 }
@@ -1136,11 +1354,13 @@ function nameFit(mine: Set<string>, theirs: Set<string>): number {
 
 /**
  * The point a new background task belongs to: the unfinished point whose name fits it best (several points can run at
- * once), else the point running now. A close match ranks as before (by its share, a running point winning a tie). One
- * shared word ties a task only to a running point, or to any point through a code ("a1"), and a running point comes
- * first: a job must not land on the first waiting point that happens to share one common word with it.
+ * once), else, given the time (`at`), the point Claude is on then (claudePoint: the one it last counted or whose steps
+ * it last named, else the one running); with no time, none (-1). A close match ranks as before (by its share, a
+ * running point winning a tie). One shared word ties a task only to a running point, or to any point through a code
+ * ("a1"), and a running point comes first: a job must not land on the first waiting point that happens to share one
+ * common word with it.
  */
-function matchingPoint(m: Model, name: string, fallback = true): number {
+function matchingPoint(m: Model, name: string, at: number | null): number {
   const mine = taskWords(name)
   let best = -1
   let bestScore = 0
@@ -1156,7 +1376,7 @@ function matchingPoint(m: Model, name: string, fallback = true): number {
       bestScore = score
     }
   })
-  return best >= 0 ? best : fallback ? runningPoint(m) : -1
+  return best >= 0 ? best : at !== null ? claudePoint(m, at) : -1
 }
 
 /**
@@ -1209,9 +1429,16 @@ function claudePoint(m: Model, now: number): number {
  */
 const LATE_TICK_MS = 5000
 
-/** Whether a job's own point name (a helper job's `point`) names this point. */
-const namesPoint = (wanted: string, p: Point | undefined) =>
-  !!p && (p.name.toLowerCase().includes(wanted.toLowerCase()) || wanted.toLowerCase().includes(p.name.toLowerCase()))
+/**
+ * The point a job's own `point` names (a helper job's --point): its number in the list ("3"), else the point whose
+ * name holds it or is held in it; -1 for none.
+ */
+function pointNamed(m: Model, wanted: string): number {
+  const text = wanted.trim()
+  if (/^\d+$/.test(text)) return m.points[Number(text) - 1] ? Number(text) - 1 : -1
+  const lower = text.toLowerCase()
+  return lower ? m.points.findIndex(p => p.name.toLowerCase().includes(lower) || lower.includes(p.name.toLowerCase())) : -1
+}
 
 /**
  * Whether a job started at `started` belongs to point `to`, ticked over to at `tick`, rather than to point `from`: started
@@ -1232,7 +1459,7 @@ function isLateTicked(m: Model, name: string, started: number, from: number, to:
  */
 function pointFor(m: Model, name: string | null, at: number, job: string): number {
   if (name) {
-    const found = m.points.findIndex(p => namesPoint(name, p))
+    const found = pointNamed(m, name)
     if (found >= 0) return found
   }
   const mine = taskWords(job)
@@ -1265,7 +1492,7 @@ function pointFor(m: Model, name: string | null, at: number, job: string): numbe
 function fileLateJobs(m: Model, i: number, now: number) {
   for (const t of m.tasks) {
     if (t.state !== 'running' || t.owner || t.coveredBy) continue
-    if (t.pointName && namesPoint(t.pointName, m.points[t.point])) continue
+    if (t.pointName && t.point >= 0 && pointNamed(m, t.pointName) === t.point) continue
     if (isLateTicked(m, t.name, t.started, t.point, i, now)) t.point = i
   }
 }
@@ -1286,6 +1513,7 @@ function startPoint(m: Model, i: number, now: number) {
   p.state = 'running'
   p.started = Math.min(now, p.seenAt ?? now)
   p.ended = null
+  p.startCall = p.startCall ?? m.calls ?? 0
   fileLateJobs(m, i, now)
 }
 
@@ -1299,25 +1527,63 @@ function isSameList(old: Point[], items: { content?: unknown }[]): boolean {
   return old.some(p => p.state !== 'done') && shared * 2 >= items.length
 }
 
-/** The names in a list Claude sends that are longer than the bar shows whole. */
-const longNames = (items: { content?: unknown }[]) => items.map(item => String(item.content ?? '')).filter(name => name.length > NAME_LIMIT)
-
 /**
- * The current list sent again with its long names summarised, as longNamesNote asks: as many points, each in its place
- * either named as before or a name over NAME_LIMIT now within it, at least one of them. Those points are renamed where
- * they are, so they keep their times and their work and the list reads as the current one updated. False, and nothing
- * changed, for any other list.
+ * The point an update of the current list (isSameList: most points carry over by name) carries on: the one of the same
+ * name, else (the list as long as before) the one in the same place when that name is gone from the list and the new
+ * name is new to it: a point renamed in place, which keeps its times, its count and its estimate.
  */
-function renameShortened(m: Model, items: { content?: unknown }[]): boolean {
-  if (items.length !== m.points.length || !m.points.some(p => p.state !== 'done')) return false
-  const names = items.map(item => String(item.content ?? ''))
-  const isShortened = (p: Point, name: string) => p.name.length > NAME_LIMIT && name.length > 0 && name.length <= NAME_LIMIT
-  if (!m.points.every((p, i) => p.name === names[i] || isShortened(p, names[i] ?? ''))) return false
-  if (m.points.every((p, i) => p.name === names[i])) return false
-  m.points.forEach((p, i) => {
-    p.name = names[i] ?? p.name
-  })
-  return true
+function carriedPoint(old: Point[], names: string[], i: number): Point | undefined {
+  const name = names[i] ?? ''
+  const same = old.find(p => p.name === name)
+  if (same) return same
+  const there = old[i]
+  if (names.length !== old.length || !there || names.includes(there.name) || old.some(p => p.name === name)) return undefined
+  return there
+}
+
+/** A list's whole real time: from its first start to its last end (or now), less its waits for the person. */
+function listTimes(m: Model, now: number): { actualMs: number; waitedMs: number } {
+  const starts = m.points.map(p => p.started ?? p.seenAt).filter((at): at is number => at != null)
+  const ends = m.points.map(p => p.ended ?? (p.state === 'done' ? null : now)).filter((at): at is number => at != null)
+  if (!starts.length) return { actualMs: 0, waitedMs: m.list?.heldMs ?? 0 }
+  const span = Math.max(...ends, Math.min(...starts)) - Math.min(...starts)
+  const waitedMs = Math.min(span, m.list?.heldMs ?? 0)
+  return { actualMs: span - waitedMs, waitedMs }
+}
+
+/** The time log's line for the current list, finished or replaced: Claude's estimates beside the real times (exported for the tests). */
+export function etaRecord(m: Model, now: number): EtaRecord | null {
+  const list = m.list
+  if (!list || list.logged || !m.points.length || !m.points.some(p => p.started != null || p.seenAt != null)) return null
+  const minutes = (ms: number) => Math.round(ms / 6000) / 10
+  const { actualMs, waitedMs } = listTimes(m, now)
+  return {
+    v: 1,
+    at: new Date(now).toISOString(),
+    machine,
+    model: modelName,
+    chat: chatTitle,
+    project: project.split('/').filter(Boolean).pop() ?? '',
+    complete: m.points.every(p => p.state === 'done'),
+    estimate_min: list.estimateMin,
+    actual_min: minutes(actualMs),
+    waited_min: minutes(waitedMs),
+    points: m.points.map((p, i) => {
+      const start = p.started ?? p.seenAt ?? null
+      const end = p.ended ?? (start !== null ? now : null)
+      const ran = start !== null && end !== null ? Math.max(0, end - start - (p.heldMs ?? 0)) : null
+      const count = p.count && !p.count.none ? { done: p.count.done, total: p.count.total, unit: p.count.unit } : null
+      return { name: p.name, done: p.state === 'done', estimate_min: p.estimateMin ?? null, actual_min: ran === null ? null : minutes(ran), count, jobs: m.tasks.filter(t => t.point === i && !t.coveredBy).length }
+    }),
+  }
+}
+
+/** The current list, once it has run, written to the time log (finished, or replaced by a new list): once. */
+function logList(m: Model, now: number, fx: Effect[]) {
+  const record = etaRecord(m, now)
+  if (!record || !m.list) return
+  m.list.logged = true
+  fx.push({ kind: 'logList', record })
 }
 
 /**
@@ -1328,8 +1594,10 @@ function addedPoints(m: Model, input: Record<string, unknown>): string[] {
   if (!Array.isArray(input.items)) return []
   const items = input.items.map(item => item as { content?: unknown; status?: unknown })
   if (!isSameList(m.points, items)) return []
-  const open = items.filter(item => item.status !== 'completed').map(item => String(item.content ?? ''))
-  const added = open.filter(name => !m.points.some(p => p.name === name))
+  // A point renamed in place carries on (carriedPoint): only a point new to the list is added.
+  const names = items.map(item => String(item.content ?? ''))
+  const open = items.filter(item => item.status !== 'completed')
+  const added = items.flatMap((item, i) => (item.status !== 'completed' && !carriedPoint(m.points, names, i) ? [names[i] ?? ''] : []))
   const isOtherWorkOpen = open.length > added.length || m.tasks.some(t => t.state === 'running')
   return isOtherWorkOpen ? added : []
 }
@@ -1341,41 +1609,54 @@ function isNewPlan(m: Model, input: Record<string, unknown>): boolean {
   return !isSameList(m.points, items) && items.filter(item => item.status !== 'completed').length >= 2
 }
 
-/** Follows the app's task list (the update_plan tool) as Claude changes it. */
-function applyPlan(m: Model, input: Record<string, unknown>, now: number) {
+/** A task list just written: started now, with no estimate and no waits yet. */
+const newList = (now: number): ListInfo => ({ started: now, estimateMin: null, heldMs: 0, logged: false })
+
+/** Follows the app's task list (the update_plan tool) as Claude changes it: at once, points added, gone or renamed. */
+function applyPlan(m: Model, input: Record<string, unknown>, now: number, fx: Effect[]) {
   const items = input.items
   if (Array.isArray(items)) {
     const old = m.points
     const named = items.map(item => item as { content?: unknown; status?: unknown })
+    const names = named.map(item => String(item.content ?? ''))
     const isSame = isSameList(old, named)
     if (!isSame) {
-      // A new list: finished work and its log go; work not ended (running, or quiet) stays as "other work".
+      // A new list: the one it replaces goes to the time log if it ran; finished work and its log go; work not ended
+      // (running, or quiet) stays as "other work".
+      logList(m, now, fx)
+      m.list = newList(now)
       m.log = []
       dropTasks(m, t => !isFinal(t))
       m.tasks = m.tasks.map(t => ({ ...t, point: -1 }))
-    }
-    const points: Point[] = named.map(item => {
-      const name = String(item.content ?? '')
-      const prev = isSame ? old.find(p => p.name === name) : undefined
+    } else if (!m.list) m.list = newList(now)
+    const carried = names.map((_, i) => (isSame ? carriedPoint(old, names, i) : undefined))
+    const points: Point[] = named.map((item, i) => {
+      const prev = carried[i]
       const state = item.status === 'completed' ? 'done' : item.status === 'in_progress' ? 'running' : 'pending'
       return {
-        name,
+        name: names[i] ?? '',
         state,
-        // A point the list only now marks running or done keeps the start its matched steps gave it.
+        // A point the list only now marks running or done keeps the start its matched steps (or its count) gave it.
         started: state === 'pending' ? null : (prev?.started ?? prev?.seenAt ?? now),
         ended: state === 'done' ? (prev?.state === 'done' ? (prev.ended ?? now) : now) : null,
         seenAt: prev?.seenAt ?? null,
         activeAt: prev?.activeAt ?? null,
+        count: prev?.count ?? null,
+        estimateMin: prev?.estimateMin ?? null,
+        heldMs: prev?.heldMs ?? 0,
+        startCall: state === 'pending' ? (prev?.startCall ?? null) : (prev?.startCall ?? m.calls ?? 0),
+        remindedCall: prev?.remindedCall ?? null,
       }
     })
     if (isSame) {
+      // Each task follows its point to its new place (gone with it, it becomes other work).
       for (const t of m.tasks) {
         if (t.point < 0) continue
-        const name = old[t.point]?.name
-        t.point = points.findIndex(p => p.name === name)
+        const from = old[t.point]
+        t.point = from ? carried.findIndex(prev => prev === from) : -1
       }
       points.forEach((p, i) => {
-        const prev = old.find(one => one.name === p.name)
+        const prev = carried[i]
         if (p.state === 'done' && prev && prev.state !== 'done')
           m.log.push({ text: `${i + 1}. ${p.name} · ${fmt(now - (prev.started ?? prev.seenAt ?? now))}`, ok: true, at: now })
       })
@@ -1384,7 +1665,7 @@ function applyPlan(m: Model, input: Record<string, unknown>, now: number) {
     // Work running as "other work" (from an earlier list, or started before its point was written) joins the point
     // named like it, so it shows once, under that point.
     for (const t of m.tasks)
-      if (t.point < 0 && t.state === 'running' && !t.owner && !t.coveredBy) t.point = matchingPoint(m, t.name, false)
+      if (t.point < 0 && t.state === 'running' && !t.owner && !t.coveredBy) t.point = matchingPoint(m, t.name, null)
   }
   if (input.advance === true) {
     const current = runningPoint(m)
@@ -1396,10 +1677,113 @@ function applyPlan(m: Model, input: Record<string, unknown>, now: number) {
   if (typeof input.start === 'number') startPoint(m, input.start - 1, now)
 }
 
+/** Claude's word on background work (the count tool's `work`): it keeps running off the bar, or its work is done. */
+function applyWork(m: Model, input: Record<string, unknown>, now: number, fx: Effect[]): string {
+  const wanted = String(input.work).trim().toLowerCase()
+  const open = m.tasks.filter(one => !isFinal(one) && !one.coveredBy)
+  const t =
+    open.find(one => one.name.toLowerCase() === wanted || labelOf(m, one.name).toLowerCase() === wanted) ??
+    open.find(one => one.name.toLowerCase().includes(wanted))
+  if (!t) return `No background work named "${String(input.work)}" is running.`
+  if (input.finished === true) {
+    endTask(m, t, true, now, fx)
+    return `"${t.name}": done.`
+  }
+  if (input.service === true) {
+    t.service = true
+    return `"${t.name}": kept running, off the bar.`
+  }
+  return 'With work, send service: true (it keeps running) or finished: true (its work is done).'
+}
+
+/** Claude's count for a point (the count tool), applied; returns the short reply Claude reads. */
+function applyCount(m: Model, input: Record<string, unknown>, now: number, fx: Effect[]): string {
+  if (typeof input.work === 'string' && input.work.trim()) return applyWork(m, input, now, fx)
+  const n = Number(input.point)
+  const p = Number.isInteger(n) ? m.points[n - 1] : undefined
+  if (!p) return m.points.length ? `No point ${String(input.point)}: the list has ${m.points.length} (numbered from 1).` : 'No task list to count against yet.'
+  const call = m.calls ?? 0
+  if (input.none === true) {
+    p.activeAt = now
+    p.count = { done: 0, total: 0, unit: null, at: now, call, none: true }
+    return `Point ${n}: no count.`
+  }
+  const total = Math.round(Number(input.total))
+  if (!(total >= 1)) return 'Give total: how many pieces the point has (or none: true).'
+  p.activeAt = now
+  const done = Math.min(total, Math.max(0, Math.round(Number(input.done ?? 0)) || 0))
+  const unit = typeof input.unit === 'string' && input.unit.trim() ? input.unit.trim().slice(0, 24) : (p.count?.unit ?? null)
+  p.count = { done, total, unit, at: now, call }
+  // Counted before the list marked it: it is under way from now.
+  if (p.state === 'pending' && p.seenAt == null) p.seenAt = now
+  return `Point ${n}: ${done} / ${total}${unit ? ` ${unit}` : ''}.`
+}
+
+/** Claude's estimate for the list (the estimate tool), applied; returns the short reply Claude reads. */
+function applyEstimate(m: Model, input: Record<string, unknown>, now: number): string {
+  if (!m.points.length || !m.list) return 'No task list to estimate yet.'
+  const minutes = Number(input.minutes)
+  if (!(minutes > 0)) return 'Give minutes: your estimate for the whole list.'
+  const round = (x: number) => Math.round(x * 10) / 10
+  m.list.estimateMin = round(minutes)
+  const each = Array.isArray(input.points) ? input.points : []
+  each.forEach((v, i) => {
+    const p = m.points[i]
+    if (p && Number(v) > 0) p.estimateMin = round(Number(v))
+  })
+  return `Noted: ${round(minutes)} min for the list${each.length ? `, ${each.length} points` : ''}.`
+}
+
+/**
+ * After one of Claude's own calls: the points in progress that have gone REMIND_CALLS of its calls without a count (none
+ * sent yet, or the last that long ago), each again no sooner than REMIND_CALLS calls after its last reminder, and its
+ * background commands still running STALE_CALLS calls on with no count (again after twice as many), as one note. A
+ * point marked uncountable, or whose running job carries its bar, is left alone. Null when none is due; the ones in it
+ * are marked reminded.
+ */
+function progressReminder(m: Model): string | null {
+  const calls = m.calls ?? 0
+  const due: string[] = []
+  m.points.forEach((p, i) => {
+    if (p.state !== 'running' || p.count?.none || pointTasks(m, i).some(t => t.state === 'running')) return
+    const from = p.count?.call ?? p.startCall ?? calls
+    if (calls - from < REMIND_CALLS || (p.remindedCall != null && calls - p.remindedCall < REMIND_CALLS)) return
+    p.remindedCall = calls
+    due.push(
+      p.count
+        ? `point ${i + 1} "${p.name}" was last counted ${p.count.done} / ${p.count.total}${p.count.unit ? ` ${p.count.unit}` : ''}, ${calls - from} calls ago`
+        : `point ${i + 1} "${p.name}" has no count yet`,
+    )
+  })
+  // Background work of Claude's own still running with no count (not a service, not reported by a job).
+  const stale: string[] = []
+  for (const t of m.tasks) {
+    if (t.state !== 'running' || t.service || t.coveredBy || t.owner || (t.kind !== 'shell' && t.kind !== 'task')) continue
+    if (taskFraction(sourceOf(m, t)) !== null) continue
+    const since = calls - (t.startCall ?? calls)
+    if (since < STALE_CALLS || (t.remindedCall != null && calls - t.remindedCall < 2 * STALE_CALLS)) continue
+    t.remindedCall = calls
+    stale.push(`background command "${t.name}" has run ${since} of your calls with no count`)
+  }
+  return due.length || stale.length ? progressNote(due, stale) : null
+}
+
+/** Time spent waiting on the person (Claude's turn over, or a question open): it counts against no point or list. */
+function addHeld(m: Model, ms: number) {
+  if (!(ms > 0)) return
+  for (const p of m.points) if (p.state === 'running' || (p.state === 'pending' && p.seenAt != null)) p.heldMs = (p.heldMs ?? 0) + ms
+  if (m.list && !m.list.logged) m.list.heldMs += ms
+}
+
+// A background command that serves or watches (a preview server, a watcher): it keeps running and is not progress.
+const SERVICE_WORDS = /\b(serve|serves|serving|server|watch|watches|watcher|watching|http\.server|live-server|vite|nodemon|tail -f)\b/i
+const isServiceWork = (t: Pick<Task, 'kind' | 'name' | 'command'>) =>
+  (t.kind === 'shell' || t.kind === 'task') && SERVICE_WORDS.test(`${t.name} ${t.command ?? ''}`)
+
 function addTask(m: Model, task: Omit<Task, 'point' | 'steps' | 'actions' | 'coveredBy' | 'message' | 'ended' | 'state' | 'updated' | 'pid' | 'heartbeat' | 'script' | 'pointName'> & Partial<Task>, now: number) {
   if (m.tasks.some(t => t.id === task.id)) return
   m.tasks.push({
-    point: matchingPoint(m, task.name),
+    point: matchingPoint(m, task.name, now),
     pointName: null,
     steps: [],
     actions: 0,
@@ -1412,6 +1796,8 @@ function addTask(m: Model, task: Omit<Task, 'point' | 'steps' | 'actions' | 'cov
     heartbeat: false,
     script: null,
     ...task,
+    service: isServiceWork(task),
+    startCall: m.calls ?? 0,
   })
 }
 
@@ -1677,16 +2063,26 @@ function linkRedo(m: Model, job: Task, redoes: string | null, now: number, fx: E
 }
 
 /**
- * A helper job started by a background command reports that command's progress. The command runs the job's script, or
- * names the job (progress.py run --name "<name>"), and started before it.
+ * A helper job started by a background command reports that command's progress, so the two show as one bar: the
+ * command runs the job's script, or names the job (progress.py run --name "<name>"), and started before it. Failing
+ * that (a script that runs the helper itself), the one command of Claude's own running in the job's point (any point,
+ * for a job that has none) since before it whose name shares a telling word with the job's ("Run the full retest"
+ * and "Retest A"). A command whose job has ended takes the next one its script starts ("Retest B" after "Retest A").
  */
 function linkToShell(m: Model, job: Task) {
   const script = jobScript(job)
   const names = [`"${job.name}"`, `'${job.name}'`]
   const isItsCommand = (command: string) => (!!script && command.includes(script)) || names.some(name => command.includes(name))
-  const shell = m.tasks.find(
-    t => t.kind === 'shell' && t.state === 'running' && !t.coveredBy && isItsCommand(t.command ?? '') && t.started <= job.started + 2000,
-  )
+  const isOpenShell = (t: Task) => {
+    if (t.kind !== 'shell' || t.state !== 'running' || t.started > job.started + 2000) return false
+    if (!t.coveredBy) return true
+    const before = m.tasks.find(one => one.id === t.coveredBy)
+    return !!before && before.id !== job.id && before.kind === 'job' && isFinal(before) && before.started <= job.started
+  }
+  const named = m.tasks.find(t => isOpenShell(t) && isItsCommand(t.command ?? ''))
+  // A command that already had a job takes the next one wherever the list stands; a new link stays within the job's point.
+  const alone = m.tasks.filter(t => isOpenShell(t) && !t.owner && (job.point < 0 || t.point === job.point || !!t.coveredBy) && nameFit(taskWords(job.name), taskWords(t.name)) > 0)
+  const shell = named ?? (alone.length === 1 ? alone[0] : undefined)
   if (!shell) return
   shell.coveredBy = job.id
   if (!job.pointName) job.point = shell.point
@@ -1725,45 +2121,85 @@ async function fetchJobs($: Api): Promise<JobFile[]> {
 
 const chatsDir = () => `${home}/.claude/progress/chats`
 
-/** The app keeps a small record per chat; this chat's holds its title (and the chat that started it, if any). */
-async function readOwnRecord($: Api, now: number) {
+/**
+ * The app's own folder of chat records (one small JSON file per local chat): the one holding this chat's. The app has
+ * kept it in different places: macOS's Application Support, Windows' %APPDATA%, %LOCALAPPDATA%\\Claude-Data\\<package>
+ * for the app from the Microsoft Store, Linux's ~/.config. Empty when none holds it.
+ */
+async function findRecordDir($: Api): Promise<string> {
+  const bases = [`${home}/Library/Application Support`, appData, localAppData, `${home}/.config`].filter(Boolean)
+  const roots: string[] = []
+  for (const base of bases) {
+    roots.push(`${base}/Claude/claude-code-sessions`)
+    const packages = await $.fs.list(`${base}/Claude-Data`).catch(() => [])
+    for (const entry of packages) if (entry.kind === 'dir') roots.push(`${base}/Claude-Data/${entry.name}/claude-code-sessions`)
+  }
+  for (const root of roots) {
+    if (!(await $.fs.exists(root).catch(() => false))) continue
+    for (const account of await $.fs.list(root).catch(() => [])) {
+      if (account.kind !== 'dir') continue
+      for (const org of await $.fs.list(`${root}/${account.name}`).catch(() => [])) {
+        const dir = `${root}/${account.name}/${org.name}`
+        if (org.kind === 'dir' && (await $.fs.exists(`${dir}/${host}.json`).catch(() => false))) return dir
+      }
+    }
+  }
+  return ''
+}
+
+/**
+ * Every local chat's record in the app (this chat's too), each read again when it changed, every 5 s at most: its
+ * title, when the person last opened it, and whether it was archived. This chat's gives its own title and last opening.
+ */
+async function readRecords($: Api, now: number) {
   if (!host || !home || now - lastRecordCheck < 5000) return
   lastRecordCheck = now
+  if (!recordDir && now - lastRecordSearch >= 60_000) {
+    lastRecordSearch = now
+    recordDir = await findRecordDir($).catch(() => '')
+  }
+  if (!recordDir) return
+  let entries: { name: string; kind: string; mtimeMs: number }[] = []
   try {
-    if (!recordPath) {
-      // The app's own folder: macOS, then Windows (%APPDATA%), then Linux.
-      const roots = [`${home}/Library/Application Support/Claude`, appData && `${appData}/Claude`, `${home}/.config/Claude`]
-      let root = ''
-      for (const dir of roots) if (dir && !root && (await $.fs.exists(`${dir}/claude-code-sessions`))) root = `${dir}/claude-code-sessions`
-      if (!root) return
-      for (const account of await $.fs.list(root)) {
-        if (account.kind !== 'dir' || recordPath) continue
-        for (const org of await $.fs.list(`${root}/${account.name}`)) {
-          if (org.kind !== 'dir') continue
-          const path = `${root}/${account.name}/${org.name}/${host}.json`
-          if (await $.fs.exists(path)) {
-            recordPath = path
-            break
-          }
-        }
-      }
-      if (!recordPath) return
-    }
-    const stat = await $.fs.stat(recordPath)
-    if (stat.mtimeMs === recordMtime) return
-    recordMtime = stat.mtimeMs
-    const record = JSON.parse(await $.fs.read(recordPath)) as { title?: string; spawnedFrom?: { sessionId?: string }; lastFocusedAt?: number }
-    parentHost = record.spawnedFrom?.sessionId ?? ''
-    chatTitle = record.title ?? ''
-    focusedAt = typeof record.lastFocusedAt === 'number' ? record.lastFocusedAt : null
+    entries = await $.fs.list(recordDir)
   } catch {
-    // No record found: this chat has no title or last focus to report.
+    // The folder moved: found again at the next look.
+    recordDir = ''
+    return
+  }
+  for (const entry of entries) {
+    if (entry.kind !== 'file' || !/^local_.+\.json$/.test(entry.name)) continue
+    const id = entry.name.slice(0, -5)
+    if (records.get(id)?.mtime === entry.mtimeMs) continue
+    try {
+      const record = JSON.parse(await $.fs.read(`${recordDir}/${entry.name}`)) as { title?: string; lastFocusedAt?: number; isArchived?: boolean }
+      records.set(id, {
+        title: record.title ?? '',
+        focusedAt: typeof record.lastFocusedAt === 'number' ? record.lastFocusedAt : null,
+        isArchived: record.isArchived === true,
+        mtime: entry.mtimeMs,
+      })
+    } catch {
+      // Being written: read again next time.
+    }
+  }
+  const own = records.get(host)
+  if (own) {
+    chatTitle = own.title
+    focusedAt = own.focusedAt
   }
 }
 
-/** Writes this chat's progress where the project's other chats can read it (every 3 s at most, only on change). */
+/** Whether the person opened any chat but this one in (from, to]: by the app's records of the local chats. */
+const isOtherOpenedBetween = (id: string, from: number, to: number) =>
+  [...records].some(([other, r]) => other !== id && r.focusedAt !== null && r.focusedAt > from && r.focusedAt <= to)
+
+/** A project folder's last name ("D:\\Projects\\Claude Edits" gives "Claude Edits"). */
+const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? ''
+
+/** Writes this chat's progress where the other local chats can read it (every 3 s at most, only on change). */
 async function publish($: Api, m: Model, now: number) {
-  if (!session || !project || now - lastPublishAt < 3000) return
+  if (!session || now - lastPublishAt < 3000) return
   const isWorking = (m.actions ?? []).length > 0
   const segs = mainSegs(m, now, isWorking)
   if (!segs.length && !lastPublished) return
@@ -1775,7 +2211,6 @@ async function publish($: Api, m: Model, now: number) {
     session,
     host,
     project,
-    parent: parentHost,
     title: chatTitle,
     busy,
     pct: segs.length ? overall(segs) : 100,
@@ -1806,7 +2241,7 @@ async function publish($: Api, m: Model, now: number) {
   }
 }
 
-/** Reads the progress the project's other chats published, keeping only the ones still worth showing. */
+/** Reads the progress the other local chats published, keeping only the ones still worth showing. */
 const seenFile = () => `${chatsDir()}/.seen.json`
 
 /** The shared seen marks: which finished chats the person saw in a panel, for which finish, and when. */
@@ -1841,50 +2276,19 @@ async function writeSeen($: Api, now: number) {
   }
 }
 
-/** When the person last opened each other finished chat, from that chat's own record in the app (every 5 s at most). */
-async function readOtherRecords($: Api, chats: SideChat[], now: number) {
-  if (!home || now - lastOtherRecordCheck < 5000) return
-  lastOtherRecordCheck = now
-  for (const chat of chats) {
-    const id = chat.host ?? ''
-    if (!id || chat.busy) continue
-    try {
-      let known = otherRecords.get(id)
-      if (!known) {
-        // The record sits in the same account and org folder as this chat's own, when that one is known.
-        const near = recordPath ? `${recordPath.slice(0, recordPath.lastIndexOf('/'))}/${id}.json` : ''
-        const path = near && (await $.fs.exists(near)) ? near : ''
-        if (!path) continue
-        known = { path, mtime: 0, focusedAt: null }
-        otherRecords.set(id, known)
-      }
-      const stat = await $.fs.stat(known.path)
-      if (stat.mtimeMs === known.mtime) continue
-      known.mtime = stat.mtimeMs
-      const record = JSON.parse(await $.fs.read(known.path)) as { lastFocusedAt?: number }
-      known.focusedAt = typeof record.lastFocusedAt === 'number' ? record.lastFocusedAt : null
-    } catch {
-      // No record (another account, or removed): its own report of when it was opened still counts.
-    }
-  }
-}
-
 /**
- * The project's other chats whose files changed since the last read, parsed (null when the folder could not be read),
- * with the shared seen marks and the chats' own records in the app read fresh for applySideChats. `seen` (the model
- * as the poll began) only says which chats to look up.
+ * The other local chats whose files changed since the last read, parsed (null when the folder could not be read), with
+ * the shared seen marks read fresh for applySideChats. Every local chat on this computer, whatever its project: a chat
+ * in another project carries its folder's name (`place`). Remote and cloud chats write no file here.
  */
-async function fetchSideChats($: Api, seen: Model, now: number): Promise<SideChat[] | null> {
-  if (!project || !home) return null
+async function fetchSideChats($: Api): Promise<SideChat[] | null> {
+  if (!home) return null
   const read = await readChanged<SideChat & { project?: string }>($, chatsDir(), seenChatMtime)
   if (!read) return null
   const fresh: SideChat[] = read
-    .filter(d => d.project === project && d.session !== session)
-    .map(d => ({ session: d.session, title: d.title || 'Other chat', pct: d.pct, busy: d.busy, line: d.line, updated: d.updated, segs: d.segs ?? [], finishedAt: d.finishedAt ?? null, focusedAt: d.focusedAt ?? null, needsInput: !!d.needsInput, isStopped: !!d.isStopped, host: d.host ?? '', left: typeof d.left === 'number' && d.left > 0 ? d.left : null }))
+    .filter(d => typeof d.session === 'string' && d.session !== session)
+    .map(d => ({ session: d.session, title: d.title || records.get(d.host ?? '')?.title || 'Other chat', place: d.project && d.project !== project ? folderName(d.project) : '', pct: d.pct, busy: d.busy, line: d.line, updated: d.updated, segs: d.segs ?? [], finishedAt: d.finishedAt ?? null, focusedAt: d.focusedAt ?? null, needsInput: !!d.needsInput, isStopped: !!d.isStopped, host: d.host ?? '', left: typeof d.left === 'number' && d.left > 0 ? d.left : null }))
   await readSeen($)
-  const listed = new Map(seen.side.map(chat => [chat.session, chat]))
-  for (const chat of fresh) listed.set(chat.session, chat)
-  await readOtherRecords($, [...listed.values()], now)
   return fresh
 }
 
@@ -1894,19 +2298,26 @@ function applySideChats(m: Model, fresh: SideChat[] | null, now: number): boolea
   const kept = new Map(m.side.map(chat => [chat.session, chat]))
   let changed = fresh.length > 0
   for (const chat of fresh) kept.set(chat.session, { ...chat, listedAt: kept.get(chat.session)?.listedAt ?? now })
-  // A chat that is not working and never finished anything (idle since it started) is not shown. A finished chat
-  // leaves once the person opened it after it finished (its own record in the app says when), or a little after
-  // they saw it in the panel of any chat (unseen and unopened, after a long cap); one that stopped writing while
-  // busy leaves after 2 minutes.
+  // A chat that is not working and never finished anything (idle since it started) is not shown, nor one archived. A
+  // finished chat leaves once the person opened it after it finished, or was on it when it finished (they opened no
+  // other chat between opening it and its end), by the app's records of the local chats; or a little after they saw
+  // it in the panel of any chat; unseen and unopened, after a long cap. One that stopped writing while busy leaves
+  // after 2 minutes.
   for (const [id, chat] of kept) {
+    const record = records.get(chat.host ?? '')
+    if (record?.title && chat.title !== record.title) {
+      chat.title = record.title
+      changed = true
+    }
     const isIdle = !chat.busy && chat.finishedAt == null
     const finished = chat.finishedAt ?? chat.updated
-    const opened = Math.max(chat.focusedAt ?? 0, otherRecords.get(chat.host ?? '')?.focusedAt ?? 0)
+    const opened = Math.max(chat.focusedAt ?? 0, record?.focusedAt ?? 0)
     const isOpenedSince = !chat.busy && opened > finished
+    const isWatched = !chat.busy && !!record && opened > 0 && !isOtherOpenedBetween(chat.host ?? '', opened, finished)
     const seen = seenDone.get(id)
     const isSeen = !chat.busy && seen !== undefined && seen.finished === finished && now - seen.at > SEEN_GRACE_MS
     const isStale = chat.busy ? now - chat.updated > 120_000 : now - finished > UNSEEN_CAP_MS
-    if (isIdle || isOpenedSince || isSeen || isStale) {
+    if (isIdle || record?.isArchived || isOpenedSince || isWatched || isSeen || isStale) {
       kept.delete(id)
       changed = true
     }
@@ -2115,6 +2526,64 @@ function redraw($: Api, now: number) {
   $.ui.invalidate('ui.render')
 }
 
+// Long names out with the small model for a short label, and when a try that gave none was made (tried again later).
+const labelling = new Set<string>()
+const labelTried = new Map<string, number>()
+const LABEL_RETRY_MS = 10 * 60_000
+
+/** The small model's reply as a label: its first line, quotes and a full stop taken off; empty unless it fits. */
+/**
+ * The small model's reply as a label: its last line that fits, quotes and a full stop taken off; a line about counting
+ * ("27 characters") is never one. Empty when no line fits.
+ */
+/** A line where the small model counts its answer ("Count: 27 characters"), never an answer itself. */
+const isCountingLine = (line: string) => /\bcharacters?\b|^\(?count\b/i.test(line)
+
+export function cleanLabel(text: string): string {
+  const lines = text
+    .split('\n')
+    .map(line => line.replace(/^["'“‘\s]+|["'”’.\s]+$/g, '').trim())
+    .filter(line => line.length > 0 && line.length <= NAME_LIMIT && !isCountingLine(line))
+  return lines.at(-1) ?? ''
+}
+
+/**
+ * Every name the bar shows that is longer than it shows whole (a point's, a job's, a command's, an agent's) gets a
+ * short label from the small model, once, a few at a time; the bar shows the name cut to fit until it comes.
+ */
+function shortenLong($: Api, m: Model) {
+  const names = [...m.points.map(p => p.name), ...m.tasks.filter(t => !t.coveredBy).map(t => t.name)]
+  const now = Date.now()
+  for (const name of names) {
+    if (name.length <= NAME_LIMIT || m.labels?.[name] || labelling.has(name) || labelling.size >= 4) continue
+    if (now - (labelTried.get(name) ?? 0) < LABEL_RETRY_MS) continue
+    labelling.add(name)
+    labelTried.set(name, now)
+    void (async () => {
+      try {
+        const ask = (tooLong: string) => $.model.complete({ model: SMALL_MODEL, system: LABEL_SYSTEM, prompt: labelPrompt(name, tooLong), maxTokens: 80, effort: 'low', timeoutMs: 20_000 })
+        const first = await ask('')
+        let label = first.isAnswered ? cleanLabel(first.text) : ''
+        const firstLine = first.isAnswered ? (first.text.split('\n').map(line => line.trim()).filter(line => line && !isCountingLine(line)).at(-1) ?? '') : ''
+        if (!label && firstLine) {
+          const second = await ask(firstLine)
+          label = second.isAnswered ? cleanLabel(second.text) : ''
+        }
+        if (!label) return
+        await mutate($, model => {
+          model.labels = Object.fromEntries([...Object.entries(model.labels ?? {}).filter(([key]) => key !== name), [name, label]].slice(-200))
+          return true
+        })
+        redraw($, Date.now())
+      } catch {
+        // No label this time: the bar cuts the name to fit, as before.
+      } finally {
+        labelling.delete(name)
+      }
+    })()
+  }
+}
+
 /** What the other-chats button says: which chats are listed and whether each works, waits or is done. */
 const sideKey = (m: Model) => m.side.map(chat => `${chat.session}:${chat.busy ? (chat.needsInput ? 'wait' : 'busy') : 'done'}`).join(',')
 
@@ -2127,6 +2596,17 @@ function applyPoll(m: Model, found: PollRead, now: number, fx: Effect[]): boolea
   for (const d of found.jobs) changed = applyJobFile(m, d, now, fx) || changed
   changed = applySideChats(m, found.chats, now) || changed
   changed = pauseOverdue(m, now) || changed
+  // Work an older version of PulseWise added: sorted once (a server or watcher, and where it started in Claude's calls).
+  for (const t of m.tasks) {
+    if (t.service === undefined) {
+      t.service = isServiceWork(t)
+      changed = true
+    }
+    if (t.startCall === undefined) {
+      t.startCall = m.calls ?? 0
+      changed = true
+    }
+  }
   if (found.pids) changed = applyPids(m, found.pids, now, fx) || changed
   if (found.agents) changed = applyAgents(m, found.agents, now, fx) || changed
   if (!isVisible(m, now) && m.finishedAt !== null && !m.points.length && m.tasks.length) {
@@ -2147,9 +2627,9 @@ async function poll($: Api) {
     // (applyPoll, through mutate), so a hook's change that lands while they run (a task's end, a new agent, a ticked
     // point, the end of a turn) is never written over.
     const seen = view(await read($, model))
-    await readOwnRecord($, now)
+    await readRecords($, now)
     const jobs = await fetchJobs($)
-    const chats = await fetchSideChats($, seen, now)
+    const chats = await fetchSideChats($)
     let pids: PidCheck | null = null
     if (now - lastPidCheck >= 5000) {
       lastPidCheck = now
@@ -2171,6 +2651,7 @@ async function poll($: Api) {
     const isOpenedNow = focusedAt !== null && focusedAt !== answeredFocus
     answeredFocus = focusedAt
     if (isVisible(current, now) && (isOpenedNow || now - lastInvalidate >= 10_000)) redraw($, now)
+    shortenLong($, current)
     await publish($, current, now)
     await followOpenPoint($, current, now)
     const shouldTick = isVisible(current, now) || (current.finishedAt !== null && now - current.finishedAt < LINGER_MS + 2000)
@@ -2262,11 +2743,11 @@ export const register: Register = (on, options) => {
   home = ''
   appData = ''
   project = ''
-  parentHost = ''
   chatTitle = ''
   lastRecordCheck = 0
-  recordPath = ''
-  recordMtime = 0
+  recordDir = ''
+  lastRecordSearch = 0
+  localAppData = ''
   focusedAt = null
   lastInvalidate = 0
   lastPollAt = 0
@@ -2275,14 +2756,19 @@ export const register: Register = (on, options) => {
   seenDone.clear()
   isSeenDirty = false
   seenFileMtime = 0
-  otherRecords.clear()
-  lastOtherRecordCheck = 0
+  records.clear()
   lastPublished = ''
   lastPublishAt = 0
   followKeys.clear()
   pressCount = 0
   seenMtime.clear()
   seenChatMtime.clear()
+  toolsReady = false
+  labelling.clear()
+  labelTried.clear()
+  machine = ''
+  modelName = ''
+  etaHint = ''
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -2291,9 +2777,12 @@ export const register: Register = (on, options) => {
     // Windows sets USERPROFILE, not HOME, and writes paths with backslashes.
     home = ((await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '').replace(/\\/g, '/')
     appData = ((await $.env.get('APPDATA')) ?? '').replace(/\\/g, '/')
+    localAppData = ((await $.env.get('LOCALAPPDATA')) ?? '').replace(/\\/g, '/')
     project = await $.session.root().catch(() => '')
     jobsDir = `${home}/.claude/progress/jobs`
     void installHelper($).catch(() => undefined)
+    await registerTools($)
+    void learnMachine($).catch(() => undefined)
     $.clock.every(1000, () => {
       void poll($)
     })
@@ -2303,6 +2792,26 @@ export const register: Register = (on, options) => {
   // How long jobs get a bar, sent once per conversation whether or not side-by-side planning is on.
   on('prompt.context', async ($, e, next) => next({ ...e, blocks: [...e.blocks, LONG_JOBS_BLOCK] }))
 
+  // Claude's count for a point's own work, and its estimate for a new list: applied, and the bar drawn at once.
+  on('tool.call', { tool: COUNT_TOOL }, async ($, e) => {
+    let reply = ''
+    await mutate($, (m, now, fx) => {
+      reply = applyCount(m, e as unknown as Record<string, unknown>, now, fx)
+      return true
+    })
+    redraw($, Date.now())
+    return { result: reply }
+  }).catch(() => ({ result: 'PulseWise could not take the count this time.' }))
+
+  on('tool.call', { tool: ESTIMATE_TOOL }, async ($, e) => {
+    let reply = ''
+    await mutate($, (m, now) => {
+      reply = applyEstimate(m, e as unknown as Record<string, unknown>, now)
+      return true
+    })
+    return { result: reply }
+  }).catch(() => ({ result: 'PulseWise could not take the estimate this time.' }))
+
   on('tool.call', async ($, e, next) => {
     const input = e as unknown as Record<string, unknown>
     const tool = String(input.tool)
@@ -2310,37 +2819,49 @@ export const register: Register = (on, options) => {
     const agentId = typeof input.agentId === 'string' ? input.agentId : undefined
     const text = (key: string) => (typeof input[key] === 'string' ? (input[key] as string) : '')
 
+    // PulseWise's own tools are answered by their own hooks above.
+    if (tool.startsWith('mcp__pulsewise__')) return next(e)
+
     if (!agentId && tool.includes('ccd_turn__')) {
       let note = ''
       if (tool.endsWith('__update_plan')) {
-        const items = Array.isArray(input.items) ? (input.items as { content?: unknown }[]) : null
-        // The list sent again with its long names summarised: renamed in place first, so it reads as the same list.
-        if (items) await mutate($, m => renameShortened(m, items))
+        const items = Array.isArray(input.items) ? (input.items as { content?: unknown; status?: unknown }[]) : null
         const before = view(await read($, model))
+        const isNew = !!items && !isSameList(before.points, items)
         const added = addedPoints(before, input)
         const rules = `${$.plugin.root}/progress/cheaper-agents.md`
-        note = !isSideBySide ? '' : isNewPlan(before, input) ? parallelPlan(rules) : added.length ? addedNote(added, rules) : ''
-        const long = items ? longNames(items) : []
-        if (long.length) note = [note, longNamesNote(long)].filter(Boolean).join('\n\n')
-        await mutate($, (m, now) => {
-          applyPlan(m, input, now)
+        const parallel = !isSideBySide ? '' : isNewPlan(before, input) ? parallelPlan(rules) : added.length ? addedNote(added, rules) : ''
+        // A new list with work still to do: Claude's estimate for it, with how its past ones turned out.
+        const estimate = isNew && items.some(item => item.status !== 'completed') ? estimateNote(etaHint) : ''
+        note = [parallel, estimate].filter(Boolean).join('\n\n')
+        const { after } = await mutate($, (m, now, fx) => {
+          applyPlan(m, input, now, fx)
           // A list Claude ticked done earlier in this same turn is still the work in hand (see isClaudeOnList).
           m.listTurn = m.turn
           return true
         })
+        // The bar follows the list at once (points added, gone, renamed), with short labels on the way for long names.
+        redraw($, Date.now())
+        shortenLong($, after)
         // A new pulse starts with every beat folded: nothing opened from the list before.
-        if (items && !isSameList(before.points, items)) {
+        if (isNew) {
           followKeys.clear()
           await update($, selected, () => null)
         }
       }
-      if (tool.endsWith('__wrap_up'))
+      // wrap_up closes every turn. It ticks the open points only when nothing of this chat still runs: a turn that
+      // ends while a background job works on (a retest before an install) leaves its points open for the next turn.
+      if (tool.endsWith('__wrap_up')) {
         await mutate($, (m, now) => {
+          if (isAnyWorkRunning(m)) return false
           m.points.forEach((p, i) => endPoint(m, i, now))
           return true
         })
+        redraw($, Date.now())
+      }
       const ran = await next(e)
-      // A new list, or points added to the current one: Claude reads, after the tool's answer, which can run side by side.
+      // A new list, or points added to the current one: Claude reads, after the tool's answer, its estimate ask and
+      // which points can run side by side.
       if (!note || ran.deny !== undefined || ran.isError) return ran
       return { ...ran, context: [...(ran.context ?? []), note] }
     }
@@ -2379,11 +2900,17 @@ export const register: Register = (on, options) => {
         return true
       })
     const ran = await next(e)
+    const said: { reminder: string | null } = { reminder: null }
     await mutate($, (m, now, fx) => {
-      let changed = false
-      if ((m.actions ?? []).some(a => a.toolUseId === toolUseId)) {
+      // One more of Claude's own calls: a point in progress gone a while without its count gets a reminder.
+      m.calls = (m.calls ?? 0) + 1
+      said.reminder = progressReminder(m)
+      let changed = true
+      const action = (m.actions ?? []).find(a => a.toolUseId === toolUseId)
+      if (action) {
+        // A question to the person: the time it stood open was theirs, not the work's.
+        if (action.isWaiting) addHeld(m, now - action.started)
         m.actions = (m.actions ?? []).filter(a => a.toolUseId !== toolUseId)
-        changed = true
       }
       const result = ('result' in ran ? ran.result : undefined) as Record<string, unknown> | undefined
       const taskId =
@@ -2409,7 +2936,8 @@ export const register: Register = (on, options) => {
       }
       return changed
     })
-    return ran
+    if (!said.reminder || ran.deny !== undefined || ran.isError) return ran
+    return { ...ran, context: [...(ran.context ?? []), said.reminder] }
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {
@@ -2425,14 +2953,21 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId)
-      // Claude's turn runs (after a reply, a Stop or a background task's end): its own part moves again.
+    if (!e.agentId) {
+      // Claude's turn runs (after a reply, a Stop or a background task's end): its own part moves again. The time it
+      // waited on the person counts against no point. (Its tools, if a reload came since they were declared.)
       await mutate($, (m, now) => {
+        if (m.waitFrom != null) addHeld(m, now - m.waitFrom)
+        m.waitFrom = null
         m.phase = 'working'
         m.phaseAt = now
         m.turn += 1
         return true
       })
+      await registerTools($)
+      modelName = await $.session.model().catch(() => modelName)
+      if (!machine) void learnMachine($).catch(() => undefined)
+    }
     return next(e)
   })
 
@@ -2461,6 +2996,8 @@ export const register: Register = (on, options) => {
         const phase: ChatPhase = isOpen ? (isStop ? 'stoppedByPerson' : 'awaitingReply') : 'finished'
         m.phase = phase
         m.phaseAt = now
+        // Points open and nothing of Claude's own running: from now it waits on the person.
+        m.waitFrom = isOpen && !isAnyWorkRunning(m) ? now : null
         for (const p of m.points) if (p.state === 'pending') p.seenAt = null
         return true
       })
@@ -2511,9 +3048,9 @@ export const register: Register = (on, options) => {
     const sideCounts = [sideBusy ? `${sideBusy} working` : '', sideWaiting ? `${sideWaiting} need${sideWaiting === 1 ? 's' : ''} input` : ''].filter(Boolean).join(' · ')
     // Short labels, so the three buttons fit in one row; each explains itself in a hover box.
     const sideLabel = `${isSideOpen ? '▾' : '▸'} Other pulses · ${sideCounts || `${m.side.length} done`}`
-    const SIDE_TIP = 'Pulses of other chats in this project'
+    const SIDE_TIP = 'Pulses of the other chats on this computer'
     const DONE_TIP = 'Finished beats and tracks in this chat'
-    const NUDGE_TIP = 'Ask Claude to update the list'
+    const NUDGE_TIP = 'Ask Claude to update the list and its counts'
     const toggleSide = () => update($, showSide, open => !open)
     if (!isOwnShown) {
       if (!m.side.length) return next(e)
@@ -2522,7 +3059,7 @@ export const register: Register = (on, options) => {
         return (
           <Box flexDirection="column">
             <Button key="toggle-side" plain dimColor label={sideLabel} onPress={toggleSide} />
-            {isSideOpen && m.side.map(chat => <Text dimColor wrap="truncate-end">{`${chat.title} · ${chatState(chat)} · ${chat.line}`}</Text>)}
+            {isSideOpen && m.side.map(chat => <Text dimColor wrap="truncate-end">{`${chat.title} · ${chatState(chat)} · ${sideLine(chat)}`}</Text>)}
           </Box>
         )
       }
@@ -2615,7 +3152,7 @@ export const register: Register = (on, options) => {
             </Box>
           ))}
           {m.side.length > 0 && <Button key="toggle-side" plain dimColor label={sideLabel} onPress={toggleSide} />}
-          {isSideOpen && m.side.map(chat => <Text dimColor wrap="truncate-end">{`${chat.title} · ${chatState(chat)} · ${chat.line}`}</Text>)}
+          {isSideOpen && m.side.map(chat => <Text dimColor wrap="truncate-end">{`${chat.title} · ${chatState(chat)} · ${sideLine(chat)}`}</Text>)}
         </Box>
       )
     }

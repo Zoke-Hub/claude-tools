@@ -5,6 +5,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentStatus, On } from 'claude-code'
 
+import { cleanLabel, etaRecord } from '../hooks/register'
+
 const BAND = {
   plugin: 'pulsewise',
   component: 'AbovePrompt',
@@ -111,7 +113,7 @@ test('the band follows the task list and its background work, on desktop and ter
   await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'done' })
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await drawnText(ui)).toContain('100%')
+  expect(await drawnText(ui)).toContain('Progress 100%')
   expect(await ui.find({ key: 'toggle-done' })).toBeDefined()
   await ui.press({ key: 'toggle-done' })
   expect(await drawnText(ui)).toContain('Render frames')
@@ -329,7 +331,7 @@ test('points can finish out of order: 3 done while 2 still runs', async ($, on) 
   await after.unmount()
 })
 
-test("other chats in the same project show behind their toggle, even with nothing running here", async ($, on) => {
+test("every other local chat shows behind the toggle, a chat in another project with its folder's name, even with nothing running here", async ($, on) => {
   const clock = mock.clock(on, { now: Date.now() })
   mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
   inProject(on)
@@ -367,7 +369,8 @@ test("other chats in the same project show behind their toggle, even with nothin
   await ui.press({ key: 'toggle-side' })
   const drawn = await drawnText(ui)
   expect(drawn).toContain('Second chat here')
-  expect(drawn).not.toContain('Chat in another project')
+  expect(drawn).toContain('Chat in another project')
+  expect(drawn).toContain('elsewhere · 2. Render: Frames')
   expect(drawn).not.toContain('Open this chat')
   // A press on its row opens that chat through the app's own link.
   await ui.press({ key: 'chat-0-bar' })
@@ -1926,39 +1929,41 @@ test('a job takes over the command that names it, when its script is only an int
 
 test('with two points running, a job no command reports joins the one its name fits, not just the one listed last', async ($, on) => {
   const { clock, files } = await sideBySide($, on, '')
-  files.set('j-fit', { mtime: 1, body: () => jobBody({ id: 'j-fit', name: 'TV Mode full retest, round 4', pid: 90, heartbeat: true, ttl_ms: null, script: 'retest.mjs', argv: 'node retest.mjs' }) })
+  files.set('j-fit', { mtime: 1, body: () => jobBody({ id: 'j-fit', name: 'Web app full retest, round 4', pid: 90, heartbeat: true, ttl_ms: null, script: 'retest.mjs', argv: 'node retest.mjs' }) })
   await clock.advance(1100)
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const drawn = await drawnText(ui)
-  expect(drawn).toContain('Full retest, 38 suites: TV Mode full retest, round 4 · 4 / 14')
-  expect(drawn).not.toContain('Cursor pack on every page (cursor helper): TV Mode')
+  expect(drawn).toContain('Full retest, 38 suites: Web app full retest, round 4 · 4 / 14')
+  expect(drawn).not.toContain('Cursor pack on every page (cursor helper): Web app')
   await ui.unmount()
 })
 
-test('a list with names longer than 32 characters asks Claude to send it again summarised; the list sent so keeps its points', async ($, on) => {
+test('a name longer than 32 characters gets a short label from the small model (Haiku): no note asks Claude to send the list again', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
   inProject(on)
   on('tool.call', () => ({ result: {} }))
+  const asked: { model: string; prompt: string }[] = []
+  on('model.complete', (_, e) => {
+    const request = e as unknown as { model: string; prompt: string }
+    asked.push({ model: request.model, prompt: String(request.prompt) })
+    return { value: { isAnswered: true, text: '"Cursor pack, every page."', usage: { input_tokens: 40, output_tokens: 8 } } } as never
+  })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const long = 'Cursor pack on every page and site (cursor helper)'
-  const items = [
-    { content: 'Full retest, 38 suites', status: 'in_progress' },
-    { content: long, status: 'in_progress' },
-    { content: 'Report back', status: 'pending' },
-  ]
-  const first = await $.tool.call({ tool: PLAN, scope: 'first_task', items })
-  expect(JSON.stringify(first)).toContain('longer than 32 characters')
-  expect(JSON.stringify(first)).toContain(long)
-  expect(JSON.stringify(first)).not.toContain('Full retest, 38 suites\\"')
-  // Sent again with that name summarised: the same list, renamed in place (not a point added beside the old one, which
-  // would start its times again), so no note at all.
-  const again = await $.tool.call({ tool: PLAN, scope: 'continuation', items: items.map(item => (item.content === long ? { ...item, content: 'Cursor pack on every page' } : item)) })
-  expect(JSON.stringify(again)).not.toContain('this task list is new')
-  expect(JSON.stringify(again)).not.toContain('a point was added')
-  expect(JSON.stringify(again)).not.toContain('PulseWise (the progress bar)')
+  const first = await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Full retest, 38 suites', status: 'in_progress' }, { content: long, status: 'in_progress' }, { content: 'Report back', status: 'pending' }] })
+  expect(JSON.stringify(first)).not.toContain('longer than 32 characters')
+  await clock.advance(1100)
+  // Asked once, of Haiku, for that name only.
+  expect(asked.map(one => one.model)).toEqual(['haiku'])
+  expect(asked[0]?.prompt).toContain(long)
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await drawnText(ui)).toContain('2. Cursor pack on every page')
+  expect(await drawnText(ui)).toContain('2. Cursor pack, every page')
   expect(await drawnText(ui)).not.toContain('cursor helper')
   await ui.unmount()
+  // Read again every second, it is not asked for again.
+  await clock.advance(3100)
+  expect(asked.length).toBe(1)
 })
 
 test('a job read before the command that runs it is linked to that command at its next report', async ($, on) => {
@@ -1975,5 +1980,442 @@ test('a job read before the command that runs it is linked to that command at it
   expect(await drawnText(ui)).toContain('Full retest, 38 suites: Round 4 checks · 4 / 14')
   await ui.press({ key: 'open-p:0' })
   expect(await drawnText(ui)).not.toContain('gives no count')
+  await ui.unmount()
+})
+
+const COUNT = 'mcp__pulsewise__count'
+const ESTIMATE = 'mcp__pulsewise__estimate'
+
+/**
+ * A chat with point 1 of two running: the clock and env mocked, a background Bash answered with `bg1`, and files kept
+ * in memory (what PulseWise writes it can read back).
+ */
+const countedChat = async ($: Engine, on: On) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x', COMPUTERNAME: 'TESTPC' })
+  inProject(on)
+  on('tool.call', (_, e) =>
+    e.tool === 'Bash' && (e as { run_in_background?: boolean }).run_in_background
+      ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1' } }
+      : { result: {} },
+  )
+  const stored = new Map<string, string>()
+  on('fs.list', () => ({ value: [] }))
+  on('fs.exists', (_, e) => ({ value: stored.has(pathOf(e)) }))
+  on('fs.read', (_, e) => {
+    const text = stored.get(pathOf(e))
+    if (text === undefined) throw new Error('missing')
+    return { value: text }
+  })
+  on('fs.write', (_, e) => {
+    stored.set(pathOf(e), String((e as { text?: unknown }).text ?? ''))
+    return { value: undefined }
+  })
+  on('turn.start', (_, e) => ({ turnId: (e as { turnId?: string }).turnId ?? 't' }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const first = await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Edit the pages', status: 'in_progress' }, { content: 'Report back', status: 'pending' }] })
+  return { clock, stored, first }
+}
+
+const etaLines = (stored: Map<string, string>) =>
+  (stored.get('/home/me/.claude/progress/eta-log.jsonl') ?? '')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line) as Record<string, unknown> & { points: Record<string, unknown>[] })
+
+test("Claude's count fills its point and shows in its close-up; an uncounted Claude part is never drawn beside a job", async ($, on) => {
+  await countedChat($, on)
+  // A background command on point 1 and no count yet: the close-up holds the command alone.
+  await $.tool.call({ tool: 'Bash', command: 'python3 build.py', description: 'Build the pages', run_in_background: true })
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'open-p:0' })
+  let drawn = await drawnText(ui)
+  expect(drawn).toContain('Build the pages ·')
+  expect(drawn).not.toContain('Claude · working')
+  expect(drawn).not.toContain('no count for Claude')
+  await ui.press({ key: 'open-p:0' })
+  await ui.unmount()
+  // Counted: Claude's part joins, with its count.
+  const reply = await $.tool.call({ tool: COUNT, point: 1, done: 2, total: 5, unit: 'edits' })
+  expect(JSON.stringify(reply)).toContain('Point 1: 2 / 5 edits.')
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'open-p:0' })
+  drawn = await drawnText(ui)
+  expect(drawn).toContain('Claude · 2 / 5 edits')
+  await ui.unmount()
+  // A point that doesn't exist is answered plainly.
+  expect(JSON.stringify(await $.tool.call({ tool: COUNT, point: 7, done: 1, total: 2 }))).toContain('No point 7: the list has 2')
+})
+
+test('a counted point with no jobs fills by its count alone, and a count on a waiting point starts it moving', async ($, on) => {
+  await countedChat($, on)
+  await $.tool.call({ tool: COUNT, point: 1, done: 3, total: 4, unit: 'files' })
+  await $.tool.call({ tool: COUNT, point: 2, done: 0, total: 2, unit: 'notes' })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Edit the pages: Claude · 3 / 4 files')
+  expect(drawn).toContain('Claude · 0 / 2 notes · not yet marked in progress')
+  await ui.unmount()
+})
+
+test('after 8 of its calls without a count Claude is reminded, and again no sooner than 8 calls on; none: true stops it', async ($, on) => {
+  await countedChat($, on)
+  const call = () => $.tool.call({ tool: 'Read', file_path: '/projects/demo/page.html' })
+  const said: string[] = []
+  for (let i = 0; i < 8; i += 1) said.push(JSON.stringify(await call()))
+  expect(said.slice(0, 7).some(text => text.includes('PulseWise:'))).toBe(false)
+  expect(said[7]).toContain('has no count yet')
+  expect(said[7]).toContain('Edit the pages')
+  expect(said[7]).toContain('mcp__pulsewise__count')
+  // Not again straight away.
+  expect(JSON.stringify(await call())).not.toContain('PulseWise:')
+  // Counted, then 8 more calls without a new count: reminded of the last one.
+  await $.tool.call({ tool: COUNT, point: 1, done: 2, total: 5, unit: 'edits' })
+  let last = ''
+  for (let i = 0; i < 8; i += 1) last = JSON.stringify(await call())
+  expect(last).toContain('was last counted 2 / 5 edits, 8 calls ago')
+  // A point that can't be counted is left alone from then on.
+  await $.tool.call({ tool: COUNT, point: 1, none: true })
+  const after: string[] = []
+  for (let i = 0; i < 20; i += 1) after.push(JSON.stringify(await call()))
+  expect(after.some(text => text.includes('PulseWise:'))).toBe(false)
+})
+
+test('a new list asks for an estimate; the finished list goes to the time log once, its estimates beside its real times', async ($, on) => {
+  const { clock, stored, first } = await countedChat($, on)
+  expect(JSON.stringify(first)).toContain('send mcp__pulsewise__estimate')
+  expect(JSON.stringify(await $.tool.call({ tool: ESTIMATE, minutes: 10, points: [6, 4] }))).toContain('Noted: 10 min for the list, 2 points.')
+  await $.tool.call({ tool: COUNT, point: 1, done: 4, total: 4, unit: 'edits' })
+  await $.turn.complete({ answer: 'over to you', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  await $.turn.start({ turnId: 't2' } as never)
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'done' })
+  await clock.advance(50)
+  const lines = etaLines(stored)
+  expect(lines.length).toBe(1)
+  const line = lines[0] as Record<string, unknown> & { points: Record<string, unknown>[] }
+  expect(line).toMatchObject({ v: 1, machine: 'TESTPC', project: 'demo', complete: true, estimate_min: 10 })
+  expect(typeof line.actual_min).toBe('number')
+  expect(typeof line.waited_min).toBe('number')
+  expect(line.points[0]).toMatchObject({ name: 'Edit the pages', done: true, estimate_min: 6, count: { done: 4, total: 4, unit: 'edits' } })
+  expect(line.points[1]).toMatchObject({ name: 'Report back', estimate_min: 4 })
+  // Logged once: nothing more is written as the bar goes on reading.
+  await clock.advance(3000)
+  expect(etaLines(stored).length).toBe(1)
+})
+
+test("the time log's real times leave out the waits for the person, for the list and for each point", () => {
+  const t0 = 1_800_000_000_000
+  const min = 60_000
+  const point = (name: string, started: number, ended: number, heldMs: number, estimateMin: number) => ({ name, state: 'done', started, ended, heldMs, estimateMin, count: null })
+  const m = {
+    points: [point('Edit the pages', t0, t0 + 8 * min, 5 * min, 6), point('Report back', t0 + 8 * min, t0 + 10 * min, 0, 4)],
+    tasks: [],
+    list: { id: 'l', started: t0, estimateMin: 10, estimatedAt: t0, heldMs: 5 * min, logged: false },
+  }
+  const line = etaRecord(m as never, t0 + 10 * min)
+  expect(line).toMatchObject({ complete: true, estimate_min: 10, actual_min: 5, waited_min: 5 })
+  expect(line?.points[0]).toMatchObject({ actual_min: 3, estimate_min: 6 })
+  expect(line?.points[1]).toMatchObject({ actual_min: 2, estimate_min: 4 })
+  // Once logged, a list gives no second line.
+  expect(etaRecord({ ...m, list: { ...m.list, logged: true } } as never, t0 + 10 * min)).toBeNull()
+})
+
+test('with three finished lists on record, the estimate ask says how the past estimates turned out', async ($, on) => {
+  const { clock, stored } = await countedChat($, on)
+  const past = (estimate: number, actual: number) => JSON.stringify({ v: 1, complete: true, estimate_min: estimate, actual_min: actual, points: [] })
+  stored.set('/home/me/.claude/progress/eta-log.jsonl', `${past(30, 10)}\n${past(20, 10)}\n${past(10, 5)}\n`)
+  // The log is read at the start and after each line written: a new session reads it.
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(50)
+  const ask = await $.tool.call({ tool: PLAN, scope: 'new_task', items: [{ content: 'Sort the photos', status: 'in_progress' }, { content: 'Write the captions', status: 'pending' }] })
+  expect(JSON.stringify(ask)).toContain('a list took 0.5× what you estimated (median of 3)')
+})
+
+test('a helper job that names its point by number joins that point, whatever its name', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Render the intro', status: 'in_progress' }, { content: 'Cut out the photos', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
+  files.set('j-num', { mtime: 1, body: () => jobBody({ id: 'j-num', name: 'Batch 7', point: '2' }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('Cut out the photos: Batch 7 · 4 / 14')
+  await ui.unmount()
+})
+
+test('a point renamed in place keeps its count; its beat shows the new name at once', async ($, on) => {
+  await countedChat($, on)
+  await $.tool.call({ tool: COUNT, point: 1, done: 1, total: 3, unit: 'pages' })
+  await $.tool.call({ tool: PLAN, scope: 'continuation', items: [{ content: 'Edit the three pages', status: 'in_progress' }, { content: 'Report back', status: 'pending' }] })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('Edit the three pages: Claude · 1 / 3 pages')
+  await ui.unmount()
+})
+
+test('Nudge asks Claude for the list and the counts', async ($, on) => {
+  const appended: string[] = []
+  on('session.append', (_, e, next) => {
+    appended.push(JSON.stringify((e as { message?: unknown }).message ?? ''))
+    return next(e)
+  })
+  await countedChat($, on)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'nudge' })
+  await ui.unmount()
+  expect(appended.some(text => text.includes('the person pressed Nudge') && text.includes('mcp__pulsewise__count'))).toBe(true)
+})
+
+test("a command whose script starts its own helper job shows as that job's one bar, not as two parts at once", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', (_, e) => (e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-retest' } } : { result: {} }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Apply the clean-up', status: 'completed' }, { content: 'Full retest after clean-up', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
+  await $.tool.call({ tool: 'Bash', command: 'bash /tmp/scratch/full_retest.sh', description: 'Run the full retest after the clean-up', run_in_background: true })
+  // The script runs the helper itself: nothing in the command names the job or its script.
+  files.set('j-a', { mtime: 1, body: () => jobBody({ id: 'j-a', name: 'Retest A: web app, sites (45)', script: 'progress.py', argv: 'python progress.py start "Retest A: web app, sites (45)"' }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Full retest after clean-up: Retest A: web app, sites (45) · 4 / 14')
+  expect(drawn).not.toContain('2 at once')
+  expect(drawn).not.toContain('gives no count')
+  await ui.unmount()
+})
+
+test('background work started right after Claude counts a point joins that point, not just the last one running', async ($, on) => {
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', () => ({ agentId: 'agent-r', model: 'test' }))
+  on('agent.list', () => ({ value: [{ id: 'agent-r', description: 'Look over the edits', type: 'general-purpose', status: 'running' }] }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Apply the picks', status: 'in_progress' }, { content: 'Full retest', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
+  await $.tool.call({ tool: COUNT, point: 1, done: 1, total: 3, unit: 'picks' })
+  await $.agent.spawn(spawnOf({ prompt: 'review', description: 'Look over the edits', subagentType: 'general-purpose' }))
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Apply the picks: Agent: Look over the edits')
+  expect(drawn).not.toContain('Full retest: Agent: Look over the edits')
+  await ui.unmount()
+})
+
+test('a server left running is kept off the pulse: no "Other work" beat, a track that says serving, and the list can finish', async ($, on) => {
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', (_, e) => (e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-serve' } } : { result: {} }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'python -m http.server 8080', description: 'Serve the highlight preview on this PC', run_in_background: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build the page', status: 'in_progress' }, { content: 'Check it', status: 'pending' }] })
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  let drawn = await drawnText(ui)
+  expect(drawn).not.toContain('Other work')
+  expect(drawn).toContain('serving')
+  await ui.unmount()
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'done' })
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  drawn = await drawnText(ui)
+  expect(drawn).toContain('100%')
+  await ui.unmount()
+})
+
+test('background work running on with no count is asked about after 20 calls; finished: true ends it, service: true moves it off', async ($, on) => {
+  await countedChat($, on)
+  await $.tool.call({ tool: 'Bash', command: 'python3 crunch.py', description: 'Crunch the numbers', run_in_background: true })
+  const call = () => $.tool.call({ tool: 'Read', file_path: '/projects/demo/data.csv' })
+  const said: string[] = []
+  for (let i = 0; i < 20; i += 1) said.push(JSON.stringify(await call()))
+  expect(said.slice(0, 19).some(text => text.includes('background command'))).toBe(false)
+  expect(said[19]).toContain('background command \\"Crunch the numbers\\" has run 20 of your calls with no count')
+  expect(said[19]).toContain('service: true')
+  // Claude says its work is done: it ends, and nothing more is asked.
+  expect(JSON.stringify(await $.tool.call({ tool: COUNT, work: 'Crunch the numbers', finished: true }))).toContain('Crunch the numbers\\": done.')
+  const after: string[] = []
+  for (let i = 0; i < 45; i += 1) after.push(JSON.stringify(await call()))
+  expect(after.some(text => text.includes('background command'))).toBe(false)
+  // Work the bar can't find is answered plainly.
+  expect(JSON.stringify(await $.tool.call({ tool: COUNT, work: 'Nothing like it', service: true }))).toContain('No background work named')
+})
+
+test("the app's chat records are found where the Store app keeps them: titles show, and a finished chat you opened or watched finish leaves", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: 'C:/Users/me', USERPROFILE: 'C:/Users/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x', APPDATA: 'C:/Users/me/AppData/Roaming', LOCALAPPDATA: 'C:/Users/me/AppData/Local' })
+  inProject(on)
+  const now = Date.now()
+  const dir = '/Users/me/AppData/Local/Claude-Data/claude_pkg/claude-code-sessions/acct/org'
+  const chat = (session: string, project: string, title: string, finishedAt: number | null) => ({
+    session, host: `local_${session}`, project, parent: '', title, busy: finishedAt === null, pct: finishedAt === null ? 40 : 100,
+    line: finishedAt === null ? '2. Render: Frames · 12 / 30 · 40%' : '', updated: finishedAt ?? now, finishedAt,
+    segs: [{ name: 'All', fill: finishedAt === null ? 0.4 : 1, state: finishedAt === null ? 'running' : 'done', weight: 10000 }],
+  })
+  const chats: Record<string, unknown> = {
+    'c2.json': chat('chat-2', '/projects/demo', 'Opened after it finished', now - 60_000),
+    'c3.json': chat('chat-3', '/projects/demo', 'Watched as it finished', now - 60_000),
+    'c4.json': chat('chat-4', '/projects/demo', 'Finished while you were elsewhere', now - 60_000),
+    'c5.json': chat('chat-5', '/projects/other', '', null),
+    'c6.json': chat('chat-6', '/projects/demo', 'Archived chat', null),
+  }
+  const record = (title: string, focusedAgo: number, isArchived = false) => ({ title, lastFocusedAt: now - focusedAgo, isArchived })
+  const records: Record<string, unknown> = {
+    'local_x.json': record('This chat', 10_000),
+    'local_chat-2.json': record('Opened after it finished', 30_000),
+    'local_chat-3.json': record('Watched as it finished', 300_000),
+    'local_chat-4.json': record('Finished while you were elsewhere', 900_000),
+    'local_chat-5.json': record('Chat in another folder', 600_000),
+    'local_chat-6.json': record('Archived chat', 3_000_000, true),
+  }
+  const entries = (names: string[], kind: 'file' | 'dir') => names.map(name => ({ name, kind, size: 10, mtimeMs: 1, isLink: false }))
+  on('fs.list', (_, e) => {
+    const path = pathOf(e)
+    if (path.endsWith('/chats')) return { value: entries(Object.keys(chats), 'file') }
+    if (path.endsWith('/AppData/Local/Claude-Data')) return { value: entries(['claude_pkg'], 'dir') }
+    if (path.endsWith('/claude-code-sessions')) return { value: entries(['acct'], 'dir') }
+    if (path.endsWith('/claude-code-sessions/acct')) return { value: entries(['org'], 'dir') }
+    if (path === dir) return { value: entries(Object.keys(records), 'file') }
+    throw new Error('missing')
+  })
+  on('fs.exists', (_, e) => {
+    const path = pathOf(e)
+    return { value: path.endsWith('/Claude-Data/claude_pkg/claude-code-sessions') || path === `${dir}/local_x.json` }
+  })
+  on('fs.read', (_, e) => {
+    const path = pathOf(e)
+    const name = path.split('/').pop() ?? ''
+    if (path.startsWith(`${dir}/`) && records[name]) return { value: JSON.stringify(records[name]) }
+    if (path.includes('/chats/') && chats[name]) return { value: JSON.stringify(chats[name]) }
+    throw new Error('missing')
+  })
+  on('fs.write', () => ({ value: undefined }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1100)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'toggle-side' })
+  const drawn = await drawnText(ui)
+  // Opened after it finished, watched as it finished (no other chat opened between), archived: gone.
+  expect(drawn).not.toContain('Opened after it finished')
+  expect(drawn).not.toContain('Watched as it finished')
+  expect(drawn).not.toContain('Archived chat')
+  // Finished while another chat was open (chat-5 was opened after chat-4, before its finish): still shown.
+  expect(drawn).toContain('Finished while you were elsewhere')
+  // A chat in another project, its title from the app's record, its folder named on its row.
+  expect(drawn).toContain('Chat in another folder')
+  expect(drawn).toContain('other · 2. Render: Frames')
+  await ui.unmount()
+})
+
+test('wrap_up with a background command still running ticks nothing: the points wait for that work', async ($, on) => {
+  inProject(on)
+  on('tool.call', (_, e) => (e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-retest' } } : { result: {} }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Full retest', status: 'in_progress' }, { content: 'Install it here', status: 'pending' }] })
+  await $.tool.call({ tool: 'Bash', command: 'bash /tmp/retest.sh', description: 'Run the full retest', run_in_background: true })
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'retest running; install after' })
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  let drawn = await drawnText(ui)
+  expect(drawn).not.toContain('Progress 100%')
+  expect(drawn).toContain('Install it here: not started')
+  await ui.unmount()
+  // The retest ends; the next turn's wrap_up, with nothing running, ticks what is left.
+  await $.session.append(notification('bg-retest'))
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'installed' })
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  drawn = await drawnText(ui)
+  expect(drawn).toContain('Progress 100%')
+  await ui.unmount()
+})
+
+test("a script's second helper job takes over its command, on the command's point, not as Other work", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', (_, e) => (e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-retest' } } : { result: {} }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Apply the clean-up', status: 'completed' }, { content: 'Full retest after clean-up', status: 'in_progress' }, { content: 'Install it here', status: 'pending' }] })
+  await $.tool.call({ tool: 'Bash', command: 'bash /tmp/scratch/full_retest.sh', description: 'Run the full retest after the clean-up', run_in_background: true })
+  const started = Date.now() + 500
+  files.set('j-a', { mtime: 1, body: () => jobBody({ id: 'j-a', name: 'Retest A: web app, sites (45)', started, updated: started }) })
+  await clock.advance(1100)
+  // Retest A ends, and the list moves on to the install before the script's next job starts (the slip that ticked it).
+  const file = files.get('j-a')
+  if (file) {
+    file.mtime = 2
+    file.body = () => jobBody({ id: 'j-a', name: 'Retest A: web app, sites (45)', started, updated: Date.now(), state: 'done', ended: Date.now() })
+  }
+  await clock.advance(1100)
+  await $.tool.call({ tool: PLAN, advance: true })
+  const later = Date.now() + 1500
+  files.set('j-b', { mtime: 1, body: () => jobBody({ id: 'j-b', name: 'Retest B: phone, helper (15)', started: later, updated: later }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Full retest after clean-up: Retest B: phone, helper (15) · 4 / 14')
+  expect(drawn).not.toContain('Other work')
+  expect(drawn).not.toContain('Install it here: Retest B')
+  await ui.unmount()
+})
+
+test('one piece of work outside the list names its own beat; only several are "Other work"', async ($, on) => {
+  inProject(on)
+  on('tool.call', (_, e) => (e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-crunch' } } : { result: {} }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  // Started before any list, and named like none of its points.
+  await $.tool.call({ tool: 'Bash', command: 'python3 crunch.py', description: 'Crunch the numbers', run_in_background: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Write the notes', status: 'in_progress' }, { content: 'Send them', status: 'pending' }] })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Crunch the numbers')
+  expect(drawn).not.toContain('Other work')
+  await ui.unmount()
+})
+
+test("the small model's label is its reply's last line that fits, so a reply that thinks aloud still gives one", () => {
+  const thinking = 'Serving highlight preview on this PC\n\n(Count: 35 characters, too long.) Shorter:\n\nServing highlight preview locally\n\nCount: "Serving highlight preview locally" = 33 characters. Still over.\n\nHighlight preview on this PC\n\nCount: 27 characters.'
+  expect(cleanLabel(thinking)).toBe('Highlight preview on this PC')
+  expect(cleanLabel('"Cursor pack, every page."')).toBe('Cursor pack, every page')
+  expect(cleanLabel('A label far too long for the bar to show whole')).toBe('')
+})
+
+test('a point renamed in place is not announced as a point added', async ($, on) => {
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const items = [{ content: 'Find the cause', status: 'completed' }, { content: 'Fix it', status: 'in_progress' }, { content: 'Check it live', status: 'pending' }]
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items })
+  const renamedItems = items.map(item => (item.content === 'Check it live' ? { ...item, content: 'Check it live in the app' } : item))
+  const renamed = await $.tool.call({ tool: PLAN, scope: 'continuation', items: renamedItems })
+  expect(JSON.stringify(renamed)).not.toContain('was added')
+  const added = await $.tool.call({ tool: PLAN, scope: 'continuation', items: [...renamedItems, { content: 'Write it up', status: 'pending' }] })
+  expect(JSON.stringify(added)).toContain('a point was added to this task list')
+  expect(JSON.stringify(added)).not.toContain('Check it live in the app')
+})
+
+test('a label the small model makes too long is sent back once with its length, and the shorter one is taken', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const asked: string[] = []
+  on('model.complete', (_, e) => {
+    const prompt = String((e as unknown as { prompt: string }).prompt)
+    asked.push(prompt)
+    const text = asked.length === 1 ? 'Serve highlight preview on this PC' : 'Highlight preview on this PC'
+    return { value: { isAnswered: true, text, usage: { input_tokens: 40, output_tokens: 8 } } } as never
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Serve the highlight preview on this PC for review', status: 'in_progress' }, { content: 'Report back', status: 'pending' }] })
+  await clock.advance(1100)
+  expect(asked.length).toBe(2)
+  expect(asked[1]).toContain('Your last answer, "Serve highlight preview on this PC", has 34')
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('1. Highlight preview on this PC')
   await ui.unmount()
 })

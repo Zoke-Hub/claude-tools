@@ -14,7 +14,23 @@ export type Point = {
   seenAt?: number | null
   /** When Claude's steps last matched this point: the status line puts Claude's current step here. */
   activeAt?: number | null
+  /**
+   * Claude's own count for this point (the count tool): pieces done of all it found, and what a piece is ("edits").
+   * `none` when Claude said the point can't be counted. `call` is Claude's call count when it last sent one.
+   */
+  count?: PointCount | null
+  /** Claude's estimate for this point, in minutes (the estimate tool). */
+  estimateMin?: number | null
+  /** Time this point spent waiting on the person (Claude's turn over or stopped while it was open), in ms. */
+  heldMs?: number
+  /** Claude's call count when this point started (the count reminder counts calls from there). */
+  startCall?: number | null
+  /** Claude's call count when PulseWise last reminded it to count this point. */
+  remindedCall?: number | null
 }
+
+/** Claude's own count for a point, as the count tool last sent it. */
+export type PointCount = { done: number; total: number; unit: string | null; at: number; call: number; none?: boolean }
 
 /** One step inside a helper job (a script that reports its own progress). */
 export type TaskStep = {
@@ -82,6 +98,11 @@ export type Task = {
   ttl?: number | null
   /** The stopped job this one redoes (its name), shown on its line. */
   redoOf?: string | null
+  /** A server or watcher that keeps running (its words, or Claude said so): not progress, kept off the pulse. */
+  service?: boolean
+  /** Claude's call count when it started, and when PulseWise last reminded Claude of it running on with no count. */
+  startCall?: number
+  remindedCall?: number | null
   message: string | null
 }
 
@@ -100,7 +121,7 @@ export type LogEntry = { text: string; ok: boolean; at: number; id?: string }
  */
 export type ChatPhase = 'idle' | 'working' | 'awaitingReply' | 'stoppedByPerson' | 'finished'
 
-/** Another chat in the same project, as that chat published its progress: shown behind "Other chats". */
+/** Another local chat, as that chat published its progress: shown behind "Other pulses". */
 export type SideChat = {
   session: string
   title: string
@@ -119,6 +140,8 @@ export type SideChat = {
   isStopped?: boolean
   /** That chat's id in the app (local_…): its own record there says when the person last opened it. */
   host?: string
+  /** The name of that chat's project folder, when it is not this chat's. */
+  place?: string
   /** About how long that chat's work has left, in ms, when every part still to do can tell (as of `updated`). */
   left?: number | null
   /** When this chat first listed it: its spot in the list, oldest on top. */
@@ -146,6 +169,24 @@ export type Model = {
    * reload) never brings one back unless the file reports again since.
    */
   closedJobs: Record<string, number>
+  /** Claude's own tool calls in this chat's main loop, counted (the count reminder measures by them). */
+  calls?: number
+  /** When Claude's turn ended with points open and nothing of its own running: it waits on the person from then. */
+  waitFrom?: number | null
+  /** The current list: when it was written, Claude's estimate for all of it (minutes) and when that came, its held time. */
+  list?: ListInfo | null
+  /** Short labels for names longer than the bar shows whole, written by a small model (Haiku): name -> label. */
+  labels?: Record<string, string>
+}
+
+/** The current task list as a whole, for the estimate and the time log. */
+export type ListInfo = {
+  started: number
+  estimateMin: number | null
+  /** Time the whole list spent waiting on the person, in ms. */
+  heldMs: number
+  /** Written to the time log already (finished, or replaced by a new list). */
+  logged: boolean
 }
 
 declare module 'claude-code' {

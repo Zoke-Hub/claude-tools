@@ -33,7 +33,7 @@ chat's id (CLAUDE_CODE_SESSION_ID), so a chat's bar shows only its own jobs.
 """
 
 # Raised with every change, so PulseWise replaces an older copy in ~/.claude/progress.
-HELPER_VERSION = 5
+HELPER_VERSION = 6
 
 import atexit
 import builtins
@@ -637,7 +637,7 @@ def main(argv=None):
 
     run_parser = commands.add_parser("run", help="run a command and read its progress from its output")
     run_parser.add_argument("--name", help="name shown on the bar (default: the command)")
-    run_parser.add_argument("--point", help="task-list point this belongs to")
+    run_parser.add_argument("--point", help="task-list point this belongs to: its number in the list (or its name)")
     run_parser.add_argument("--total", type=int, help="total frames, for ffmpeg's frame= counter")
     run_parser.add_argument("--redoes", help="name or id of a stopped job this one redoes")
     run_parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -645,7 +645,7 @@ def main(argv=None):
     start_parser = commands.add_parser("start", help="start a step-by-step job; later calls name it by its name or id")
     start_parser.add_argument("name")
     start_parser.add_argument("--steps", default="", help="comma-separated step names")
-    start_parser.add_argument("--point", help="task-list point this belongs to")
+    start_parser.add_argument("--point", help="task-list point this belongs to: its number in the list (or its name)")
     start_parser.add_argument("--redoes", help="name or id of a stopped job this one redoes")
 
     step_parser = commands.add_parser("step", help="set the current step, with done/total")
