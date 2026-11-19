@@ -7,6 +7,7 @@
 //   window.__useDelay = ms, __useDelays = { name: ms }   how long claude.use(name) takes to answer (150 ms by default)
 //   window.__useFail = { name: n }               claude.use(name) rejects n times before it answers
 //   window.__snapDelay = { collection: ms }      how long a collection's first snapshot takes
+//   window.__cacheFirst = { collection: true }   that collection's listener first gets an empty snapshot from a cache
 //   window.__writeFail = (op, path, data) => code | null   a write rejects with that code; window.__writeDelay = ms per write
 // and while it runs: window.__remote.set / update / delete(path, data) (a change made elsewhere: Claude, another viewer; it
 // lands in window.__remoteWrites, not __writes) and window.__subError(collection, code) (that collection's live listeners die).
@@ -46,6 +47,7 @@
       return {
         path: colPath, doc: (id) => docRef(colPath + "/" + (id || Math.random().toString(36).slice(2))),
         onSnapshot(next, error) { const s = { col: colPath, next, error }; subs.add(s);
+          if (window.__cacheFirst && window.__cacheFirst[colPath]) setTimeout(() => { if (subs.has(s)) next({ docChanges: () => [], metadata: { fromCache: true, hasPendingWrites: false } }); });
           setTimeout(() => { if (subs.has(s)) next({ docChanges: () => [...docs.entries()].filter(([p]) => colOf(p) === colPath).map(([p, d]) => ({ type: "added", doc: snapDoc(p, d) })), metadata: meta }); },
             (window.__snapDelay && window.__snapDelay[colPath]) || 0);
           return () => subs.delete(s); },

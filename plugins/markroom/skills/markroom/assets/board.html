@@ -8,7 +8,7 @@ Claude: on someone else's computer, fix only what stops this working (a path, a 
 <!-- The page's version. Claude reads it from a board's published copy to choose the form of the links it sends:
      1 (no stamp, no #open- handling): plain #<file id> only; 2 (no stamp): #open-<file id> links too;
      3: a plain #<file id> opens a live round and wins over a newer round, as #open- does. -->
-<meta name="markroom-page" content="3">
+<meta name="markroom-page" content="4">
 <meta name="description" content="MarkRoom — your review room: mark it, note it, and Claude changes it.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -91,8 +91,9 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(-
 
 /* image switcher */
 .imgtabs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
-.imgtabs .vers { flex: none; display: flex; align-items: center; gap: 6px; margin-left: 4px; color: var(--muted); font: 12px var(--f-ui); }
-.imgtabs select { height: 34px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); font: 500 13px var(--f-ui); padding: 0 8px; }
+/* the Version list sits at the far right of the header, outside the tab row, so it never scrolls away with the tabs */
+.top .vers { flex: none; display: flex; align-items: center; gap: 6px; color: var(--muted); font: 12px var(--f-ui); }
+.top .vers select { height: 34px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); font: 500 13px var(--f-ui); padding: 0 8px; }
 .imgtab { appearance: none; flex: none; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px 0 4px; border: 1px solid transparent;
   border-radius: 9px; background: transparent; color: var(--muted); font: 500 13px var(--f-ui); cursor: pointer; }
 .imgtab:hover { color: var(--fg); background: var(--chip); }
@@ -330,7 +331,7 @@ textarea::placeholder { color: var(--muted); }
    clear of the strip, so files switch without leaving full screen */
 .app.full .top { flex-wrap: wrap; row-gap: 8px; padding-top: 36px; }
 .app.full .brand { order: 1; }
-.app.full .top #save { order: 2; }
+.app.full .top #save, .app.full .top .vers { order: 2; }
 .app.full .imgtabs { order: 3; flex: 1 1 100%; }
 
 /* narrow windows: one column that scrolls, the frame first, the notes under it with Send kept in reach */
@@ -375,6 +376,7 @@ textarea::placeholder { color: var(--muted); }
     </div>
     <nav class="imgtabs" id="imgtabs" aria-label="Images on this board" hidden></nav>
     <span class="chip" id="save" data-state="connecting" role="status">Connecting…</span>
+    <label class="vers" id="vers" hidden title="Alt/Option + ↑ / ↓ opens the newer or older version">Version <select id="versSel" aria-label="Version"></select></label>
   </header>
   <div class="tabpop" id="tabPop" role="dialog" aria-modal="false" hidden></div>
 
@@ -524,9 +526,11 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   const KINDS = { pin: "Markers", arrow: "Arrows", box: "Boxes", pen: "Drawings", text: "Texts" };
   // Kept from the earlier name, so drafts saved in a viewer's browser carry over to rebuilt boards.
   const LOCAL_KEY = "redline:" + (CFG.key || "board");
-  // the newest render on the board (the last one added): whenever a new round is published, every viewer lands on it
+  // the newest render on the board (the last one added): once a viewer has seen it (or dismissed its notice), a later visit
+  // doesn't bring it forward again
   const NEWEST = IMAGES.find((im) => im.id === CFG.newest) || IMAGES[IMAGES.length - 1] || null;
   const SEEN_KEY = LOCAL_KEY + ":seen";
+  const markSeenNewest = () => { if (NEWEST && !RO) try { localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {} };
   const SNAP = CFG.snapshot || null, RO = !!SNAP;          // a saved copy: marks are embedded and nothing can change
 
   const $ = (s) => document.querySelector(s);
@@ -732,7 +736,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     renderAll();
     writePlace();
     // the newest render, or a live round newer than it, is on screen: the next visit needn't bring the viewer to it
-    if (NEWEST && !RO && (im === NEWEST || (im.added || "") > (NEWEST.added || ""))) try { localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {}
+    if (NEWEST && (im === NEWEST || (im.added || "") > (NEWEST.added || ""))) markSeenNewest();
   }
   img.addEventListener("load", () => { if (!VID()) $("#loading").hidden = true; });
   vid.addEventListener("loadeddata", () => { if (VID()) { $("#loading").hidden = true; tickVideo(); } });
@@ -836,6 +840,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const nav = $("#imgtabs"), gs = visGroups(), closed = closedGroups(), vers = cur ? versionsOf(groupOf(cur)) : [];
     nav.hidden = gs.length < 2 && vers.length < 2 && !closed.length;
     $("#scopeSeg").hidden = IMAGES.filter((im) => gs.includes(groupOf(im))).length < 2;
+    $("#vers").hidden = nav.hidden || vers.length < 2;
     if (nav.hidden) return;
     const solo = gs.length < 2 || RO, sig = JSON.stringify([gs, gs.map((g) => latestOf(g).id), closed.length, solo]);
     if (nav.dataset.sig !== sig) {
@@ -843,7 +848,6 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       nav.innerHTML = gs.map((gid) => { const im = latestOf(gid), name = tabName(gid);
         return `<span class="tabw${solo ? " solo" : ""}" data-group="${esc(gid)}"><button class="imgtab" data-group="${esc(gid)}"${solo ? "" : ' title="Alt/Option + ← / → opens the tab beside it. Drag to move this tab, or Alt/Option + Shift + ← / →."'}><img src="${esc(im.poster || im.src)}" alt="" loading="lazy"><span>${esc((isVid(im) ? "▶ " : "") + name)}</span><span class="cnt"></span></button>`
           + (solo ? "" : `<button class="tabx" data-close="${esc(gid)}" title="Close this tab" aria-label="Close tab ${esc(name)}">×</button>`) + `</span>`; }).join("")
-        + `<label class="vers" id="vers" hidden title="Alt/Option + ↑ / ↓ opens the newer or older version">Version <select id="versSel" aria-label="Version"></select></label>`
         + (closed.length && !RO ? `<button class="closedbtn" id="closedBtn" aria-haspopup="dialog" aria-expanded="false">Closed tabs (${closed.length})</button>` : "");
       nav.querySelectorAll(".imgtab").forEach((b) => {
         b.addEventListener("click", (e) => { if (tabDrag.justDropped) { e.preventDefault(); return; } if (groupOf(cur) !== b.dataset.group) showImage(latestOf(b.dataset.group)); });
@@ -856,7 +860,6 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
         });
       });
       nav.querySelectorAll(".tabx").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); askCloseTab(b.dataset.close, b); }));
-      $("#versSel").addEventListener("change", (e) => switchVersion(imgById(e.target.value)));
       const cb = $("#closedBtn"); if (cb) cb.addEventListener("click", () => openClosedTabs(cb));
       if (tabPopFor) closeTabPop();
     }
@@ -866,26 +869,25 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       b.querySelector(".cnt").textContent = list.length ? open + " open" : "";
       b.setAttribute("aria-current", String(!!cur && groupOf(cur) === gid));
     }
-    const vl = $("#vers"), sel = $("#versSel");
-    vl.hidden = vers.length < 2;
+    const sel = $("#versSel");
     if (vers.length > 1) {
       const want = vers.slice().reverse().map((im, i) => { const n = [...marks.values()].filter((m) => m.img === im.id && m.status !== "done").length;
         return `<option value="${esc(im.id)}">${esc(im.label + (i === 0 ? " · latest" : "") + (n ? " · " + n + " open" : ""))}</option>`; }).join("");
       if (sel.innerHTML !== want) sel.innerHTML = want;
       sel.value = cur.id;
     }
-    // the selected tab (and its Version dropdown) scrolls into view whenever the selection moves to another tab: the newest
-    // round's tab is often far along the row
+    // the selected tab scrolls into view whenever the selection moves to another tab: the newest round's tab is often far
+    // along the row
     const on = cur && nav.querySelector('.imgtab[aria-current="true"]');
     if (on && nav.dataset.shown !== groupOf(cur)) {
       nav.dataset.shown = groupOf(cur);
       requestAnimationFrame(() => {
         const nr = nav.getBoundingClientRect(), t = (on.closest(".tabw") || on).getBoundingClientRect();
-        const right = vl.hidden ? t.right : Math.max(t.right, vl.getBoundingClientRect().right);
-        if (t.left < nr.left || right > nr.right) nav.scrollLeft += Math.min(t.left - nr.left - 8, right - nr.right + 8);
+        if (t.left < nr.left || t.right > nr.right) nav.scrollLeft += Math.min(t.left - nr.left - 8, t.right - nr.right + 8);
       });
     }
   }
+  $("#versSel").addEventListener("change", (e) => switchVersion(imgById(e.target.value)));
   // the in-page confirm for closing a tab, and the Closed tabs list (window.confirm doesn't work in artifacts)
   const tabPop = $("#tabPop");
   let tabPopFor = null, tabAnchor = null;
@@ -2004,10 +2006,11 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   let tabsSeen = false;
 
   // ---------- live rounds: a new render added without republishing the page ----------
-  // rounds/<image id> = { id, label, src, w, h, added, group?, type?: "video", poster?, fps?, dur?, beats? }. src and poster
-  // are asset ids (the artifact's asset store serves them at /_blob/<id>) or paths. Claude adds a round by uploading the
-  // file to the asset store and writing this doc: the page is not republished, so nothing reloads and no one is taken off
-  // the note they are typing. An open view switches to the new round (after the note in progress); a fresh visit opens on it.
+  // rounds/<image id> = { id, label, src, w, h, added, group?, for?, type?: "video", poster?, fps?, dur?, beats? }. src and
+  // poster are asset ids (the artifact's asset store serves them at /_blob/<id>) or paths. Claude adds a round by uploading
+  // the file to the asset store and writing this doc: the page is not republished, so nothing reloads and no one is taken
+  // off the note they are typing. An open view switches to the new round (after the note in progress) when it belongs with
+  // the file on screen (related, below); otherwise the corner notice says it has arrived, with Open.
   const SEEN_LIVE_KEY = LOCAL_KEY + ":seen-live";
   const blobUrl = (v) => (isAssetId(v) ? "/_blob/" + v : String(v || ""));
   function roundFrom(id, d) {
@@ -2015,10 +2018,26 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (!d.src || !(w > 0) || !(h > 0)) return null;
     const im = { id, label: String(d.label || id), src: blobUrl(d.src), w, h, added: String(d.added || ""), live: true };
     if (d.group) im.group = String(d.group);
+    if (d.for) im.for = String(d.for);
     if (d.type === "video") Object.assign(im, { type: "video", poster: blobUrl(d.poster), fps: +d.fps || 25, dur: +d.dur || 0 }, Array.isArray(d.beats) ? { beats: d.beats } : {});
     return im;
   }
+  // Tabs that belong together: a file made for another tab's work (build_board.mjs --for "<tab>": a character sheet for an
+  // animation, say) names that tab. Two files' tabs are related when they are the same tab, when one is for the other, or
+  // when both are for the same tab.
+  const forOf = (gid) => { const v = versionsOf(gid); for (let i = v.length - 1; i >= 0; i--) if (v[i].for) return v[i].for; return ""; };
+  function related(a, b) {
+    const ga = groupOf(a), gb = groupOf(b);
+    if (ga === gb) return true;
+    const fa = forOf(ga), fb = forOf(gb);
+    return fa === gb || fb === ga || (!!fa && fa === fb);
+  }
   const busy = () => !!(activeId || tdraft || (document.activeElement && /^(TEXTAREA|INPUT|SELECT)$/.test(document.activeElement.tagName)));
+  // A link whose file isn't on the board yet (a live round the rounds haven't brought): it opens when they bring it, in
+  // whichever snapshot that is (the first can come from a cache that lacks it, and the app can set the link's anchor just
+  // after the page has loaded). The viewer's own first click, key press, scroll or zoom drops it: they have moved on.
+  let linkWait = "", interacted = false;
+  for (const ev of ["pointerdown", "keydown", "wheel"]) addEventListener(ev, () => { interacted = true; linkWait = ""; }, { capture: true, passive: true });
   let roundsSeen = false, nrFor = null;
   function onRounds(snap) {
     const first = !roundsSeen; roundsSeen = true;
@@ -2036,33 +2055,39 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       if (i >= 0) { if (IMAGES[i].live) Object.assign(IMAGES[i], im); continue; }   // a round already baked into the page keeps its own entry
       IMAGES.push(im); fresh.push(im);
     }
+    // the file a link is waiting for, now here: it opens, over newer rounds too (they open on the next plain visit)
+    const linked = linkWait ? fresh.find((im) => im.id === linkWait) : undefined;
+    if (linked) { linkWait = placeWait = ""; if (busy()) newRound(linked); else showImage(linked); renderAll(); return; }
     if (!fresh.length) { renderAll(); return; }
     const top = fresh.reduce((a, b) => ((b.added || "") >= (a.added || "") ? b : a));
     let seenLive = null; try { seenLive = localStorage.getItem(SEEN_LIVE_KEY); } catch (_) {}
     if (first) {
-      // opening the board: land on the newest round (or the round in a new link, or the live round the viewer was on, as they
-      // left it), unless the viewer has already started on something
-      const linked = newLink ? anchored(START_HASH, fresh) : undefined;
+      // opening the board: the live round the viewer was on opens as they left it, and a newer round than they last saw
+      // comes forward when it belongs with that place (arrive), unless they have already started on something. A link
+      // holds over all of it, a file in the page or one still on its way.
       const back = placeWait && !busy() ? fresh.find((im) => im.id === placeWait) : undefined;
       placeWait = "";
-      if (linked && !busy()) showImage(linked);
-      else if (!fromLink) {                                    // a new link to a file in the page holds, over newer rounds too
+      if (!fromLink && !linkWait) {
         if (back) showImage(back, keptPlace(back));
         const from = back || (cur === keptStart ? keptStart : undefined);    // the place the viewer came back to
         if (seenLive !== top.id && (top.added || "") > ((NEWEST && NEWEST.added) || "") && !RO) {
-          if (busy()) newRound(top);
-          else if (from === top) markSeenLive(top);
-          else if (from) landOn(top);                          // with the notice and Back, as when it arrives while open
+          if (from === top) markSeenLive(top);
+          else if (from) arrive(top);                          // as when it arrives while the board is open
+          else if (busy()) newRound(top);
           else { markSeenLive(top); showImage(top); }
         }
       }
-    } else newRound(top);
+    } else arrive(top);
     renderAll();
   }
   function markSeenLive(im) { try { localStorage.setItem(SEEN_LIVE_KEY, im.id); } catch (_) {} }
-  // A new round opens by itself on every open view. Only a note being made or edited (or a field being typed in) holds it
-  // back: the notice says so, and the round opens as soon as that note is saved or closed. Once it has opened, the notice
-  // offers Back to what was on screen before.
+  // a round the viewer has opened or dismissed: a live round goes in the live mark, the newest file baked into the page in
+  // its own (one in the other's would bring an already-seen round forward again)
+  function markSeen(im) { if (im.live) markSeenLive(im); else if (im === NEWEST) markSeenNewest(); }
+  // A new round opens by itself on every open view whose file it belongs with (related: the same tab, a tab it is for, or
+  // one for it). Only a note being made or edited (or a field being typed in) holds it back: the notice says so, and the
+  // round opens as soon as that note is saved or closed. Once it has opened, the notice offers Back to what was on screen
+  // before. A round for an unrelated tab doesn't move anyone: the notice says it has arrived, with Open.
   let nrMode = null, nrBack = null, nrWait = 0, nrHide = 0;
   const roundName = (im) => im.label + (im.group && im.group !== im.label ? " in “" + im.group + "”" : "");
   function goTo(im) { if (cur && groupOf(cur) === groupOf(im)) switchVersion(im); else showImage(im); }
@@ -2081,19 +2106,28 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   function landOn(im) {
     const from = cur;
     hideNewRound();
-    markSeenLive(im); goTo(im);
+    markSeen(im); goTo(im);
     nrFor = im; nrMode = "landed"; nrBack = from && from.id !== im.id ? from : null;
     $("#nrText").textContent = "Now showing the new round: " + roundName(im) + ".";
     $("#nrOpen").textContent = "Back"; $("#nrOpen").hidden = !nrBack; $("#nrClose").textContent = "Dismiss";
     $("#newRound").hidden = false;
     nrHide = setTimeout(hideNewRound, 12000);
   }
+  function arrive(im) {
+    if (!cur || related(cur, im)) { newRound(im); return; }
+    hideNewRound();
+    nrFor = im; nrMode = "elsewhere";
+    $("#nrText").textContent = "New round: " + roundName(im) + ".";
+    $("#nrOpen").textContent = "Open"; $("#nrOpen").hidden = false; $("#nrClose").textContent = "Dismiss";
+    $("#newRound").hidden = false;
+    nrHide = setTimeout(hideNewRound, 12000);
+  }
   $("#nrOpen").addEventListener("click", () => {
     const im = nrFor, back = nrBack, mode = nrMode;
-    if (mode === "wait" && im) landOn(im);
+    if ((mode === "wait" || mode === "elsewhere") && im) landOn(im);
     else { hideNewRound(); if (back && IMAGES.includes(back)) goTo(back); }
   });
-  $("#nrClose").addEventListener("click", () => { if (nrFor) markSeenLive(nrFor); hideNewRound(); });
+  $("#nrClose").addEventListener("click", () => { if (nrFor) markSeen(nrFor); hideNewRound(); });
 
   // ---------- pointer input on the viewer ----------
   const ptrs = new Map();
@@ -2615,7 +2649,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // (the page writes one as files open; a reload in a browser brings it back), which keeps your place.
   function linkedFile(hash) { const m = /^open-([a-z0-9-]+)$/.exec(hash || ""); return m ? m[1] : ""; }
   // The file an anchor names (a link's or the page's own), among IMAGES or among rounds just arrived.
-  function anchored(hash, list) { const id = linkedFile(hash) || hash; return id ? (list || IMAGES).find((i) => i.id === id) : undefined; }
+  function anchored(hash) { const id = linkedFile(hash) || hash; return id ? IMAGES.find((i) => i.id === id) : undefined; }
   const START_HASH = location.hash.slice(1);                  // a live round in the link arrives later, from the database
   // A link opens its file once in each browser: the Claude app brings the same link back whenever it reloads the board
   // (coming back to the chat), and that reload is a plain visit, which goes back to where the viewer left off.
@@ -2627,6 +2661,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   const fromLink = newLink ? fromAnchor : undefined;
   const noteLink = (h) => { if (h && !RO) try { localStorage.setItem(LINK_KEY, h); } catch (_) {} };
   if (newLink) noteLink(START_HASH);
+  if (newLink && !fromAnchor) linkWait = linkedFile(START_HASH) || START_HASH;   // a live round: it opens when the rounds bring it
   measure();
   new ResizeObserver(() => {
     measure();
@@ -2635,25 +2670,30 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     schedule();
   }).observe(viewer);
   // A new link to one file opens that file, whatever else is new; a newer round it passes over still opens on the next plain
-  // visit. Otherwise a new round since this viewer last opened the board opens on that round, whatever the anchor says
-  // (a republish reloads the page with the old round's anchor), with the notice and Back to where they were. Otherwise the
-  // place this browser kept (which the page's own anchor names) opens as it was left: the same zoom and spot, a video at
-  // the same moment, paused. A kept live round opens when the rounds arrive (onRounds).
+  // visit. Otherwise the place this browser kept (which the page's own anchor names) opens as it was left: the same zoom
+  // and spot, a video at the same moment, paused, and a new round since this viewer last opened the board comes forward
+  // when it belongs with that place (arrive), with the notice and Back; else the notice says it has arrived. A kept live
+  // round opens when the rounds arrive (onRounds).
   let seen = null; try { seen = localStorage.getItem(SEEN_KEY); } catch (_) {}
   const fresh = !RO && !!NEWEST && seen !== NEWEST.id;
-  try { if (NEWEST && !RO && (!fromLink || fromLink === NEWEST)) localStorage.setItem(SEEN_KEY, NEWEST.id); } catch (_) {}
   const keptFile = !RO && place.id ? IMAGES.find((i) => i.id === place.id) : undefined;
   if (!RO && place.id && !keptFile && !fromLink && !fresh) placeWait = place.id;
   const startAt = fromLink || (fresh ? NEWEST : (keptFile || cur));
   const keptStart = fromLink ? undefined : fresh ? keptFile : startAt === keptFile ? startAt : undefined;
-  const openAt = fresh && keptStart ? keptStart : startAt;    // the file opened first (a newer round follows with landOn)
+  const openAt = fresh && keptStart ? keptStart : startAt;    // the file opened first (a newer round follows with arrive)
   showImage(openAt, fromLink ? undefined : keptPlace(openAt));
-  if (fresh && keptStart && keptStart !== NEWEST) landOn(NEWEST);
-  // a link followed while the board is already open can arrive as a new anchor, without a reload
+  if (fresh && keptStart && keptStart !== NEWEST && !linkWait) arrive(NEWEST);
+  // A link followed while the board is already open arrives as a new anchor, without a reload; so can a link that opened
+  // the board, when the app sets its anchor just after the page has loaded. The app setting the link this browser has
+  // already followed again, as it reloads the board, is a plain visit and keeps the viewer's place, as at the start.
   addEventListener("hashchange", () => {
-    const im = anchored(location.hash.slice(1));
-    noteLink(location.hash.slice(1));
-    if (!im || im === cur) return;
+    const h = location.hash.slice(1);
+    if (h === lastLink && !interacted) return;
+    const im = anchored(h);
+    noteLink(h);
+    if (!im) { if (h) linkWait = linkedFile(h) || h; return; }   // a live round on its way: it opens when the rounds bring it
+    linkWait = "";
+    if (im === cur) return;
     if (busy()) toast("Save or close this note, then follow the link again."); else showImage(im);
   });
   connect();

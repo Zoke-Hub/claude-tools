@@ -129,7 +129,8 @@ opens the tab to the left or right, on any tab (Shift + ←/→ does too on an i
 `#open-<id>` (the links Claude sends), or in a plain `#<id>` (older links), opens one file directly. Drag a tab, or press Alt/Option + Shift + ←/→, to move the
 open tab along the row. Numbers run across the whole board, so "#7" is unambiguous.
 Rounds of the same thing (built with `--group`) share **one tab**: the tab opens the latest round, and a **Version** dropdown
-beside the tabs opens an older one (each option shows its open-note count); Alt/Option + ↑/↓ steps to the newer or older
+at the far right of the header (outside the tab row, so it never scrolls away) opens an older one (each option shows its
+open-note count); Alt/Option + ↑/↓ steps to the newer or older
 version. Notes stay on the round they were written on. None of these keys act while a note or field is being typed in.
 Switching versions keeps your place, so the same part can be compared round to round: the other round opens at the same
 zoom and on the same spot (mapped by proportion when the two are different sizes; an untouched, fitted view stays fitted).
@@ -142,20 +143,25 @@ short notice says why.
 reload keeps neither the page's own `#<id>` anchor nor your zoom, so each viewer's browser (local storage) remembers the
 file they were on and, for each file, its zoom, its spot and a video's moment. A reload or a return to the chat opens
 where you left off (a video paused at that moment), on a live round too, once the rounds arrive. If a newer round came
-in meanwhile, it opens instead, as when it arrives while the board is open: from an older version of the same tab it
-keeps your place, and the corner notice offers **Back**.
+in meanwhile, it comes forward as when it arrives while the board is open (below): only when it belongs with the file you
+left off on.
 
-**The newest render is always selected.** Opening the board lands on the newest round: its tab, with "· latest" in the
-Version dropdown, scrolled into view in the tab row. A round added while the board is open (a live round, §5) opens by
-itself on every open view, from whichever tab is showing (an older version of the same file keeps your place, as when
-switching versions), and a notice in the corner says "Now showing the new round: …" with **Back** (to what was on screen
-before) and **Dismiss**. Only a note being made or edited, or a field being typed in, holds it back: the notice then says
+**A new round comes forward where it belongs.** A round added while the board is open (a live round, §5) opens by
+itself on an open view only when it belongs with the file on screen: it is in the same tab (an older version of the
+same file keeps your place, as when switching versions), or the two tabs are **related**: one tab's files are made for
+the other (built with `--for "<tab>"`: a character sheet for an animation, say), or both are made for the same tab. A
+notice in the corner then says "Now showing the new round: …" with **Back** (to what was on screen before) and
+**Dismiss**. Only a note being made or edited, or a field being typed in, holds it back: the notice then says
 "New round: … It opens when you finish this note", with **Open now** and **Not now**; the note stays exactly as it is,
-and the round opens by itself once the note is saved or closed. On opening, a newer round than you last saw beats the
-kept place. A plain reload with no new round keeps your place (the page's own `#<id>`, naming the file you were last
-on, is part of it). A link sent to open one file (`#open-<id>`, or a plain `#<id>` naming another file: the links sent
-to boards on page 1, which older messages keep) opens that file the first time this browser follows it, even over a
-newer round, a live round included once the rounds arrive, and the newer round then opens on the
+and the round opens by itself once the note is saved or closed. A round in an unrelated tab moves no one: the notice
+says "New round: …" with **Open** and **Dismiss**. On opening, a newer round than you last saw comes forward the same
+way, by the file you left off on, and its notice comes back on each visit until you open or dismiss it; with no kept
+place (a first visit) the board opens on the newest round. A plain
+reload with no new round keeps your place (the page's own `#<id>`, naming the file you were last on, is part of it).
+A link sent to open one file (`#open-<id>`, or a plain `#<id>` naming another file: the links sent to boards on page 1,
+which older messages keep) opens that file the first time this browser follows it, even over a newer round, a live
+round included: it waits for the rounds to bring it, however they arrive, and for an anchor the app sets just after the
+page loads; the viewer's own first click, key press, scroll or zoom drops a link still waiting. The newer round then opens on the
 next plain visit; the app brings the same link back whenever it reloads the board, and from then on that counts as a
 plain visit (your kept place). Followed while the board is already open, a link switches to that file (or, while a note
 is being typed, says to finish the note first). The newest render is
@@ -207,7 +213,13 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
      ffmpeg comes from the PATH; Homebrew's `ffmpeg-full` is tried first when it's installed.
    - Optional beats lane for a video: put `<video>.beats.json` next to it, `[{"label": "Title in", "a": 2.2, "b": 3.9}, ...]`.
    - `--group` puts the files of this call into one tab as rounds (the dropdown). Use it for every round of a preview.
-   - The board opens on the newest render (the last file added), for every viewer, after every new round (see above).
+   - `--for "<tab>"` marks the files of this call as made for another tab's work (a character variation sheet for an
+     animation's tab, a storyboard for a scene): the two tabs are related, so a new round in either comes forward for a
+     viewer on the other. Give it whenever a file serves another tab; without it, a new round only comes forward in its
+     own tab. `<tab>` is the other tab's `--group` name (or, for a file with no group, its file id); the script warns
+     when no tab on the board has that name.
+   - A first visit opens on the newest render (the last file added); later, a new round comes forward where it belongs
+     (see above).
    - `--subtitle` is optional. With one image it defaults to "label · W × H px". `--key` sets the browser-storage key
      (default: from the title; a rebuilt board keeps the one in `board.json`).
    - Size handling:
@@ -315,11 +327,12 @@ and the older rounds stay one click away in the Version dropdown.
 **On a published board, add the round live: never republish for a new round.** A republish makes the Claude app open
 that board on the user's screen, wherever they are (another board, a note half typed). A live round is uploaded to the
 artifact's asset store and announced in the board's `rounds` collection instead: open views pick it up without
-reloading and switch to the new round by themselves (§1, "The newest render is always selected"). The Claude app doesn't
-bring the board to the front, so the user isn't pulled off another board or chat.
-1. Prepare the file (same handling as any round; nothing is published):
+reloading and switch to the new round where it belongs (§1, "A new round comes forward where it belongs"). The Claude
+app doesn't bring the board to the front, so the user isn't pulled off another board or chat.
+1. Prepare the file (same handling as any round; nothing is published). Add `--for "<tab>"` when the file is made for
+   another tab's work (§2):
    ```bash
-   node "${CLAUDE_SKILL_DIR}/scripts/build_board.mjs" --append --live --out <board> --group "<tab name>" <new image or video>=<label>
+   node "${CLAUDE_SKILL_DIR}/scripts/build_board.mjs" --append --live --out <board> --group "<tab name>" [--for "<tab>"] <new image or video>=<label>
    ```
 2. Upload what it prints with the Artifact tool: `url` (the board), `asset: true`, `file_paths` (a video and its poster
    go up in one call). Each result line gives the file's asset id (32 hex characters).

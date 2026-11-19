@@ -6,12 +6,12 @@
 
 export const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-// One image or video as the page (and the `rounds` collection) reads it: id, label, src, w, h, then group and added,
+// One image or video as the page (and the `rounds` collection) reads it: id, label, src, w, h, then group, for and added,
 // and for a video type, poster, fps, dur, beats. srcOf(im, "src" | "poster") gives each file as that copy serves it
 // (a path in img/, an asset's /_blob/ url, an asset id, a data URI).
 export function entryOf(im, srcOf) {
   return Object.assign({ id: im.id, label: im.label, src: srcOf(im, "src"), w: im.w, h: im.h },
-    im.group ? { group: im.group } : {}, im.added ? { added: im.added } : {},
+    im.group ? { group: im.group } : {}, im.for ? { for: im.for } : {}, im.added ? { added: im.added } : {},
     im.type === "video" ? { type: "video", poster: srcOf(im, "poster"), fps: im.fps, dur: im.dur, beats: im.beats || undefined } : {});
 }
 

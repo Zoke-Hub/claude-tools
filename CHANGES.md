@@ -3,6 +3,23 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-19 · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom:** a link to a live round now opens it when the link opens a closed board. The page used to look for the
+  linked round only in the first batch of rounds it was sent, which can come from the app's cache without it; then
+  the newest round came forward instead. The link now waits for its round however the rounds arrive, and for an
+  anchor the app sets just after the page loads; the viewer's first click or key press drops a link still waiting.
+- **MarkRoom:** a new round comes forward only where it belongs: in the tab on screen, or in a related tab. A file
+  built with `build_board.mjs --for "<tab>"` (a character sheet for an animation's tab, say) is related to that
+  tab, and files made for the same tab are related to each other. A round in an unrelated tab moves no one: the
+  corner notice says it has arrived, with Open. A note being typed still holds a round back until it is saved. A
+  round you were only told about comes back as a notice on your next visit until you open or dismiss it, and
+  `--for` warns when no tab on the board has the name it gives.
+- **MarkRoom:** dismissing a newer file's notice no longer marks a live round as unseen, which brought an
+  already-seen round forward again on the next visit. A scroll or zoom also drops a link still waiting for its round.
+- **MarkRoom:** the Version list sits at the far right of the header, outside the tab row, so it never scrolls away.
+- The page's version stamp is now 4 (`--link` reads it as before). A board gets these changes from its next republish.
+
 ## 2026-11-17 · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom:** a link Claude sends opens the file it names on every board, whatever page the board was published

@@ -9,7 +9,10 @@
 //   node build_board.mjs --append --out <board dir>      (no files: refresh index.html from the template)
 //   --group "<name>"  puts these files in one tab as rounds of the same thing: the tab opens the latest, and a
 //                     Version dropdown opens older ones (e.g. --append --group "Preview" r05.mp4="Preview r05").
-//   --live            (with --append, on a published board) adds the round WITHOUT republishing the page: the file is
+//   --for "<tab>"     these files are made for another tab's work (a character sheet for an animation's tab, say):
+//                     the two tabs are related, so a new round in either comes forward for a viewer on the other.
+//                     A new round in an unrelated tab only shows a notice.
+//   --live           (with --append, on a published board) adds the round WITHOUT republishing the page: the file is
 //                     prepared as usual, then uploaded to the artifact's asset store and announced in its `rounds`
 //                     collection, so open views pick it up live and nobody is moved off what they are doing.
 //   --asset <round id>=<asset id>[,<poster asset id>]   step 2 of --live: records the uploaded asset ids, writes
@@ -53,6 +56,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === "--key") opt.key = args[++i];
   else if (a === "--append") opt.append = true;
   else if (a === "--group") opt.group = args[++i];
+  else if (a === "--for") opt.for = args[++i];
   else if (a === "--live") opt.live = true;
   else if (a === "--asset") opt.assets.push(args[++i]);
   else if (a === "--link") opt.link = args[++i];
@@ -199,7 +203,7 @@ if (opt.live && !board.url) { console.error("--live needs a published board (boa
 
 const added = [];
 // what every new round gets, image or video: its tab group, the live flag, and a place on the board
-const addRound = (im) => { if (opt.group) im.group = opt.group; if (opt.live) im.live = true; board.images.push(im); added.push(im); };
+const addRound = (im) => { if (opt.group) im.group = opt.group; if (opt.for) im.for = opt.for; if (opt.live) im.live = true; board.images.push(im); added.push(im); };
 for (const spec of opt.images) {
   const eq = spec.lastIndexOf("=");
   const src = path.resolve(eq > 0 && fs.existsSync(spec.slice(0, eq)) ? spec.slice(0, eq) : spec);
@@ -235,6 +239,12 @@ for (const spec of opt.images) {
   const o = probe(dst), bytes = fs.statSync(dst).size;
   if (bytes > MAX_BYTES) console.warn(`warning: ${path.basename(dst)} is ${(bytes / 1048576).toFixed(1)} MB, over the 15 MB publish limit.`);
   addRound({ id, label, src: "img/" + path.basename(dst), w: o.w, h: o.h, source: src, scale: +(o.w / info.w).toFixed(6), added: new Date().toISOString() });
+}
+// --for names a tab as the page knows it (its group, or a lone file's id): a name that matches none relates these files to
+// nothing, so say so
+if (opt.for && added.length) {
+  const tabs = [...new Set(board.images.filter((im) => !added.includes(im)).map((im) => im.group || im.id))];
+  if (!tabs.includes(opt.for)) console.warn(`note: no tab on this board is called "${opt.for}", so --for relates these files to no tab yet. Tabs: ${tabs.map((t) => `"${t}"`).join(", ") || "none"}.`);
 }
 
 // ---------- live rounds, step 2: the uploaded asset ids ----------
