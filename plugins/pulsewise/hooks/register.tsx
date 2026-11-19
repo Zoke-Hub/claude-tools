@@ -2194,7 +2194,7 @@ async function readRecords($: Api, now: number) {
 const isOtherOpenedBetween = (id: string, from: number, to: number) =>
   [...records].some(([other, r]) => other !== id && r.focusedAt !== null && r.focusedAt > from && r.focusedAt <= to)
 
-/** A project folder's last name ("D:\\Projects\\Claude Edits" gives "Claude Edits"). */
+/** A project folder's last name: the part after its last slash or backslash (".../My Site" gives "My Site"). */
 const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? ''
 
 /** Writes this chat's progress where the other local chats can read it (every 3 s at most, only on change). */
