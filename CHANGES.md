@@ -3,6 +3,15 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-20 · PulseWise 1.0.0 (number unchanged)
+
+- **PulseWise:** a job no longer sits on the bar with "no report" for good. A command that is stopped or fails takes
+  the helper job it reports with it, whichever way it ends (an agent's own command when Claude stops the agent
+  included); an agent Claude stops, or that fails, takes its own step-by-step jobs with it, while one that only
+  finished its turn leaves them waiting. A job with no report for 2 hours leaves the bar as stopped (its file is left
+  open, so a late report brings it back).
+- **PulseWise:** its tests fill in the fields Claude Code 2.1.326 added to an agent's entry.
+
 ## 2026-11-19 · Folio 1.0.0 (number unchanged)
 
 - **Folio:** where new files go. As a chat starts, Folio reads where the project already keeps renders, editing and

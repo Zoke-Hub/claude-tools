@@ -1819,19 +1819,25 @@ function endTask(m: Model, t: Task, ok: boolean, now: number, fx: Effect[], mess
     if (!isFileEnded) fx.push({ kind: 'closeFile', id: t.id, ok, ended: now, message: t.message, seen: t.updated })
   }
   if (t.kind === 'agent') holdAgentWork(m, t, ok, now, fx, message)
+  // A command that a helper job reports, stopped or failed: the job's script stopped with it. (A job is covered by
+  // its redo instead, which goes on.)
+  const isCommand = t.kind === 'shell' || t.kind === 'task'
+  const job = !ok && isCommand && t.coveredBy ? m.tasks.find(o => o.id === t.coveredBy) : undefined
+  if (job) endTask(m, job, false, now, fx, message ?? 'stopped')
   if (t.coveredBy || t.owner) return
   announce(m, t, ok, now, fx, message)
 }
 
 /**
  * An agent's end, for the work of its own that runs without a process to watch: its background commands (their ends
- * go to the agent, never to this chat) end with it; its step-by-step jobs go silent (they may yet report). Both reopen
- * if the agent acts again (reviveAgent).
+ * go to the agent, never to this chat) end with it. Its step-by-step jobs go silent when it finished (they may yet
+ * report: it can come back), and end with it when it was stopped or failed, quiet ones too. All of it reopens if the
+ * agent acts again (reviveAgent).
  */
 function holdAgentWork(m: Model, agent: Task, ok: boolean, now: number, fx: Effect[], message?: string) {
   for (const o of m.tasks) {
-    if (o.owner !== agent.id || o.pid !== null || o.state !== 'running') continue
-    if (o.kind === 'job') pause(o, now)
+    if (o.owner !== agent.id || o.pid !== null || isFinal(o) || (ok && o.state !== 'running')) continue
+    if (o.kind === 'job' && ok) pause(o, now)
     else endTask(m, o, ok, now, fx, message)
     o.heldBy = agent.id
   }
@@ -1896,11 +1902,8 @@ function endFromNotification($: Api, text: string) {
     for (const end of ends) {
       const t = m.tasks.find(one => one.id === end.id || (end.toolUseId !== null && one.id === end.toolUseId))
       if (!t || isFinal(t)) continue
+      // A command that ended badly takes the helper job it reports with it (endTask).
       endTask(m, t, end.status === 'completed', now, fx, end.status === 'completed' ? undefined : end.status)
-      if (t.coveredBy) {
-        const job = m.tasks.find(one => one.id === t.coveredBy)
-        if (job && !isFinal(job) && end.status !== 'completed') endTask(m, job, false, now, fx, end.status)
-      }
       changed = true
     }
     return changed
@@ -1937,7 +1940,7 @@ const progressOf = (d: JobFile) => ({
 })
 
 /** A job file first seen, as a running task (its file's end, if it says one, is applied after: applyJobFile). */
-function jobToTask(m: Model, d: JobFile): Task {
+export function jobToTask(m: Model, d: JobFile): Task {
   return {
     ...progressOf(d),
     id: d.id,
@@ -1956,6 +1959,9 @@ const LONG_GONE_MS = 10 * 60_000
 
 /** A job past its time without a report: a job with no process to watch, past its ttl (30 minutes by default). */
 const isOverdue = (t: Task, now: number) => t.kind === 'job' && t.pid === null && now - t.updated > (t.ttl ?? 30 * 60_000)
+
+// A silent job with no report for this long leaves the bar as stopped (settleOverdue).
+const SILENT_CAP_MS = 2 * 60 * 60_000
 
 /**
  * One job file read afresh, applied to the model:
@@ -2413,14 +2419,23 @@ function applyPids(m: Model, check: PidCheck, now: number, fx: Effect[]): boolea
   return changed
 }
 
-/** Jobs with no process to watch, past their time without a report, go silent (not failed: they may report again). */
-function pauseOverdue(m: Model, now: number): boolean {
+/**
+ * Jobs with no process to watch, past their time without a report, go silent (not failed: they may report again). One
+ * silent for SILENT_CAP_MS since its last report leaves the bar as stopped: whatever ran it is gone (a stopped agent, a
+ * power cut). Its file is left as it is, so a report after all brings it back (applyJobFile).
+ */
+export function settleOverdue(m: Model, now: number): boolean {
   let changed = false
-  for (const t of m.tasks)
+  for (const t of m.tasks) {
     if (t.state === 'running' && isOverdue(t, now)) {
       pause(t, now)
       changed = true
+    } else if (t.kind === 'job' && t.pid === null && t.state === 'silent' && now - t.updated > SILENT_CAP_MS) {
+      // No closeFile effect (a throwaway list): the file stays open for a late report.
+      endTask(m, t, false, now, [], `no report for ${fmt(SILENT_CAP_MS)}`)
+      changed = true
     }
+  }
   return changed
 }
 
@@ -2595,7 +2610,7 @@ function applyPoll(m: Model, found: PollRead, now: number, fx: Effect[]): boolea
   let changed = false
   for (const d of found.jobs) changed = applyJobFile(m, d, now, fx) || changed
   changed = applySideChats(m, found.chats, now) || changed
-  changed = pauseOverdue(m, now) || changed
+  changed = settleOverdue(m, now) || changed
   // Work an older version of PulseWise added: sorted once (a server or watcher, and where it started in Claude's calls).
   for (const t of m.tasks) {
     if (t.service === undefined) {
@@ -2918,14 +2933,12 @@ export const register: Register = (on, options) => {
           ? ((result.backgroundTaskId ?? result.taskId ?? result.task_id) as string | undefined)
           : undefined
       // A background task Claude stops sends no end notification: TaskStop (KillShell before it) is its end. A
-      // command a helper job reports (covered) takes its job with it.
+      // command a helper job reports (covered) takes its job with it, and an agent its own work (endTask).
       if (tool === 'TaskStop' || tool === 'KillShell') {
         const stopped = text('task_id') || text('shell_id')
         const t = m.tasks.find(one => one.id === stopped && !isFinal(one))
         if (t) {
           endTask(m, t, false, now, fx, 'stopped')
-          const job = t.coveredBy ? m.tasks.find(one => one.id === t.coveredBy) : undefined
-          if (job && !isFinal(job)) endTask(m, job, false, now, fx, 'stopped')
           changed = true
         }
       }

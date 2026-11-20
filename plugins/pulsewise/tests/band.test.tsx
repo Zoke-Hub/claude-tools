@@ -3,9 +3,9 @@
 
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { AgentStatus, On } from 'claude-code'
+import type { AgentInfo, AgentStatus, On } from 'claude-code'
 
-import { cleanLabel, etaRecord } from '../hooks/register'
+import { cleanLabel, etaRecord, jobToTask, settleOverdue } from '../hooks/register'
 
 const BAND = {
   plugin: 'pulsewise',
@@ -493,7 +493,7 @@ test('work still running when a new list is written joins the new point named li
   inProject(on)
   on('tool.call', () => ({ result: {} }))
   on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
-  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Analyse the interview footage', type: 'general-purpose', status: 'running' }] }))
+  on('agent.list', () => ({ value: [agentRow({ id: 'agent-1', description: 'Analyse the interview footage', type: 'general-purpose', status: 'running' })] }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Plan the cut', status: 'in_progress' }, { content: 'Write the notes', status: 'pending' }] })
   await $.agent.spawn(spawnOf({ prompt: 'analyse', description: 'Analyse the interview footage', subagentType: 'general-purpose' }))
@@ -566,7 +566,7 @@ test("a background agent's named step-by-step job shows on the agent's own bar",
   inProject(on)
   on('tool.call', () => ({ result: {} }))
   on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
-  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Animation notes on the walk', type: 'general-purpose', status: 'running' }] }))
+  on('agent.list', () => ({ value: [agentRow({ id: 'agent-1', description: 'Animation notes on the walk', type: 'general-purpose', status: 'running' })] }))
   agentNotesJob(on)
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -590,7 +590,7 @@ test('a background agent waiting on its own background command stays on the bar 
     e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1' } } : { result: {} },
   )
   on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
-  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Check the pack', type: 'general-purpose', status: 'waiting' }] }))
+  on('agent.list', () => ({ value: [agentRow({ id: 'agent-1', description: 'Check the pack', type: 'general-purpose', status: 'waiting' })] }))
   on('turn.complete', () => ({ text: '' }))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -619,7 +619,7 @@ test('a background agent that ran its own background command leaves the bar once
   on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
   let status: AgentStatus | 'gone' = 'waiting'
   // A finished agent may be gone from the app's list altogether.
-  on('agent.list', () => ({ value: status === 'gone' ? [] : [{ id: 'agent-1', description: 'Check the pack', type: 'general-purpose', status }] }))
+  on('agent.list', () => ({ value: status === 'gone' ? [] : [agentRow({ id: 'agent-1', description: 'Check the pack', type: 'general-purpose', status })] }))
   on('turn.complete', () => ({ text: '' }))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -1178,6 +1178,19 @@ const jobFolder = (on: On) => {
 }
 
 /** A helper job's file: a running ttl job with one counted step (4 of 14), with `o` over it. */
+// An agent as the app lists it: the fields a test names, the rest the engine's plain values.
+const agentRow = (o: { id: string; description: string; type: string; status: AgentStatus }): AgentInfo => ({
+  kind: 'local_agent',
+  taskStatus: o.status === 'waiting' || o.status === 'idle' ? 'running' : o.status,
+  label: o.description,
+  startTime: 0,
+  cwd: '/',
+  tokenCount: 0,
+  tokenSamples: [],
+  hasRow: true,
+  ...o,
+})
+
 const jobBody = (o: Record<string, unknown>) => ({
   id: 'j', name: 'Job', point: null, session: 'chat-1', host_session: 'local_x', pid: null, heartbeat: false, ttl_ms: 1_800_000,
   script: 'progress.py', argv: '', started: Date.now(), updated: Date.now(), ended: null, state: 'running', message: null,
@@ -1608,7 +1621,7 @@ test("an agent is not taken for ended when its status can't be read or reads idl
   on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
   // null: the app's list does not answer.
   let status: 'idle' | 'completed' | null = null
-  on('agent.list', () => (status === null ? { deny: 'not now' } : { value: [{ id: 'agent-1', description: 'Check the pack', type: 'general-purpose', status }] }))
+  on('agent.list', () => (status === null ? { deny: 'not now' } : { value: [agentRow({ id: 'agent-1', description: 'Check the pack', type: 'general-purpose', status })] }))
   on('turn.complete', () => ({ text: '' }))
   const agentTurnEnds = () => $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'ta', agentId: 'agent-1', reason: 'answer' } as never)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -1644,7 +1657,7 @@ test("an agent's own step-by-step job is not ended with it, and shows again when
   on('tool.call', () => ({ result: {} }))
   on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
   let status: 'running' | 'completed' = 'running'
-  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Animation notes on the walk', type: 'general-purpose', status }] }))
+  on('agent.list', () => ({ value: [agentRow({ id: 'agent-1', description: 'Animation notes on the walk', type: 'general-purpose', status })] }))
   on('turn.complete', () => ({ text: '' }))
   agentNotesJob(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -1793,7 +1806,7 @@ test("a job run by bash is not taken for an agent's own just because the agent's
   inProject(on)
   on('tool.call', () => ({ result: {} }))
   on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
-  on('agent.list', () => ({ value: [{ id: 'agent-1', description: 'Fix the notes', type: 'general-purpose', status: 'running' as const }] }))
+  on('agent.list', () => ({ value: [agentRow({ id: 'agent-1', description: 'Fix the notes', type: 'general-purpose', status: 'running' as const })] }))
   const { files } = jobFolder(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.agent.spawn(spawnOf({ prompt: 'fix them', description: 'Fix the notes', subagentType: 'general-purpose' }))
@@ -2194,7 +2207,7 @@ test('background work started right after Claude counts a point joins that point
   inProject(on)
   on('tool.call', () => ({ result: {} }))
   on('agent.spawn', () => ({ agentId: 'agent-r', model: 'test' }))
-  on('agent.list', () => ({ value: [{ id: 'agent-r', description: 'Look over the edits', type: 'general-purpose', status: 'running' }] }))
+  on('agent.list', () => ({ value: [agentRow({ id: 'agent-r', description: 'Look over the edits', type: 'general-purpose', status: 'running' })] }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Apply the picks', status: 'in_progress' }, { content: 'Full retest', status: 'in_progress' }, { content: 'Report', status: 'pending' }] })
   await $.tool.call({ tool: COUNT, point: 1, done: 1, total: 3, unit: 'picks' })
@@ -2418,4 +2431,75 @@ test('a label the small model makes too long is sent back once with its length, 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await drawnText(ui)).toContain('1. Highlight preview on this PC')
   await ui.unmount()
+})
+
+test("an agent Claude stops takes the helper job its own command reports with it, instead of leaving it with no report", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', (_, e) => (e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg-log' } } : { result: {} }))
+  on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
+  on('agent.list', () => ({ value: [agentRow({ id: 'agent-1', description: 'Record the site', type: 'general-purpose', status: 'waiting' })] }))
+  const { files, writes } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Record the site', status: 'in_progress' }, { content: 'Write it up', status: 'pending' }] })
+  await $.agent.spawn(spawnOf({ prompt: 'record it', description: 'Record the site', subagentType: 'general-purpose' }))
+  await $.tool.call({ tool: 'Bash', command: 'node logger.mjs --name "Log the ads"', description: 'Run the logger', run_in_background: true, agentId: 'agent-1' } as never)
+  const started = Date.now() + 500
+  files.set('j-ads', { mtime: 1, body: () => jobBody({ id: 'j-ads', name: 'Log the ads', started, updated: started }) })
+  await clock.advance(1100)
+  // Claude stops the agent: the logger died with it, and its job ends as stopped, its file closed.
+  await $.tool.call({ tool: 'TaskStop', task_id: 'agent-1' } as never)
+  await clock.advance(1100)
+  expect(writes.some(w => w.path.endsWith('/jobs/j-ads.json') && w.text.includes('"failed"'))).toBe(true)
+  await clock.advance(31 * 60_000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).not.toContain('no report')
+  await ui.unmount()
+})
+
+test('an agent Claude stops takes its own step-by-step job with it; one that only finished its turn leaves it waiting', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', (_, e) => ({ agentId: (e as { description?: string }).description === 'Animation notes on the walk' ? 'agent-1' : 'agent-2', model: 'test' }))
+  let second: AgentStatus = 'running'
+  on('agent.list', () => ({
+    value: [
+      agentRow({ id: 'agent-1', description: 'Animation notes on the walk', type: 'general-purpose', status: 'running' }),
+      agentRow({ id: 'agent-2', description: 'Cut-out notes on the arms', type: 'general-purpose', status: second }),
+    ],
+  }))
+  on('turn.complete', () => ({ text: '' }))
+  const { files, writes } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Notes on the walk', status: 'in_progress' }, { content: 'Notes on the arms', status: 'in_progress' }] })
+  await $.agent.spawn(spawnOf({ prompt: 'do the notes', description: 'Animation notes on the walk', subagentType: 'general-purpose' }))
+  await $.agent.spawn(spawnOf({ prompt: 'do the arms', description: 'Cut-out notes on the arms', subagentType: 'general-purpose' }))
+  const started = Date.now() + 500
+  files.set('j-walk', { mtime: 1, body: () => jobBody({ id: 'j-walk', name: 'Animation notes on the walk', started, updated: started }) })
+  files.set('j-arms', { mtime: 1, body: () => jobBody({ id: 'j-arms', name: 'Cut-out notes on the arms', started, updated: started }) })
+  await clock.advance(1100)
+  await $.tool.call({ tool: 'TaskStop', task_id: 'agent-1' } as never)
+  second = 'completed'
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'ta', agentId: 'agent-2', reason: 'answer' } as never)
+  await clock.advance(1100)
+  expect(writes.some(w => w.path.endsWith('/jobs/j-walk.json') && w.text.includes('"failed"'))).toBe(true)
+  expect(writes.some(w => w.path.endsWith('/jobs/j-arms.json'))).toBe(false)
+})
+
+test('a job with no report goes quiet after its time, and after 2 hours leaves the bar as stopped', () => {
+  // PulseWise reads the real clock, so the rule is run straight on a model, at the times it would be.
+  const t0 = 1_800_000_000_000
+  const m = { points: [], tasks: [] as unknown[], actions: [], log: [], side: [], finishedAt: null, phase: 'idle', phaseAt: null, turn: 0, listTurn: -1, closedJobs: {} }
+  const job = jobToTask(m as never, jobBody({ id: 'j-quiet', name: 'Quiet logger', started: t0, updated: t0 }) as never)
+  m.tasks.push(job)
+  settleOverdue(m as never, t0 + 31 * 60_000)
+  expect(job.state).toBe('silent')
+  settleOverdue(m as never, t0 + 2 * 60 * 60_000 - 1000)
+  expect(job.state).toBe('silent')
+  settleOverdue(m as never, t0 + 2 * 60 * 60_000 + 60_000)
+  expect(job.state).toBe('failed')
+  expect(job.message).toMatch(/^no report for 2h/)
 })

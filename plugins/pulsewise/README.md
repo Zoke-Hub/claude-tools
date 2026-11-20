@@ -57,6 +57,9 @@ A beat fills from what it is told, never from a guess:
 - **Servers and watchers** (a preview server, a file watcher) are not progress: they show under Tracks as "serving"
   and never hold the bar open.
 - A point whose jobs are done but whose own work has no count stops just short of full until it is ticked.
+- A job that stops reporting shows "no report" after its time (30 minutes unless it says otherwise) and waits, since
+  it may report again. One whose command or agent was stopped ends with it, and one with no report for 2 hours leaves
+  the bar as stopped (a power cut, say); it comes back if it reports after all.
 - Changes to the task list (points added, taken off, renamed) show at once; a point renamed in place keeps its time
   and its count.
 - A name longer than 32 characters gets a short label for the bar, written by a small model (Haiku), once per name.
