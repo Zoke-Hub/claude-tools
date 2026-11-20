@@ -576,7 +576,7 @@ test("a background agent's named step-by-step job shows on the agent's own bar",
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const drawn = await drawnText(ui)
-  expect(drawn).toContain('Animation notes on the walk: ')
+  expect(drawn).toContain('Animation notes on the walk · Test: ')
   expect(drawn).toContain('Fix arms · 2 / 5')
   await ui.unmount()
 })
@@ -604,7 +604,7 @@ test('a background agent waiting on its own background command stays on the bar 
   await clock.advance(30_000)
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await drawnText(ui)).toContain('Agent: Check the pack')
+  expect(await drawnText(ui)).toContain('Check the pack · Test')
   await ui.unmount()
 })
 
@@ -633,7 +633,10 @@ test('a background agent that ran its own background command leaves the bar once
   await clock.advance(30_000)
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await drawnText(ui)).not.toContain('Agent: Check the pack')
+  const drawn = await drawnText(ui)
+  // The beat no longer shows the agent working; its own track says done.
+  expect(drawn).not.toContain('Agent (Test)')
+  expect(drawn).toContain('Check the pack · Test: done')
   await ui.unmount()
 })
 
@@ -747,6 +750,64 @@ test('the opened bar and each job bar get click areas; a hover box shows only wh
   await ui.press({ key: 'press-hl0-0' })
   expect(await ui.find({ key: 'press-hl0-0' })).toBeUndefined()
   expect(await drawnText(ui)).not.toContain('Tracks')
+  await ui.unmount()
+})
+
+test('a hover box follows the pointer alone: the app is given none it would keep up as a pop-up card', async ($, on) => {
+  type Node = { type?: string; props?: Record<string, unknown>; hover?: Record<string, unknown>; children?: Node[] }
+  inProject(on)
+  let next = 0
+  on('tool.call', (_, e) =>
+    e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: `bg${++next}` } } : { result: {} },
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const LONG = 'Answer the questions and explain every choice made in the images, the video and the review, one by one'
+  await $.tool.call({
+    tool: PLAN,
+    scope: 'first_task',
+    items: [{ content: 'Images and video', status: 'in_progress' }, { content: 'Review', status: 'pending' }, { content: LONG, status: 'pending' }],
+  })
+  await $.tool.call({ tool: 'Bash', command: 'cut pieces', description: 'Cut out the pieces', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'python ~/.claude/progress/progress.py run --name "Render the walk" -- render', description: 'Render the walk', run_in_background: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  // Every box a hover reveals, with the boxes it sits in (outermost first).
+  const hoverOf = (node: Node) => node.hover ?? (node.props?.hover as Record<string, unknown> | undefined)
+  const reveals = (node: Node, above: Node[], out: { box: Node; above: Node[] }[]) => {
+    if (node.type === 'Box' && node.props?.display === 'none' && hoverOf(node)?.display === 'flex') out.push({ box: node, above })
+    for (const kid of node.children ?? []) if (typeof kid === 'object' && kid) reveals(kid, [...above, node], out)
+    return out
+  }
+  const texts = (node: Node): string => (typeof node === 'string' ? node : (node.children ?? []).map(texts).join(''))
+  // With nothing opened, then with a beat's close-up open (the pulse, the close-up's bar, the tracks and the buttons).
+  for (const opened of [null, 'open-p:0']) {
+    if (opened) await ui.press({ key: opened })
+    const found = reveals((await ui.drawn()) as Node, [], [])
+    const shown = found.map(f => texts(f.box))
+    // The cut beat's full name and each button's line are there to be shown.
+    expect(shown.some(text => text.startsWith('3. Answer the questions'))).toBe(true)
+    expect(shown).toContain('Ask Claude to update the list and its counts')
+    for (const { box, above } of found) {
+      // The desktop app lifts a PLACED box that a hover reveals into a pop-up card of its own, and shows that card
+      // again after each redraw and while the keyboard focus is inside its keyed box (as after a click), whether the
+      // pointer is there or not: the box that stayed on screen. So the revealed box itself is never placed...
+      expect(box.props?.position).toBeUndefined()
+      // ...and joins no hover group (a group lights from elsewhere in the band): only its own keyed box shows it.
+      expect(hoverOf(box)?.scope).toBeUndefined()
+      // It sits in a placed box that is always drawn and holds nothing else, so showing it moves nothing in the band,
+      const holder = above.at(-1)
+      expect(holder?.props?.position).toBe('absolute')
+      expect(holder?.props?.display).toBeUndefined()
+      expect(holder?.children?.length).toBe(1)
+      expect(typeof holder?.props?.width).toBe('number')
+      // inside a keyed box: the pointer over that box is what shows it.
+      expect(above.some(node => node.type === 'Box' && typeof node.props?.key === 'string' && node.props.key !== '')).toBe(true)
+      // Solid theme colours, so what the box lies over never shows through it.
+      expect(JSON.stringify(box)).toContain('"backgroundColor":"text"')
+      expect(JSON.stringify(box)).toContain('"color":"inverseText"')
+    }
+    // No other placed box is hidden for a hover to show.
+    expect(JSON.stringify(await ui.drawn())).not.toMatch(/"position":"absolute"[^{}]*"display":"none"|"display":"none"[^{}]*"position":"absolute"/)
+  }
   await ui.unmount()
 })
 
@@ -1630,14 +1691,14 @@ test("an agent is not taken for ended when its status can't be read or reads idl
   await agentTurnEnds()
   let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
-  expect(await drawnText(ui)).not.toContain('Check the pack: done')
+  expect(await drawnText(ui)).not.toContain('Check the pack · Test: done')
   await ui.unmount()
   // Idle: between turns, not ended.
   status = 'idle'
   await agentTurnEnds()
   ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ key: 'toggle-done' })).toBeUndefined()
-  expect(await drawnText(ui)).toContain('Check the pack: between turns')
+  expect(await drawnText(ui)).toContain('Check the pack · Test: between turns')
   await ui.unmount()
   // It acts again, then the app says it completed: one line in "Done so far".
   await $.tool.call({ tool: 'Read', file_path: '/notes.md', agentId: 'agent-1' } as never)
@@ -1646,7 +1707,7 @@ test("an agent is not taken for ended when its status can't be read or reads idl
   await agentTurnEnds()
   ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await drawnText(ui)).toContain('"label":"▸ Done · 1"')
-  expect(await drawnText(ui)).toContain('Check the pack: done')
+  expect(await drawnText(ui)).toContain('Check the pack · Test: done')
   await ui.unmount()
 })
 
@@ -2097,7 +2158,7 @@ test('after 8 of its calls without a count Claude is reminded, and again no soon
 
 test('a new list asks for an estimate; the finished list goes to the time log once, its estimates beside its real times', async ($, on) => {
   const { clock, stored, first } = await countedChat($, on)
-  expect(JSON.stringify(first)).toContain('send mcp__pulsewise__estimate')
+  expect(JSON.stringify(first)).not.toContain('send mcp__pulsewise__estimate')
   expect(JSON.stringify(await $.tool.call({ tool: ESTIMATE, minutes: 10, points: [6, 4] }))).toContain('Noted: 10 min for the list, 2 points.')
   await $.tool.call({ tool: COUNT, point: 1, done: 4, total: 4, unit: 'edits' })
   await $.turn.complete({ answer: 'over to you', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
@@ -2134,15 +2195,22 @@ test("the time log's real times leave out the waits for the person, for the list
   expect(etaRecord({ ...m, list: { ...m.list, logged: true } } as never, t0 + 10 * min)).toBeNull()
 })
 
-test('with three finished lists on record, the estimate ask says how the past estimates turned out', async ($, on) => {
+test('a list of more than three points is asked for an estimate; with three lists on record PulseWise corrects it itself', async ($, on) => {
   const { clock, stored } = await countedChat($, on)
   const past = (estimate: number, actual: number) => JSON.stringify({ v: 1, complete: true, estimate_min: estimate, actual_min: actual, points: [] })
-  stored.set('/home/me/.claude/progress/eta-log.jsonl', `${past(30, 10)}\n${past(20, 10)}\n${past(10, 5)}\n`)
+  stored.set('/home/me/.claude/progress/eta-log.jsonl', `${past(30, 10)}
+${past(20, 10)}
+${past(10, 5)}
+`)
   // The log is read at the start and after each line written: a new session reads it.
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(50)
-  const ask = await $.tool.call({ tool: PLAN, scope: 'new_task', items: [{ content: 'Sort the photos', status: 'in_progress' }, { content: 'Write the captions', status: 'pending' }] })
-  expect(JSON.stringify(ask)).toContain('a list took 0.5× what you estimated (median of 3)')
+  const items = ['Sort the photos', 'Write the captions', 'Lay out the pages', 'Export the book'].map((content, i) => ({ content, status: i ? 'pending' : 'in_progress' }))
+  const ask = JSON.stringify(await $.tool.call({ tool: PLAN, scope: 'new_task', items }))
+  expect(ask).toContain('send mcp__pulsewise__estimate')
+  expect(ask).toContain('clock time')
+  expect(ask).not.toContain('what you estimated')
+  expect(JSON.stringify(await $.tool.call({ tool: ESTIMATE, minutes: 20 }))).toContain('Noted: 20 min for the list (by your past estimates, about 10 min).')
 })
 
 test('a helper job that names its point by number joins that point, whatever its name', async ($, on) => {
@@ -2214,7 +2282,7 @@ test('background work started right after Claude counts a point joins that point
   await $.agent.spawn(spawnOf({ prompt: 'review', description: 'Look over the edits', subagentType: 'general-purpose' }))
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const drawn = await drawnText(ui)
-  expect(drawn).toContain('Apply the picks: Agent: Look over the edits')
+  expect(drawn).toContain('Apply the picks: Agent (Test): Look over the edits')
   expect(drawn).not.toContain('Full retest: Agent: Look over the edits')
   await ui.unmount()
 })
@@ -2420,7 +2488,7 @@ test('a label the small model makes too long is sent back once with its length, 
   on('model.complete', (_, e) => {
     const prompt = String((e as unknown as { prompt: string }).prompt)
     asked.push(prompt)
-    const text = asked.length === 1 ? 'Serve highlight preview on this PC' : 'Highlight preview on this PC'
+    const text = asked.length === 1 ? 'Serve highlight preview on this PC' : 'Serve highlight preview here'
     return { value: { isAnswered: true, text, usage: { input_tokens: 40, output_tokens: 8 } } } as never
   })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -2429,7 +2497,7 @@ test('a label the small model makes too long is sent back once with its length, 
   expect(asked.length).toBe(2)
   expect(asked[1]).toContain('Your last answer, "Serve highlight preview on this PC", has 34')
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await drawnText(ui)).toContain('1. Highlight preview on this PC')
+  expect(await drawnText(ui)).toContain('1. Serve highlight preview here')
   await ui.unmount()
 })
 
@@ -2502,4 +2570,152 @@ test('a job with no report goes quiet after its time, and after 2 hours leaves t
   settleOverdue(m as never, t0 + 2 * 60 * 60_000 + 60_000)
   expect(job.state).toBe('failed')
   expect(job.message).toMatch(/^no report for 2h/)
+})
+
+test("a job goes to the agent that started it, else the one named most like it, not the first agent sharing two words", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const ids: Record<string, string> = {
+    'Site shows in the Library (build e)': 'ag-1',
+    'Site layers and menus (build f)': 'ag-2',
+    'Home screen, options, battery (build f)': 'ag-3',
+  }
+  on('agent.spawn', (_, e) => ({ agentId: ids[(e as { description?: string }).description ?? ''] ?? 'ag-x', model: 'test' }))
+  on('agent.list', () => ({ value: Object.entries(ids).map(([description, id]) => agentRow({ id, description, type: 'general-purpose', status: 'running' })) }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const items = ['Build e: site shows in the Library', 'Build f: site layers and menus', 'Build f: home screen, options, battery']
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: items.map(content => ({ content, status: 'in_progress' })) })
+  for (const description of Object.keys(ids)) await $.agent.spawn(spawnOf({ prompt: 'build it', description, subagentType: 'general-purpose' }))
+  // The third agent starts a job whose name fits the first two agents' as well as its own.
+  await $.tool.call({ tool: 'Bash', command: 'python progress.py start "Site menus and home (build f)" --steps "Read,Tests"', description: 'Start the job', agentId: 'ag-3' } as never)
+  const now = Date.now()
+  const step = (name: string, done: number, total: number) => ({ name, state: 'running', done, total, unit: null, weight: null, est_ms: null, started: now, ended: null })
+  files.set('j-layers', { mtime: 1, body: () => jobBody({ id: 'j-layers', name: 'Site layers and menus (build f)', started: now, updated: now, steps: [step('Netflix check', 5, 7)] }) })
+  files.set('j-home', { mtime: 1, body: () => jobBody({ id: 'j-home', name: 'Site menus and home (build f)', started: now + 1, updated: now + 1, steps: [step('Guide', 2, 4)] }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const beat = async (n: number) => {
+    await ui.press({ key: `open-p:${n}` })
+    return [...(await drawnText(ui)).matchAll(/"alt":"([^"]{0,300})/g)].map(m => m[1] ?? '').find(alt => alt.startsWith(`${n + 1}.`)) ?? ''
+  }
+  expect(await beat(0)).not.toContain('5 / 7')
+  expect(await beat(1)).toContain('Agent (Test) · 5 / 7')
+  expect(await beat(2)).toContain('Agent (Test) · 2 / 4')
+  await ui.unmount()
+})
+
+test("a working agent's brief gets PulseWise's progress lines, with its own name and its point's number; a lookup agent's does not", async ($, on) => {
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const briefs: Record<string, string> = {}
+  on('agent.spawn', (_, e) => {
+    const spawn = e as { description: string; prompt: string }
+    briefs[spawn.description] = spawn.prompt
+    return { agentId: `ag-${Object.keys(briefs).length}`, model: 'test' }
+  })
+  on('agent.list', () => ({ value: [] }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Notices and helper', status: 'in_progress' }, { content: 'Site layers and menus', status: 'in_progress' }] })
+  await $.agent.spawn(spawnOf({ prompt: 'build the menus', description: 'Site layers and menus', subagentType: 'general-purpose' }))
+  await $.agent.spawn(spawnOf({ prompt: 'find the menu code', description: 'Find the menu code', subagentType: 'Explore' }))
+  const brief = briefs['Site layers and menus'] ?? ''
+  expect(brief.startsWith('build the menus')).toBe(true)
+  expect(brief).toContain('progress.py start "Site layers and menus" --point 2 --steps')
+  expect(brief).toContain("never the part's own place in the list")
+  expect(brief).toContain('progress.py finish "Site layers and menus"')
+  expect(briefs['Find the menu code']).toBe('find the menu code')
+})
+
+test("an agent's model shows as a tag only when it differs from the chat's own", async ($, on) => {
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const isFable = (e: unknown) => (e as { description: string }).description === 'Build the menus'
+  on('agent.spawn', (_, e) => ({ agentId: isFable(e) ? 'ag-f' : 'ag-o', model: isFable(e) ? 'fable' : 'claude-opus-5-5' }))
+  on('agent.list', () => ({
+    value: [
+      agentRow({ id: 'ag-f', description: 'Build the menus', type: 'general-purpose', status: 'running' }),
+      agentRow({ id: 'ag-o', description: 'Check the logos', type: 'general-purpose', status: 'running' }),
+    ],
+  }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build the menus', status: 'in_progress' }, { content: 'Check the logos', status: 'in_progress' }] })
+  const parent = { parentModel: 'claude-opus-5-5' }
+  await $.agent.spawn({ ...spawnOf({ prompt: 'build', description: 'Build the menus', subagentType: 'general-purpose' }), ...parent })
+  await $.agent.spawn({ ...spawnOf({ prompt: 'check', description: 'Check the logos', subagentType: 'general-purpose' }), ...parent })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('Build the menus · Fable')
+  expect(drawn).not.toContain('Check the logos · Opus')
+  await ui.unmount()
+})
+
+test('a step names what its numbers count: "14 / 16 tests"', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const now = Date.now()
+  const step = (name: string, state: string, done: number | null, total: number | null, unit: string | null) => ({ name, state, done, total, unit, weight: null, est_ms: null, started: now, ended: null })
+  files.set('j-t', { mtime: 1, body: () => jobBody({ id: 'j-t', name: 'Retest the site', steps: [step('Build', 'done', null, null, null), step('Tests', 'running', 14, 16, 'tests')] }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('Tests · 14 / 16 tests')
+  await ui.unmount()
+})
+
+test("a list's long names are labelled together in one call, each keeping its first word", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const asked: string[] = []
+  on('model.complete', (_, e) => {
+    const prompt = String((e as unknown as { prompt: string }).prompt)
+    asked.push(prompt)
+    // The second label drops its first word, so it is asked again alone and keeps it.
+    const text = asked.length === 1 ? '1. Notices and helper, build e\n2. Home, options, battery (f)' : 'Build f: home, options'
+    return { value: { isAnswered: true, text, usage: { input_tokens: 40, output_tokens: 8 } } } as never
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const items = ['Notices and helper for build e (Fable)', 'Build f: home screen, options, battery (Fable)', 'Install it']
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: items.map(content => ({ content, status: 'in_progress' })) })
+  await clock.advance(1100)
+  expect(asked[0]).toContain('1. Notices and helper for build e (Fable)\n2. Build f: home screen, options, battery (Fable)')
+  expect(asked[0]).toContain('Install it')
+  expect(asked[1]).toContain('drops the first word "build"')
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const drawn = await drawnText(ui)
+  expect(drawn).toContain('1. Notices and helper, build e')
+  expect(drawn).toContain('2. Build f: home, options')
+  await ui.unmount()
+})
+
+test('a new job with the same name as one that stopped is its redo, wherever it runs', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Log the ads', status: 'in_progress' }, { content: 'Check the logos', status: 'in_progress' }] })
+  const now = Date.now()
+  files.set('j-1', { mtime: 1, body: () => jobBody({ id: 'j-1', name: 'Log the site ads', point: '1', started: now - 60_000, updated: now - 1000 }) })
+  await clock.advance(1100)
+  // It stops; a new job of the same name starts, for the other point.
+  const first = files.get('j-1')
+  if (first) {
+    first.mtime = 2
+    first.body = () => jobBody({ id: 'j-1', name: 'Log the site ads', point: '1', started: now - 60_000, updated: Date.now(), state: 'failed', ended: Date.now() })
+  }
+  await clock.advance(1100)
+  files.set('j-2', { mtime: 1, body: () => jobBody({ id: 'j-2', name: 'Log the site ads', point: '2', started: Date.now() + 100, updated: Date.now() + 100 }) })
+  await clock.advance(1100)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).toContain('redo of “Log the site ads”')
+  await ui.unmount()
 })

@@ -22,10 +22,13 @@ From a shell or another language, use the command line:
 
     python3 ~/.claude/progress/progress.py run --name "Review render" -- ffmpeg -i in.mov out.mp4
     python3 ~/.claude/progress/progress.py start "Batch" --steps "Fetch,Resize"
-    python3 ~/.claude/progress/progress.py step "Batch" Resize 3 40
+    python3 ~/.claude/progress/progress.py step "Batch" Resize 3 40 --unit images
     python3 ~/.claude/progress/progress.py finish "Batch"
 
-(step / finish / fail take the job's name or the id `start` prints.)
+(step / finish / fail take the job's name or the id `start` prints.) Send a step as it
+starts. Its numbers count the items inside it (images resized, tests passed, pages
+checked), never the step's own place in the list; leave them out when there is
+nothing to count: the bar already knows which step of how many it is on.
 
 Each job is one JSON file in ~/.claude/progress/jobs/, replaced in one go
 (temp file + rename) so the mod never reads half a file. The file carries the
@@ -33,7 +36,7 @@ chat's id (CLAUDE_CODE_SESSION_ID), so a chat's bar shows only its own jobs.
 """
 
 # Raised with every change, so PulseWise replaces an older copy in ~/.claude/progress.
-HELPER_VERSION = 6
+HELPER_VERSION = 7
 
 import atexit
 import builtins
@@ -193,6 +196,10 @@ class Job:
         }
         for step_name in steps or []:
             self._add_step(step_name, weights.get(step_name), history.get(step_name))
+        # The first step runs from the start, so the work done before the first report belongs to a step.
+        if self.data["steps"]:
+            self.data["steps"][0]["state"] = "running"
+            self.data["steps"][0]["started"] = started
         self._write(force=True)
         if heartbeat:
             threading.Thread(target=self._beat, daemon=True).start()
@@ -248,15 +255,25 @@ class Job:
                 step["unit"] = unit
             is_new = step["state"] != "running"
             if is_new:
-                # Steps run in order: starting one finishes the one running and any earlier step left behind.
+                # Steps run in order: starting one finishes the one running and any earlier step left behind. They
+                # share the time since the first of them began (else since the last step ended), in list order, so
+                # a step reported late, or skipped over, still counts for its part of the time.
                 position = self.data["steps"].index(step)
-                for index, other in enumerate(self.data["steps"]):
-                    if other is step:
-                        continue
-                    if other["state"] == "running" or (index < position and other["state"] == "pending"):
+                closing = [
+                    other
+                    for index, other in enumerate(self.data["steps"])
+                    if other is not step and (other["state"] == "running" or (index < position and other["state"] == "pending"))
+                ]
+                if closing:
+                    now = _now()
+                    begun = [other["started"] for other in closing if other["started"]]
+                    ended = [other["ended"] for other in self.data["steps"] if other["ended"] and all(other is not c for c in closing)]
+                    since = min(begun) if begun else max(ended + [self.data["started"]])
+                    share = max(0, now - since) / len(closing)
+                    for n, other in enumerate(closing):
                         other["state"] = "done"
-                        other["ended"] = _now()
-                        other["started"] = other["started"] or other["ended"]
+                        other["started"] = round(since + n * share)
+                        other["ended"] = now if n == len(closing) - 1 else round(since + (n + 1) * share)
                 step["state"] = "running"
                 step["started"] = step["started"] or _now()
             if done is not None:
@@ -648,11 +665,14 @@ def main(argv=None):
     start_parser.add_argument("--point", help="task-list point this belongs to: its number in the list (or its name)")
     start_parser.add_argument("--redoes", help="name or id of a stopped job this one redoes")
 
-    step_parser = commands.add_parser("step", help="set the current step, with done/total")
+    step_parser = commands.add_parser(
+        "step", help="set the current step as it starts, with done/total for the items inside it (never its own place in the list)"
+    )
     step_parser.add_argument("id", help="the job's name or id")
-    step_parser.add_argument("step")
-    step_parser.add_argument("done", nargs="?", type=int)
-    step_parser.add_argument("total", nargs="?", type=int)
+    step_parser.add_argument("step", help="the step's name: one to three plain words")
+    step_parser.add_argument("done", nargs="?", type=int, help="items inside the step done so far (tests passed, pages checked)")
+    step_parser.add_argument("total", nargs="?", type=int, help="all the items inside the step")
+    step_parser.add_argument("--unit", help="what an item is, plural: tests, pages, images")
 
     finish_parser = commands.add_parser("finish", help="mark a job done")
     finish_parser.add_argument("id", help="the job's name or id")
@@ -673,7 +693,7 @@ def main(argv=None):
         started._write(force=True)
         print(started.id)
     elif args.action == "step":
-        _change(args.id, lambda found: found.step(args.step, args.done, args.total), is_strict=False)
+        _change(args.id, lambda found: found.step(args.step, args.done, args.total, args.unit), is_strict=False)
     elif args.action == "finish":
         _change(args.id, lambda found: found.finish())
     elif args.action == "fail":

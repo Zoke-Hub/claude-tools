@@ -3,6 +3,26 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-20 · PulseWise 1.0.0 (number unchanged), later
+
+- **PulseWise:** a job no longer lands on the wrong agent's beat. A job goes to the agent that started it, else to the
+  agent named most like it, not the first agent sharing two words with it.
+- **PulseWise:** each background agent that does work gets the progress lines in its brief from PulseWise itself: its
+  job's name (the agent's own) and its point's number, so it lands on its own beat; agents that only look things up
+  are left alone. Claude no longer writes these lines.
+- **PulseWise:** a step's numbers count the items inside it, never its place in the list, and `progress.py step` takes
+  `--unit` ("Tests · 14 / 16 tests"). Steps reported late or skipped over share the time since the last report
+  instead of counting for nothing, and the first step runs from the start. The helper is version 7.
+- **PulseWise:** names. Claude is asked for names of 32 characters or fewer, telling words first, without what every
+  point shares; an agent's model shows as a tag when it differs from the chat's; a beat whose one agent is named like
+  it says "Agent (Fable)" once. Haiku labels a list's long names together, keeping each one's first word.
+- **PulseWise:** a point is work ticked on its own; the reply and waiting for the person are not points. Short lists
+  (three points or fewer, no background work) are not asked for an estimate; estimates take decimals and are clock
+  time, and PulseWise corrects them by past ones itself (logged as `corrected_min`). A point an agent or job carries
+  needs no count, and a new job with the same name as a stopped one is its redo.
+- **PulseWise:** hover boxes follow the pointer: the app no longer turns them into cards that came back after a click
+  or a redraw. They are a solid strip inside the band, under the pulse, on a track's title row, or beside the buttons.
+
 ## 2026-11-20 · PulseWise 1.0.0 (number unchanged)
 
 - **PulseWise:** a job no longer sits on the bar with "no report" for good. A command that is stopped or fails takes

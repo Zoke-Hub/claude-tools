@@ -53,7 +53,14 @@ A beat fills from what it is told, never from a guess:
   other calls. The close-up shows it as "Claude · 2 / 5 edits". If more pieces turn up, the total grows and the fill
   steps back a little: it stays honest. A point Claude can't size shows as moving, with no fill.
 - **Background jobs** fill by the counts their scripts report through the helper. A command and the job it starts
-  show as one bar, and a job that names its point (`--point 3`) joins that point.
+  show as one bar, and a job that names its point (`--point 3`) joins that point. A step's time is measured from the
+  start: steps reported late or skipped over share the time since the last report, and a step's numbers count the
+  items inside it ("Tests · 14 / 16 tests"), never the step's own place in the list.
+- **Background agents** get PulseWise's progress lines in their brief, added by PulseWise itself: their job carries
+  the agent's own name and its point's number, so it lands on its own beat. An agent that only looks things up
+  (Explore, Plan) is left alone. A job with no point goes to the agent that started it, else to the best-named one.
+  An agent running a different model from the chat shows it as a tag ("· Fable"), and a beat whose one agent is named
+  like it says "Agent (Fable)" once instead of repeating the name.
 - **Servers and watchers** (a preview server, a file watcher) are not progress: they show under Tracks as "serving"
   and never hold the bar open.
 - A point whose jobs are done but whose own work has no count stops just short of full until it is ticked.
@@ -63,19 +70,26 @@ A beat fills from what it is told, never from a guess:
 - Changes to the task list (points added, taken off, renamed) show at once; a point renamed in place keeps its time
   and its count.
 - A name longer than 32 characters gets a short label for the bar, written by a small model (Haiku), once per name.
-  It is the only thing PulseWise asks a model for, and Haiku is the model it uses for anything like it.
+  The long names of one list go together in one call, so their labels read apart; each keeps its name's first word,
+  and none cuts a word short. It is the only thing PulseWise asks a model for, and Haiku is the model it uses for
+  anything like it.
+- A hover box shows a beat's or a button's full text only while the pointer is on it, inside the band.
 
 ## What it tells Claude
 
 - **The standing instruction (always on).** Once per conversation, and again after every compaction, PulseWise gives
-  Claude a short instruction (about 450 tokens): keep the task list current, one point at a time; count its own work
-  with the `count` tool; estimate a new list with the `estimate` tool; report any script or command expected to run
-  longer than about half a minute through the helper, naming its point.
+  Claude a short instruction (about 600 tokens): keep the task list current, one point at a time, a point being work
+  ticked on its own; count its own work with the `count` tool; estimate a new list with the `estimate` tool; report
+  any script or command expected to run longer than about half a minute through the helper, naming its point; name
+  things in 32 characters or fewer, the telling words first.
+- **Agents' briefs.** Each background agent that does work gets about 150 tokens of progress lines added to its brief:
+  its job's name, its point's number, and how to name and count its steps.
 - **Count reminders.** A point in progress that has gone 8 of Claude's calls without a count, or a background command
   still running 20 calls on with none, gets a one-line note at Claude's next step (about 60 tokens), at most once per
   8 calls a point (40 a command). For background work Claude can answer that it keeps running (a server) or is done.
-- **Estimates.** When Claude writes a new task list, it is asked (about 60 tokens) for its estimate: minutes for the
-  whole list and for each point. See "The time log".
+- **Estimates.** When Claude writes a new task list of more than three points, or one with background work running,
+  it is asked (about 60 tokens) for its estimate: minutes of clock time for the whole list and for each point,
+  decimals allowed. See "The time log".
 - **Nudge.** When you press Nudge, Claude gets a one-line reminder (about 60 tokens) at its next step: the list, the
   counts and any background work that is done or keeps running.
 - **Side-by-side planning (on unless you turn it off).** When Claude writes a new task list, PulseWise asks it to start the points that need nothing from each other at the same time, as background agents or commands, without being asked. See Settings to turn it off.
@@ -84,9 +98,9 @@ A beat fills from what it is told, never from a guess:
 
 Each task list that ran is written, once finished (or when a new list replaces it), as one line of
 `~/.claude/progress/eta-log.jsonl`: Claude's estimate beside the real time, for the list and for each point, with the
-time spent waiting for your replies left out, the point's count, which computer and which model. When Claude is next
-asked for an estimate, it is told how its past ones turned out (the median of real time over estimated, once three
-lists are on record), so its estimates get better. The bar doesn't show estimates or time left from them yet.
+time spent waiting for your replies left out, the point's count, which computer and which model. Once three lists
+are on record, PulseWise corrects each new estimate itself by how past ones turned out (the median of real time over
+estimated) and logs the corrected time beside it. The bar doesn't show estimates or time left from them yet.
 
 To bring in the log from another computer, append its lines to this file: each line names its computer.
 

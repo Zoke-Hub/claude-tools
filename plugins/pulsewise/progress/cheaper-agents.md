@@ -52,8 +52,8 @@ first: the default is no handoff, and any doubt keeps the point with the main mo
 
 ## When one is used
 
-- Name the agent like its point, and tell it to report its steps under that name
-  (`progress.py start "<its description>" --steps "..."`, then `step`, then `finish`), so PulseWise shows its bar.
+- Name the agent like its point. PulseWise adds the progress lines to its brief itself (its name and its point's
+  number), so the brief needs none of its own.
 - Put the machine notes it needs in the brief (which Python or ffmpeg to use, where the files are), and tell it to
   change nothing in the user's folders.
 - Say in the one line about side-by-side points which point goes to which model, so the user knows.

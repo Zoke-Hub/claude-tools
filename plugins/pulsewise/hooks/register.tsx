@@ -159,11 +159,23 @@ const SMALL_MODEL = 'haiku'
 // The small model is told to answer with the label alone; it can still think aloud, so the reply's last line that fits
 // is taken (cleanLabel).
 const LABEL_SYSTEM = 'You shorten progress-bar labels. Reply with the shortened label alone, on one line: no counting, no notes, no quotes.'
-// The small model overshoots a length limit: it is asked for LABEL_ASK characters, and a label up to NAME_LIMIT is taken;
-// an answer still too long is sent back once with its own length.
+// The small model overshoots a length limit: it is asked for LABEL_ASK characters, and a label up to NAME_LIMIT is taken.
+// A label keeps its name's first word ("Build …" stays "Build …"); an answer too long, or without that word, is sent
+// back once with what it did wrong (retryNote).
 const LABEL_ASK = 28
-const labelPrompt = (name: string, tooLong = '') =>
-  `Shorten this label to ${LABEL_ASK} characters or fewer (it has ${name.length}). Keep its meaning and its key words (names, numbers, codes); plain words, no full stop.${tooLong ? ` Your last answer, "${tooLong}", has ${tooLong.length}: shorter.` : ''}\n\nLabel: ${name}`
+const LABEL_RULES = 'Keep its first word, its meaning and its key words (names, numbers, codes); never cut a word short; plain words, no full stop.'
+const labelPrompt = (name: string, retry = '') =>
+  `Shorten this label to ${LABEL_ASK} characters or fewer (it has ${name.length}). ${LABEL_RULES}${retry ? ` ${retry}` : ''}\n\nLabel: ${name}`
+// The long names of one list go together, so their labels read apart from one another and from the bar's other names.
+const LIST_SYSTEM = 'You shorten progress-bar labels. Reply with the numbered labels alone, one per line: no counting, no notes, no quotes.'
+const listPrompt = (names: string[], others: string[]) =>
+  `Shorten each of these progress-bar labels to ${LABEL_ASK} characters or fewer, so they read apart from one another. Keep each one's first word, its meaning and its key words (names, numbers, codes); never cut a word short; plain words, no full stop.${others.length ? ` The bar's other names: ${others.join('; ')}.` : ''} Reply with one line per label, numbered as below.\n\n${names.map((name, i) => `${i + 1}. ${name}`).join('\n')}`
+/** A name's first word, which its label keeps. */
+const firstWord = (text: string) => /[a-z0-9]+/i.exec(text)?.[0]?.toLowerCase() ?? ''
+const keepsFirstWord = (name: string, label: string) => firstWord(label) === firstWord(name)
+/** What an answer did wrong, for its one retry: too long, or without the name's first word. */
+const retryNote = (name: string, answer: string) =>
+  answer.length > NAME_LIMIT ? `Your last answer, "${answer}", has ${answer.length}: shorter.` : `Your last answer, "${answer}", drops the first word "${firstWord(name)}": keep it.`
 
 // Claude's own tools: its count for a point's own work, and its estimate for a new list.
 const COUNT_TOOL = 'mcp__pulsewise__count'
@@ -171,7 +183,7 @@ const ESTIMATE_TOOL = 'mcp__pulsewise__estimate'
 const COUNT_SPEC: ToolSpec = {
   name: 'count',
   description:
-    "PulseWise's bar for your own work on a task-list point. When a point starts, size it by its pieces (files to change, cases to run, pages to check) and send {point, done: 0, total, unit}; send it again as pieces finish. Send it in the same message as another call, never on its own. Raise total when more pieces turn up (the bar shows that honestly). A point that can't be sized (tracking down a cause): send {point, none: true} once. Background scripts report through the progress helper instead; for background work the bar can't follow, send {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
+    "PulseWise's bar for your own work on a task-list point (a point whose work an agent or a background job reports needs no count from you: the bar follows that work). When a point starts, size it by its pieces (files to change, cases to run, pages to check) and send {point, done: 0, total, unit}; send it again as pieces finish. Send it in the same message as another call, never on its own. Raise total when more pieces turn up (the bar shows that honestly). A point that can't be sized (tracking down a cause): send {point, none: true} once. Background scripts report through the progress helper instead; for background work the bar can't follow, send {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -190,21 +202,25 @@ const COUNT_SPEC: ToolSpec = {
 const ESTIMATE_SPEC: ToolSpec = {
   name: 'estimate',
   description:
-    "Your estimate for a new task list, sent once, in the same message as its first call: minutes for the whole list and for each point, in list order, as long as they will really take you (waits for the person left out). PulseWise logs it against the real times so later estimates get better; the bar doesn't show it yet.",
+    "Your estimate for a new task list, sent once, in the same message as its first call: minutes for the whole list and for each point, in list order, as long as they will really take you (waits for the person left out). The list's total is clock time: points that run side by side count once. Decimals are fine (0.5 is half a minute). PulseWise corrects it by how your past estimates turned out and logs both against the real times; the bar doesn't show it yet.",
   inputSchema: {
     type: 'object',
     properties: {
-      minutes: { type: 'number', exclusiveMinimum: 0, description: 'The whole list, in minutes.' },
-      points: { type: 'array', items: { type: 'number', minimum: 0 }, description: 'Each point, in minutes, in list order.' },
+      minutes: { type: 'number', exclusiveMinimum: 0, description: 'The whole list, in minutes of clock time (decimals are fine).' },
+      points: { type: 'array', items: { type: 'number', minimum: 0 }, description: 'Each point, in minutes, in list order (decimals are fine).' },
     },
     required: ['minutes'],
   },
   isDeferred: false,
 }
 
-// Read by Claude once per new list: its estimate, with how its past estimates on this computer turned out (etaHint).
-const estimateNote = (hint: string) =>
-  `PulseWise: a new task list. With your next call, send ${ESTIMATE_TOOL}: minutes for the whole list and for each point, as long as they will really take you (waits for the person left out).${hint ? ` ${hint}` : ''}`
+// Read by Claude once per new list worth estimating (isWorthEstimating): its estimate, which PulseWise corrects itself.
+const estimateNote = () =>
+  `PulseWise: a new task list. With your next call, send ${ESTIMATE_TOOL}: minutes for the whole list (clock time: points that run side by side count once) and for each point, as long as they will really take you (waits for the person left out). Decimals are fine.`
+
+// A list is asked for an estimate when it is more than three points, or has background work running: a short list
+// done in a few calls tells the time log little.
+const isWorthEstimating = (items: unknown[], m: Model) => items.length > 3 || m.tasks.some(t => t.state === 'running' && !t.service)
 
 // Read by Claude when a point in progress has gone a while without its count, or background work runs on with none.
 const progressNote = (points: string[], work: string[]) =>
@@ -237,16 +253,35 @@ export const LONG_JOBS_BLOCK = {
   name: 'pulsewise',
   text: [
     'PulseWise (the progress bar under the task list) shows what it is told:',
-    '- The task list: mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch (points running side by side each the moment their work starts).',
+    '- The task list: mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch (points running side by side each the moment their work starts). A point is work ticked on its own: things done in one pass and ticked together are one point with a count; your reply itself, and waiting for the person, are not points.',
     `- Your own work on a point: its count, through ${COUNT_TOOL} (when the point starts, then as pieces finish), and a new list's estimate, through ${ESTIMATE_TOOL}. Both ride along with your other calls.`,
     '- Any script or command you expect to run longer than about half a minute (builds, renders, batch file or image jobs, quick inline scripts too) reports through `~/.claude/progress/progress.py` (`python3`; on Windows, `python`), with `--point <its point\'s number>`:',
     '  - a command or tool that prints its own progress: `progress.py run --name "<what it does>" --point N -- <command>` (it reads ffmpeg\'s `time=`, `NN%` and `done/total` lines; a quick inline script prints one `done/total` line per item, flushed);',
     '  - a Python script: `sys.path.insert(0, os.path.expanduser("~/.claude/progress")); import progress`, then `with progress.job(name, steps=[...], point="N"):`, `progress.step(name, done, total)`, `progress.track(items, name)`;',
-    '  - step by step from a shell: `progress.py start "<name>" --point N --steps "A,B,C"`, then `progress.py step "<name>" B 2 5`, then `progress.py finish "<name>"`.',
-    '- Each background job, command and agent gets its own name; a background agent\'s brief tells it to report its steps under its own description the same way. A redo of a stopped job passes `--redoes "<old name>"` (in Python, `redoes=`). Background work joins the point you last counted, so send that point\'s count in the same message that starts it.',
+    '  - step by step from a shell: `progress.py start "<name>" --point N --steps "A,B,C"`, then `progress.py step "<name>" B` as each step starts, then `progress.py finish "<name>"`.',
+    '  - a step\'s numbers count the items inside it as they finish (`progress.py step "<name>" Tests 14 16 --unit tests`), never the step\'s own place in the list; leave them out when there is nothing to count. Steps are named in one to three plain words.',
+    '- Each background job, command and agent gets its own name. PulseWise adds the progress lines to each agent\'s brief itself (its name and its point\'s number): don\'t write your own. A redo of a stopped job passes `--redoes "<old name>"` (in Python, `redoes=`). Background work joins the point you last counted, so send that point\'s count in the same message that starts it.',
     '- A server or watcher left running is not progress: it stays off the bar (or tell the count tool so, with work and service: true).',
-    `- Names (points, jobs, commands, agents) of ${NAME_LIMIT} characters or fewer read whole on the bar; a longer one is shortened there for you.`,
+    `- Names (points, jobs, commands, agents): ${NAME_LIMIT} characters or fewer, with the words that tell this one from its neighbours first. Leave out what they all share (a round, who does it, the model: the bar shows an agent's model itself).`,
   ].join('\n'),
+}
+
+// Agents that look things up and answer, with no work of their own to show on the bar: their briefs are left as they are.
+const LOOKUP_AGENTS = /^(explore|plan|claude-code-guide|statusline-setup|web-fetch)$/i
+
+/**
+ * The lines PulseWise adds to a working agent's brief: its job carries the agent's own name and its point's number,
+ * so it lands on its own beat with no guessing by words, and its steps count the right things. The same lines every
+ * time; they stand over any other progress instructions in the brief.
+ */
+function agentProgressLines(name: string, point: number | null): string {
+  const job = `"${name.replace(/"/g, "'")}"`
+  return [
+    'Progress (PulseWise, the progress bar; these lines stand over any other progress instructions in this brief): report your steps through `~/.claude/progress/progress.py` (`python3`; on Windows, `python`), under this exact name:',
+    `- at the start: \`progress.py start ${job}${point !== null ? ` --point ${point}` : ''} --steps "<part>,<part>,..."\`, your parts in order, each named in one to three plain words;`,
+    `- as each part starts: \`progress.py step ${job} "<part>"\`. Numbers after it count the items inside that part as they finish (\`progress.py step ${job} Tests 14 16 --unit tests\`), never the part's own place in the list; leave them out when there is nothing to count;`,
+    `- at the end: \`progress.py finish ${job}\`, or \`progress.py fail ${job} "<why>"\` if it stops.`,
+  ].join('\n')
 }
 
 // The helper ships inside the plugin; its stable home is ~/.claude/progress, where scripts and briefs name it.
@@ -295,9 +330,11 @@ async function learnMachine($: Api) {
 }
 
 // Theme colour names: the desktop draws a box's background only from these (raw hex or rgba draws nothing).
+// A hover box is the theme's text colour with the theme's text-on-it colour: solid in the light and the dark theme,
+// so what it lies over never shows through.
 const COLOR = {
-  tipBack: 'subtle',
-  tipText: 'text',
+  tipBack: 'text',
+  tipText: 'inverseText',
 } as const
 
 // ---- small helpers ---------------------------------------------------------
@@ -405,7 +442,7 @@ function taskStatusBare(t: Task, now: number): string {
   if (current && current.total) {
     const pct = Math.round(stepFraction(current) * 100)
     const isPercent = current.unit === '%'
-    return isPercent ? `${prefix}${pct}%` : `${prefix}${current.done ?? 0} / ${current.total} · ${pct}%`
+    return isPercent ? `${prefix}${pct}%` : `${prefix}${current.done ?? 0} / ${current.total}${current.unit ? ` ${current.unit}` : ''} · ${pct}%`
   }
   const since = fmt(now - (current?.started ?? t.started))
   if (t.kind === 'agent') return `working ${since}${t.actions ? ` · ${t.actions} actions` : ''}`
@@ -521,6 +558,24 @@ function pointFill(m: Model, index: number, now: number): number {
   return isOwnOpen ? Math.min(UNCOUNTED_CAP, sum) : sum
 }
 
+/** An agent's model as a short tag, by its family ("fable" or "claude-fable-5-2" gives "Fable"); '' when unknown. */
+function modelTag(agentModel: string | null | undefined): string {
+  const word = /(fable|opus|sonnet|haiku)/i.exec(agentModel ?? '')?.[1] ?? (/^[a-z]+$/i.test(agentModel ?? '') ? (agentModel as string) : '')
+  return word ? `${word[0]?.toUpperCase() ?? ''}${word.slice(1).toLowerCase()}` : ''
+}
+
+/**
+ * How a beat's readout names the one piece of work running in it: an agent named like its point says so once
+ * ("Agent (Fable)"), else with its own name ("Agent (Fable): Check the pack"); other work by its name.
+ */
+function workName(t: Task, pointName: string): string {
+  if (t.kind !== 'agent') return t.name
+  const tag = modelTag(t.model)
+  const label = `Agent${tag ? ` (${tag})` : ''}`
+  const own = t.name.replace(/^Agent:\s*/, '')
+  return nameFit(nameWords(own), nameWords(pointName)) >= 1.75 ? label : `${label}: ${own}`
+}
+
 function pointStatus(m: Model, index: number, now: number): string {
   const p = m.points[index]
   if (!p) return ''
@@ -534,7 +589,7 @@ function pointStatus(m: Model, index: number, now: number): string {
         : `${countWords(p) ?? `Claude working ${fmt(now - p.seenAt)}`} · not yet marked in progress`
       : 'not started'
   if (running.length > 1) return `${running.length} at once · ${Math.round(pointFill(m, index, now) * 100)}%`
-  if (running.length === 1 && only) return `${only.name} · ${taskStatus(m, sourceOf(m, only), now)}`
+  if (running.length === 1 && only) return `${workName(only, p.name)} · ${taskStatus(m, sourceOf(m, only), now)}`
   if (p.state === 'running' && isHeld(m)) return `${heldWords(m)} · ${fmt(ownNow(m, now) - (p.started ?? now))}`
   if (p.state === 'running') return countWords(p) ?? `Claude working ${fmt(now - (p.started ?? now))}`
   const end = Math.max(p.ended ?? now, ...tasks.map(t => t.ended ?? now))
@@ -801,7 +856,8 @@ function laneRows(m: Model, now: number): Lane[] {
       const what = !isBusy ? taskStatusBare(t, now) : source !== t ? taskStatus(m, source, now, false) : t.kind === 'agent' ? 'working, no steps reported' : taskStatus(m, t, now, false)
       const forPoint = t.point >= 0 && m.points[t.point] ? `point ${t.point + 1} · ` : ''
       const line = isEnded ? `${forPoint}${t.state === 'failed' ? 'stopped' : 'done'} · ${elapsed}` : t.service ? `${forPoint}serving · running ${elapsed}` : `${forPoint}${what}`
-      return { key: `l:${t.id}`, title: labelOf(m, t.name).replace(/^Agent:\s*/, ''), kind: t.kind === 'agent' ? 'agent' : undefined, right: t.service && !isEnded ? 'serving' : right, isBusy: isBusy && !t.service, segs, line, point: t.point, isAlert: t.state === 'silent' }
+      const tag = t.kind === 'agent' ? modelTag(t.model) : ''
+      return { key: `l:${t.id}`, title: `${labelOf(m, t.name).replace(/^Agent:\s*/, '')}${tag ? ` · ${tag}` : ''}`, kind: t.kind === 'agent' ? 'agent' : undefined, right: t.service && !isEnded ? 'serving' : right, isBusy: isBusy && !t.service, segs, line, point: t.point, isAlert: t.state === 'silent' }
     })
 }
 
@@ -1122,17 +1178,29 @@ type EtaRecord = {
   chat: string
   project: string
   complete: boolean
+  /** Claude's estimate as sent, and PulseWise's correction of it by the past ratios (null before there are any). */
   estimate_min: number | null
+  corrected_min?: number | null
   actual_min: number
   waited_min: number
-  points: { name: string; done: boolean; estimate_min: number | null; actual_min: number | null; count: { done: number; total: number; unit: string | null } | null; jobs: number }[]
+  points: {
+    name: string
+    done: boolean
+    estimate_min: number | null
+    corrected_min?: number | null
+    actual_min: number | null
+    count: { done: number; total: number; unit: string | null } | null
+    jobs: number
+  }[]
 }
 
 // The time log, and what it says about Claude's estimates so far (read at the start and after each line written).
 const etaLog = () => `${home}/.claude/progress/eta-log.jsonl`
 let machine = ''
 let modelName = ''
-let etaHint = ''
+type EtaRatios = { list: number | null; point: number | null }
+const NO_RATIOS: EtaRatios = { list: null, point: null }
+let etaRatios: EtaRatios = NO_RATIOS
 
 /** The middle value of some numbers. */
 const median = (values: number[]) => {
@@ -1142,10 +1210,11 @@ const median = (values: number[]) => {
 }
 
 /**
- * What the time log says about Claude's estimates, as one line for the next estimate: real time over estimated, the
- * median over finished lists (and points) that had both, with how many; nothing until three lists have.
+ * What the time log says about Claude's estimates: real time over estimated, the median over finished lists (from
+ * three) and over finished points (from five) that had both; null until then. PulseWise applies it to each new
+ * estimate itself (applyEstimate) rather than asking Claude to keep it in mind.
  */
-function hintFrom(lines: string[]): string {
+function ratiosFrom(lines: string[]): EtaRatios {
   const lists: number[] = []
   const points: number[] = []
   for (const line of lines) {
@@ -1157,19 +1226,17 @@ function hintFrom(lines: string[]): string {
       // A line cut short or from a newer format: skipped.
     }
   }
-  if (lists.length < 3) return ''
-  const ratio = (x: number) => `${Math.round(x * 100) / 100}×`
-  return `Your estimates on record so far: a list took ${ratio(median(lists))} what you estimated (median of ${lists.length})${points.length >= 5 ? `, a point ${ratio(median(points))} (median of ${points.length})` : ''}; estimate with that in mind.`
+  return { list: lists.length >= 3 ? median(lists) : null, point: points.length >= 5 ? median(points) : null }
 }
 
-/** Reads the time log again (its last 400 lines) for the next estimate's hint. */
+/** Reads the time log again (its last 400 lines) for the ratios the next estimate is corrected by. */
 async function readEtaLog($: Api) {
   if (!home) return
   try {
     const text = String(await $.fs.read(etaLog()))
-    etaHint = hintFrom(text.split('\n').filter(Boolean).slice(-400))
+    etaRatios = ratiosFrom(text.split('\n').filter(Boolean).slice(-400))
   } catch {
-    etaHint = ''
+    etaRatios = NO_RATIOS
   }
 }
 
@@ -1566,6 +1633,7 @@ export function etaRecord(m: Model, now: number): EtaRecord | null {
     project: project.split('/').filter(Boolean).pop() ?? '',
     complete: m.points.every(p => p.state === 'done'),
     estimate_min: list.estimateMin,
+    corrected_min: list.correctedMin ?? null,
     actual_min: minutes(actualMs),
     waited_min: minutes(waitedMs),
     points: m.points.map((p, i) => {
@@ -1573,7 +1641,15 @@ export function etaRecord(m: Model, now: number): EtaRecord | null {
       const end = p.ended ?? (start !== null ? now : null)
       const ran = start !== null && end !== null ? Math.max(0, end - start - (p.heldMs ?? 0)) : null
       const count = p.count && !p.count.none ? { done: p.count.done, total: p.count.total, unit: p.count.unit } : null
-      return { name: p.name, done: p.state === 'done', estimate_min: p.estimateMin ?? null, actual_min: ran === null ? null : minutes(ran), count, jobs: m.tasks.filter(t => t.point === i && !t.coveredBy).length }
+      return {
+        name: p.name,
+        done: p.state === 'done',
+        estimate_min: p.estimateMin ?? null,
+        corrected_min: p.correctedMin ?? null,
+        actual_min: ran === null ? null : minutes(ran),
+        count,
+        jobs: m.tasks.filter(t => t.point === i && !t.coveredBy).length,
+      }
     }),
   }
 }
@@ -1643,6 +1719,7 @@ function applyPlan(m: Model, input: Record<string, unknown>, now: number, fx: Ef
         activeAt: prev?.activeAt ?? null,
         count: prev?.count ?? null,
         estimateMin: prev?.estimateMin ?? null,
+        correctedMin: prev?.correctedMin ?? null,
         heldMs: prev?.heldMs ?? 0,
         startCall: state === 'pending' ? (prev?.startCall ?? null) : (prev?.startCall ?? m.calls ?? 0),
         remindedCall: prev?.remindedCall ?? null,
@@ -1725,13 +1802,18 @@ function applyEstimate(m: Model, input: Record<string, unknown>, now: number): s
   const minutes = Number(input.minutes)
   if (!(minutes > 0)) return 'Give minutes: your estimate for the whole list.'
   const round = (x: number) => Math.round(x * 10) / 10
+  // Kept as sent, and corrected by how past estimates turned out (once there are enough on record).
   m.list.estimateMin = round(minutes)
+  m.list.correctedMin = etaRatios.list !== null ? round(minutes * etaRatios.list) : null
   const each = Array.isArray(input.points) ? input.points : []
   each.forEach((v, i) => {
     const p = m.points[i]
-    if (p && Number(v) > 0) p.estimateMin = round(Number(v))
+    if (!p || !(Number(v) > 0)) return
+    p.estimateMin = round(Number(v))
+    p.correctedMin = etaRatios.point !== null ? round(Number(v) * etaRatios.point) : null
   })
-  return `Noted: ${round(minutes)} min for the list${each.length ? `, ${each.length} points` : ''}.`
+  const corrected = m.list.correctedMin !== null ? ` (by your past estimates, about ${m.list.correctedMin} min)` : ''
+  return `Noted: ${round(minutes)} min for the list${corrected}${each.length ? `, ${each.length} points` : ''}.`
 }
 
 /**
@@ -2025,20 +2107,32 @@ function jobScript(job: Task): string {
   return ''
 }
 
-/** A job started by a background agent (named like it, or started by one of its commands) joins the agent's bar. */
+/**
+ * A job started by a background agent joins that agent's bar: the agent whose own command started it (named the job,
+ * or ran its script), else the agent whose name fits the job's best, never just the first named alike ("Site layers
+ * and menus (build f)" goes to the agent of that name, not to an earlier "Site shows in the Library (build e)").
+ */
 function linkToAgent(m: Model, job: Task) {
   if (job.owner) return
   const mine = nameWords(job.name)
-  for (const agent of m.tasks) {
-    if (agent.kind !== 'agent' || isFinal(agent)) continue
-    const isNamed = isNamedLike(mine, taskWords(agent.name))
-    const script = jobScript(job)
-    const isStartedByIt = (agent.commands ?? []).some(command => command.includes(job.name) || (!!script && script !== 'progress.py' && command.includes(script)))
-    if (!isNamed && !isStartedByIt) continue
-    job.owner = agent.id
-    if (!job.pointName) job.point = agent.point
-    return
+  const script = jobScript(job)
+  const agents = m.tasks.filter(t => t.kind === 'agent' && !isFinal(t))
+  const isStartedBy = (agent: Task) => (agent.commands ?? []).some(command => command.includes(job.name) || (!!script && script !== 'progress.py' && command.includes(script)))
+  let best = agents.find(isStartedBy)
+  if (!best) {
+    let bestFit = 0
+    for (const agent of agents) {
+      const theirs = taskWords(agent.name)
+      const fit = isNamedLike(mine, theirs) ? nameFit(mine, theirs) : 0
+      if (fit > bestFit) {
+        best = agent
+        bestFit = fit
+      }
+    }
   }
+  if (!best) return
+  job.owner = best.id
+  if (!job.pointName) job.point = best.point
 }
 
 /**
@@ -2053,11 +2147,13 @@ function linkRedo(m: Model, job: Task, redoes: string | null, now: number, fx: E
       m.tasks.find(one => one.id === redoes && one.id !== job.id) ??
       m.tasks.filter(one => one.id !== job.id && one.name === redoes).sort((a, b) => b.started - a.started)[0]
   } else {
-    old = m.tasks
-      .filter(one => one.id !== job.id && one.kind === 'job' && one.state === 'failed' && !one.coveredBy && one.point === job.point)
-      .filter(one => one.started < job.started && now - (one.ended ?? one.started) < 3 * 60 * 60_000)
-      .filter(one => sharedWords(one.name, job.name) >= 2)
-      .sort((a, b) => b.started - a.started)[0]
+    // A stopped job of the same name, wherever it was, else one in the same point clearly continuing it.
+    const stopped = m.tasks
+      .filter(one => one.id !== job.id && one.kind === 'job' && one.state === 'failed' && !one.coveredBy && one.started < job.started)
+      .sort((a, b) => b.started - a.started)
+    old =
+      stopped.find(one => one.name === job.name) ??
+      stopped.find(one => one.point === job.point && now - (one.ended ?? one.started) < 3 * 60 * 60_000 && sharedWords(one.name, job.name) >= 2)
   }
   if (!old || old.coveredBy) return
   // Hidden first (superseded), so a stopped record that still says running is closed without a second line in "Done
@@ -2562,41 +2658,71 @@ export function cleanLabel(text: string): string {
   return lines.at(-1) ?? ''
 }
 
+/** A reply's last line that is not about counting: what the small model answered, fitting or not. */
+const answerLine = (text: string) => text.split('\n').map(line => line.trim()).filter(line => line && !isCountingLine(line)).at(-1) ?? ''
+
 /**
  * Every name the bar shows that is longer than it shows whole (a point's, a job's, a command's, an agent's) gets a
- * short label from the small model, once, a few at a time; the bar shows the name cut to fit until it comes.
+ * short label from the small model, once. The long names due go together in one call (up to 8), so their labels read
+ * apart; a name left without a good label is asked alone, and once more with what its answer did wrong. The bar
+ * shows a name cut to fit until its label comes.
  */
 function shortenLong($: Api, m: Model) {
-  const names = [...m.points.map(p => p.name), ...m.tasks.filter(t => !t.coveredBy).map(t => t.name)]
+  const names = [...new Set([...m.points.map(p => p.name), ...m.tasks.filter(t => !t.coveredBy).map(t => t.name)])]
   const now = Date.now()
-  for (const name of names) {
-    if (name.length <= NAME_LIMIT || m.labels?.[name] || labelling.has(name) || labelling.size >= 4) continue
-    if (now - (labelTried.get(name) ?? 0) < LABEL_RETRY_MS) continue
+  const due = names
+    .filter(name => name.length > NAME_LIMIT && !m.labels?.[name] && !labelling.has(name) && now - (labelTried.get(name) ?? 0) >= LABEL_RETRY_MS)
+    .slice(0, 8)
+  if (!due.length) return
+  for (const name of due) {
     labelling.add(name)
     labelTried.set(name, now)
-    void (async () => {
-      try {
-        const ask = (tooLong: string) => $.model.complete({ model: SMALL_MODEL, system: LABEL_SYSTEM, prompt: labelPrompt(name, tooLong), maxTokens: 80, effort: 'low', timeoutMs: 20_000 })
-        const first = await ask('')
-        let label = first.isAnswered ? cleanLabel(first.text) : ''
-        const firstLine = first.isAnswered ? (first.text.split('\n').map(line => line.trim()).filter(line => line && !isCountingLine(line)).at(-1) ?? '') : ''
-        if (!label && firstLine) {
-          const second = await ask(firstLine)
-          label = second.isAnswered ? cleanLabel(second.text) : ''
-        }
-        if (!label) return
-        await mutate($, model => {
-          model.labels = Object.fromEntries([...Object.entries(model.labels ?? {}).filter(([key]) => key !== name), [name, label]].slice(-200))
-          return true
-        })
-        redraw($, Date.now())
-      } catch {
-        // No label this time: the bar cuts the name to fit, as before.
-      } finally {
-        labelling.delete(name)
-      }
-    })()
   }
+  const others = names.filter(name => !due.includes(name)).map(name => m.labels?.[name] ?? name).slice(0, 12)
+  void (async () => {
+    try {
+      const labels = new Map<string, string>()
+      const answers = new Map<string, string>()
+      if (due.length > 1) {
+        const r = await $.model.complete({ model: SMALL_MODEL, system: LIST_SYSTEM, prompt: listPrompt(due, others), maxTokens: 40 * due.length, effort: 'low', timeoutMs: 20_000 })
+        for (const line of r.isAnswered ? r.text.split('\n') : []) {
+          const hit = /^\s*(\d+)[.)]\s*(.+)$/.exec(line)
+          const name = hit ? due[Number(hit[1]) - 1] : undefined
+          if (!hit || !name) continue
+          const label = cleanLabel(hit[2] ?? '')
+          if (label && keepsFirstWord(name, label)) labels.set(name, label)
+          else answers.set(name, (hit[2] ?? '').trim())
+        }
+      }
+      for (const name of due.filter(one => !labels.has(one))) {
+        const ask = (retry: string) => $.model.complete({ model: SMALL_MODEL, system: LABEL_SYSTEM, prompt: labelPrompt(name, retry), maxTokens: 80, effort: 'low', timeoutMs: 20_000 })
+        let answer = answers.get(name) ?? ''
+        if (!answer) {
+          const first = await ask('')
+          const label = first.isAnswered ? cleanLabel(first.text) : ''
+          if (label && keepsFirstWord(name, label)) {
+            labels.set(name, label)
+            continue
+          }
+          answer = first.isAnswered ? answerLine(first.text) : ''
+        }
+        if (!answer) continue
+        const second = await ask(retryNote(name, answer))
+        const label = second.isAnswered ? cleanLabel(second.text) : ''
+        if (label && keepsFirstWord(name, label)) labels.set(name, label)
+      }
+      if (!labels.size) return
+      await mutate($, model => {
+        model.labels = Object.fromEntries([...Object.entries(model.labels ?? {}).filter(([key]) => !labels.has(key)), ...labels].slice(-200))
+        return true
+      })
+      redraw($, Date.now())
+    } catch {
+      // No labels this time: the bar cuts the names to fit, as before.
+    } finally {
+      for (const name of due) labelling.delete(name)
+    }
+  })()
 }
 
 /** What the other-chats button says: which chats are listed and whether each works, waits or is done. */
@@ -2701,18 +2827,52 @@ function clickArea(ui: Ui, key: string, w: number, tall: number, onPress: () => 
 }
 
 /**
- * A button's hover box: what it does, in a small box the app shows like a tooltip while the pointer is on the button
- * (inside the button's own keyed box, the only place the app shows a hover).
+ * A hover box: one line of text on a solid chip, shown only while the pointer is over the keyed box it is drawn in.
+ *
+ * It is two boxes. The outer one is placed (absolute, at `top` rows and `left` columns from the keyed box, `cols`
+ * wide), always drawn and empty until the hover, so it takes no room and no pointer. The inner one, in the flow, is
+ * the one the hover reveals. The desktop app turns a placed box that the hover reveals into a pop-up card of its own,
+ * which it shows again after every redraw of the band and whenever the keyboard focus is inside the keyed box (as it
+ * is after a click), so the card stays up with the pointer long gone. A revealed box in the flow is left to the
+ * app's plain hover rule, which follows the pointer alone. `drop` px of empty room above the chip (inside the
+ * revealed box, so it is there only during the hover) put the chip where whole rows cannot.
  */
-function buttonTip(ui: Ui, text: string) {
+function hoverBox(ui: Ui, text: string, at: { top: number; left: number; cols: number; drop?: number }, isSmall = true) {
   const { Box, Text } = ui
   return (
-    <Box position="absolute" top={1} left={0} width={Math.ceil((text.length * 6.4) / PX_PER_COLUMN) + 2} paddingX={1} backgroundColor={COLOR.tipBack} display="none" hover={{ display: 'flex' }}>
-      <Text color={COLOR.tipText} wrap="truncate-end" size="caption">
-        {text}
-      </Text>
+    <Box position="absolute" top={at.top} left={at.left} width={at.cols}>
+      <Box width="100%" flexDirection="column" display="none" hover={{ display: 'flex' }}>
+        {at.drop ? <Box height={at.drop / ROW_PX} /> : null}
+        <Box height={1} alignItems="center" paddingX={1} backgroundColor={COLOR.tipBack}>
+          <Text color={COLOR.tipText} wrap="truncate-end" {...(isSmall ? { size: 'caption' as const } : { weight: 'medium' as const })}>
+            {text}
+          </Text>
+        </Box>
+      </Box>
     </Box>
   )
+}
+
+/** About how many columns a hover box needs for its text (`charPx` px a character), with its padding. */
+const tipColumns = (text: string, charPx = 6.4) => Math.ceil((text.length * charPx) / PX_PER_COLUMN) + 2
+
+/** About how wide the app draws one of the band's buttons, in px: its label at 14 px, and 10 px each side of it. */
+const buttonWidth = (label: string) => Math.ceil(textWidth(label) * 1.12) + 20
+
+/**
+ * The hover boxes of a row of buttons (their labels, in the order drawn): what each button does, shown while the
+ * pointer is on it (inside the button's own keyed box, the only place the app shows a hover). Every button's box
+ * shows in one place, on the buttons' own row just right of the last one: clear of the buttons (a box beside its own
+ * button would lie over the next, which could then not be reached), and inside the band (a box under the band's last
+ * row would be cut off at the band's edge). Each is placed from its own button, by the widths of the buttons from it
+ * on. Returns the box for the button at `index`, or null where the row has no room left for one.
+ */
+function buttonTips(ui: Ui, labels: string[], width: number) {
+  const widths = labels.map(buttonWidth)
+  // The buttons from `from` on, with the one-column gaps between them.
+  const span = (from: number) => widths.slice(from).reduce((sum, w) => sum + w, 0) + Math.max(0, widths.length - 1 - from) * PX_PER_COLUMN
+  const room = Math.floor((width - span(0)) / PX_PER_COLUMN) - 2
+  return (index: number, text: string) => (room < 12 ? null : hoverBox(ui, text, { top: 0, left: Math.ceil(span(index) / PX_PER_COLUMN) + 1, cols: Math.min(tipColumns(text), room) }))
 }
 
 /** Another chat's state in a word: waiting on the person, its %, or done. */
@@ -2783,7 +2943,7 @@ export const register: Register = (on, options) => {
   labelTried.clear()
   machine = ''
   modelName = ''
-  etaHint = ''
+  etaRatios = NO_RATIOS
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -2846,8 +3006,8 @@ export const register: Register = (on, options) => {
         const added = addedPoints(before, input)
         const rules = `${$.plugin.root}/progress/cheaper-agents.md`
         const parallel = !isSideBySide ? '' : isNewPlan(before, input) ? parallelPlan(rules) : added.length ? addedNote(added, rules) : ''
-        // A new list with work still to do: Claude's estimate for it, with how its past ones turned out.
-        const estimate = isNew && items.some(item => item.status !== 'completed') ? estimateNote(etaHint) : ''
+        // A new list with work still to do, worth estimating: Claude's estimate for it.
+        const estimate = isNew && items.some(item => item.status !== 'completed') && isWorthEstimating(items, before) ? estimateNote() : ''
         note = [parallel, estimate].filter(Boolean).join('\n\n')
         const { after } = await mutate($, (m, now, fx) => {
           applyPlan(m, input, now, fx)
@@ -2953,12 +3113,24 @@ export const register: Register = (on, options) => {
     return { ...ran, context: [...(ran.context ?? []), said.reminder] }
   }).catch(($, e, next) => next(e))
 
+  // An agent that does work gets PulseWise's progress lines in its brief: its job then carries the agent's own name and
+  // its point's number, and lands on its own beat. Its model is kept, for the tag beside its name.
   on('agent.spawn', async ($, e, next) => {
-    const spawned = await next(e)
+    const name = e.description || e.subagentType
+    let prompt = e.prompt
+    if (e.description && !LOOKUP_AGENTS.test(e.subagentType)) {
+      const m = view(await read($, model))
+      const point = m.points.length ? matchingPoint(m, `Agent: ${name}`, Date.now()) : -1
+      prompt = `${e.prompt}\n\n${agentProgressLines(name, point >= 0 ? point + 1 : null)}`
+    }
+    const spawned = await next({ ...e, prompt })
     if (spawned.agentId) {
       const id = spawned.agentId
+      // Kept only when it differs from the chat's own model: every agent tagged with the chat's model says nothing.
+      const sent = (spawned as { model?: string }).model ?? e.model ?? null
+      const agentModel = modelTag(sent) && modelTag(sent) !== modelTag(e.parentModel) ? sent : null
       await mutate($, (m, now) => {
-        addTask(m, { id, kind: 'agent', name: `Agent: ${e.description || e.subagentType}`, started: now, command: null }, now)
+        addTask(m, { id, kind: 'agent', name: `Agent: ${name}`, started: now, command: null, model: agentModel }, now)
         return true
       })
     }
@@ -3085,7 +3257,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" justifyContent="space-between" alignItems="center">
             <Box key="b-side">
               <Button key="toggle-side" label={sideLabel} onPress={toggleSide} />
-              {buttonTip(ui, SIDE_TIP)}
+              {buttonTips(ui, [sideLabel], width)(0, SIDE_TIP)}
             </Box>
             <Text key="credit" dimColor size="caption">
               {CREDIT}
@@ -3199,29 +3371,27 @@ export const register: Register = (on, options) => {
 
     /**
      * A segment's hover text: a small box drawn inside that segment's click area (the app shows a hover only for what
-     * sits inside the hovered box; a hover group that shows text elsewhere in the band never lights). The app places
-     * it like a tooltip, above the area when there is room, else below. Fixed width, pulled left where it would run
-     * off the band's right edge. The smaller bars' text is a size smaller and lighter in weight.
+     * sits inside the hovered box; a hover group that shows text elsewhere in the band never lights). Fixed width,
+     * pulled left where it would run off the band's right edge. The smaller bars' text is a size smaller and lighter
+     * in weight. It always lies inside the band, on room that holds no click area (the band's edge would cut off a
+     * box outside it):
+     *  - `under` (the pulse, a close-up's bar): in the empty row under that bar's picture, `to` px below the click
+     *    area's top. One whole row down, then the rest as room inside the box: room from the area's own top would lie
+     *    over the click areas to its right while the box shows.
+     *  - `over` (a track's bar): on the track's title row, straight above its bar; the text starts with that title.
      */
-    const tip = (text: string, x: number, isSmall: boolean) => {
+    const tip = (text: string, x: number, isSmall: boolean, place: { under: number } | 'over') => {
       const line = clip(text, 90)
-      const cols = Math.ceil((line.length * (isSmall ? 6.4 : 7.2)) / PX_PER_COLUMN) + 2
+      const cols = tipColumns(line, isSmall ? 6.4 : 7.2)
       const left = Math.min(0, Math.floor((width - x) / PX_PER_COLUMN) - cols)
-      return (
-        <Box position="absolute" top={1} left={left} width={cols} paddingX={1} backgroundColor={COLOR.tipBack} display="none" hover={{ display: 'flex' }}>
-          <Text color={COLOR.tipText} wrap="truncate-end" {...(isSmall ? { size: 'caption' as const } : { weight: 'medium' as const })}>
-            {line}
-          </Text>
-        </Box>
-      )
+      return place === 'over' ? hoverBox(ui, line, { top: -1, left, cols }, isSmall) : hoverBox(ui, line, { top: 1, left, cols, drop: Math.max(0, place.under - ROW_PX) }, isSmall)
     }
 
     /**
      * Click areas over a smaller bar, one per segment (clickArea, so the press highlight is the segment's size), each
-     * holding its hover text. The app places that text itself, like a tooltip: above the area when there is room,
-     * else below.
+     * holding its hover text, placed as `place` says (see `tip`).
      */
-    const hoverStrip = (list: Seg[], places: { x: number; w: number }[], prefix: string, height: number, tipOf: (seg: Seg, w: number) => string, onPress: (seg: Seg) => void) => (
+    const hoverStrip = (list: Seg[], places: { x: number; w: number }[], prefix: string, height: number, place: { under: number } | 'over', tipOf: (seg: Seg, w: number) => string, onPress: (seg: Seg) => void) => (
       <Box flexDirection="row" height={height / ROW_PX}>
         {places.map((spot, i) => {
           const seg = list[i]
@@ -3229,7 +3399,7 @@ export const register: Register = (on, options) => {
           const gap = spot.x - (i > 0 ? (places[i - 1]?.x ?? 0) + (places[i - 1]?.w ?? 0) : 0)
           return [
             gap > 0 ? <Box key={`${prefix}g${i}`} width={toColumns(gap)} height={height / ROW_PX} /> : null,
-            clickArea(ui, `press-${prefix}${i}`, spot.w, height, () => onPress(seg), tipOf(seg, spot.w) ? tip(tipOf(seg, spot.w), spot.x, true) : null),
+            clickArea(ui, `press-${prefix}${i}`, spot.w, height, () => onPress(seg), tipOf(seg, spot.w) ? tip(tipOf(seg, spot.w), spot.x, true, place) : null),
           ]
         })}
       </Box>
@@ -3241,6 +3411,12 @@ export const register: Register = (on, options) => {
       if (hasList && seg && (lane.point ?? -1) >= 0) void pick(key, seg)
     }
     const jobs = lanes.length ? miniBarsPicture(lanes, width, 'l', LANES_CAPTION) : null
+    // The button row, in the order drawn: each button's label, and its hover box (see buttonTips).
+    const doneLabel = `${isDoneOpen ? '▾' : '▸'} Done · ${m.log.length}`
+    const nudgeLabel = now - nudgedAt < NUDGED_MS ? 'Nudged ✓' : 'Nudge'
+    const rowLabels = [m.log.length > 0 ? doneLabel : '', m.side.length > 0 ? sideLabel : '', showNudge ? nudgeLabel : ''].filter(Boolean)
+    const rowTips = buttonTips(ui, rowLabels, width)
+    const rowTip = (label: string, text: string) => rowTips(rowLabels.indexOf(label), text)
 
     return (
       <Box flexDirection="column" rowGap={1}>
@@ -3264,12 +3440,12 @@ export const register: Register = (on, options) => {
               const s = segs[i]
               if (!s) return null
               const gapBefore = spot.x - (i > 0 ? (spots[i - 1]?.x ?? 0) + (spots[i - 1]?.w ?? 0) : 0)
-              // A hover box only where the label under the beat is cut: fewer boxes the app can leave up. Fixed text
-              // (no live status), so a redraw never changes what is under the pointer.
+              // A hover box only where the label under the beat is cut. Fixed text (no live status), so a redraw never
+              // changes what is under the pointer. It shows in the empty row under the pulse's picture.
               const label = mainLabel(s, spot.w)
               return [
                 gapBefore > 0 ? <Box key={`g-${s.key}`} width={toColumns(gapBefore)} height={BAR_ROWS} /> : null,
-                clickArea(ui, `open-${s.key}`, spot.w, BAR_ROWS * ROW_PX, () => void pick(s.key, s), label.text !== label.full ? tip(label.full, spot.x, false) : null),
+                clickArea(ui, `open-${s.key}`, spot.w, BAR_ROWS * ROW_PX, () => void pick(s.key, s), label.text !== label.full ? tip(label.full, spot.x, false, { under: main.height - MAIN_BAR_TOP }) : null),
               ]
             })}
           </Box>
@@ -3283,7 +3459,7 @@ export const register: Register = (on, options) => {
             <Box position="absolute" top={0} left={0} width="100%" flexDirection="column">
               {/* The close-up's bar is 8 px tall, DETAIL_TOP px down its picture. */}
               <Box height={DETAIL_TOP / ROW_PX} />
-              {hoverStrip(detail, detailSpots, 'hd', 8, (s, w) => (fitLabel(`${s.name} · ${s.status}`, w) !== `${s.name} · ${s.status}` ? `${s.name} · ${s.status}` : ''), () => undefined)}
+              {hoverStrip(detail, detailSpots, 'hd', 8, { under: opened.height - DETAIL_TOP }, (s, w) => (fitLabel(`${s.name} · ${s.status}`, w) !== `${s.name} · ${s.status}` ? `${s.name} · ${s.status}` : ''), () => undefined)}
             </Box>
           </Box>
         )}
@@ -3300,6 +3476,7 @@ export const register: Register = (on, options) => {
                     laneSpots[n] ?? [],
                     `hl${n}-`,
                     LANE_BAR,
+                    'over',
                     // A one-part bar already shows its name and status in its title and line: no box.
                     s => (lane.segs.length > 1 ? `${lane.title}: ${s.name} · ${s.status}` : ''),
                     () => openLanePoint(lane),
@@ -3313,21 +3490,21 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" columnGap={1} rowGap={1} flexWrap="wrap" flexShrink={1}>
           {m.log.length > 0 && (
             <Box key="b-done">
-              <Button key="toggle-done" label={`${isDoneOpen ? '▾' : '▸'} Done · ${m.log.length}`} onPress={() => update($, showDone, open => !open)} />
-              {buttonTip(ui, DONE_TIP)}
+              <Button key="toggle-done" label={doneLabel} onPress={() => update($, showDone, open => !open)} />
+              {rowTip(doneLabel, DONE_TIP)}
             </Box>
           )}
           {m.side.length > 0 && (
             <Box key="b-side">
               <Button key="toggle-side" label={sideLabel} onPress={toggleSide} />
-              {buttonTip(ui, SIDE_TIP)}
+              {rowTip(sideLabel, SIDE_TIP)}
             </Box>
           )}
           {showNudge && (
             <Box key="b-nudge">
               <Button
                 key="nudge"
-                label={now - nudgedAt < NUDGED_MS ? 'Nudged ✓' : 'Nudge'}
+                label={nudgeLabel}
                 onPress={() => {
                   void $.session.append({ message: { type: 'user', content: [{ type: 'text', text: NUDGE }] } })
                   nudgedAt = Date.now()
@@ -3335,7 +3512,7 @@ export const register: Register = (on, options) => {
                   $.clock.after(NUDGED_MS + 100, () => $.ui.invalidate('ui.render'))
                 }}
               />
-              {buttonTip(ui, NUDGE_TIP)}
+              {rowTip(nudgeLabel, NUDGE_TIP)}
             </Box>
           )}
           </Box>

@@ -19,8 +19,9 @@ export type Point = {
    * `none` when Claude said the point can't be counted. `call` is Claude's call count when it last sent one.
    */
   count?: PointCount | null
-  /** Claude's estimate for this point, in minutes (the estimate tool). */
+  /** Claude's estimate for this point, in minutes (the estimate tool), and PulseWise's correction of it by past ones. */
   estimateMin?: number | null
+  correctedMin?: number | null
   /** Time this point spent waiting on the person (Claude's turn over or stopped while it was open), in ms. */
   heldMs?: number
   /** Claude's call count when this point started (the count reminder counts calls from there). */
@@ -94,6 +95,8 @@ export type Task = {
   owner?: string | null
   /** An agent's recent commands, to recognise the jobs it starts. */
   commands?: string[]
+  /** An agent's model as the app names it ("fable", "claude-opus-5-5"): shown as a short tag with it. */
+  model?: string | null
   /** A job with no process to watch stays alive this long after its last report. */
   ttl?: number | null
   /** The stopped job this one redoes (its name), shown on its line. */
@@ -183,6 +186,8 @@ export type Model = {
 export type ListInfo = {
   started: number
   estimateMin: number | null
+  /** The estimate corrected by how past ones turned out; null before enough are on record. */
+  correctedMin?: number | null
   /** Time the whole list spent waiting on the person, in ms. */
   heldMs: number
   /** Written to the time log already (finished, or replaced by a new list). */
