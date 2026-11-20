@@ -246,9 +246,16 @@ textarea.drop-on { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .overall { display: grid; gap: 8px; }
 .overall textarea { min-height: calc(4 * 1.45em + 18px); max-height: 30vh; field-sizing: content; }   /* grows to fit the hint or the note, so no line is cut */
 .overall .ov-head .side-lbl { font-weight: 600; }
-.ov-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* The heading row is the Open chip's height (18 px) whether the chip shows or not, so nothing moves while typing. The save
+   status beside it is one short word, sized to fit the narrowest notes column (320 px) beside the heading and the chip;
+   its full sentence is the hover hint and what screen readers hear. A failed save shows its whole sentence on its own
+   line under the heading, in the warning colour: the only state that makes the heading taller. */
+.ov-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; min-height: 18px; }
 .ov-head label, .ov-head .state { flex: none; }
-.ov-saved { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--f-mono); color: var(--muted); font-weight: 400 !important; }
+.ov-head .state { line-height: 14px; }
+.ov-saved { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--f-ui); color: var(--muted); font-weight: 400 !important; }
+.ov-saved[data-state="failed"] { flex: 1 0 100%; overflow: visible; white-space: normal; color: var(--danger); }
+.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }   /* for screen readers only */
 .ov-foot { display: flex; gap: 14px; align-items: center; }
 textarea { width: 100%; box-sizing: border-box; min-height: 64px; resize: vertical; font: 14px/1.45 var(--f-ui); color: var(--fg); background: var(--surface);
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
@@ -473,7 +480,7 @@ textarea::placeholder { color: var(--muted); }
     <section class="whole" id="whole" aria-labelledby="ovLabel">
       <div class="overall">
         <div class="ov-head"><label for="overall"><span class="side-lbl" id="ovLabel">Notes on the whole image</span></label><span class="state" id="ovState" hidden></span>
-          <span class="ov-saved" id="ovSaved" aria-live="polite"></span></div>
+          <span class="ov-saved" id="ovSaved" aria-live="polite"><span aria-hidden="true"></span><span class="vh"></span></span></div>
         <textarea id="overall" rows="4" placeholder="Anything that applies everywhere: spacing, density, colour, type… It saves as you type; Claude reads it with the other notes. Paste or drop a picture to add it."></textarea>
         <div class="pics" id="ovPics" hidden></div>
         <div class="reply" id="ovReply" hidden><b>Claude</b><span></span></div>
@@ -591,7 +598,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const st = $("#ovState"); st.hidden = !txt; st.textContent = m.status === "done" ? "Done" : "Open"; st.classList.toggle("done", m.status === "done");
     const r = $("#ovReply"); r.hidden = !m.reply; r.querySelector("span").textContent = m.reply || "";
     $("#ovFoot").hidden = !txt || RO || mode !== "db"; $("#ovToggle").textContent = m.status === "done" ? "Reopen" : "Mark done";
-    $("#ovSaved").textContent = m.said;
+    paintOvSaid(m.said);
     paintPics($("#ovPics"), m.atts, { ov: cur.id });
     renderSendBtn();                                           // the whole-image box counts as an open note
   }
@@ -1835,7 +1842,22 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     return m;
   }
   const ovMine = (m, k) => !!((m.fields && k in m.fields) || (m.flying && k in m.flying));
-  function ovSaid(id, text) { ovRec(id).said = text; if (cur && cur.id === id) $("#ovSaved").textContent = text; }
+  // The save status beside "Notes on the whole image", by state: the short word shown, and the full sentence (the hover
+  // hint, and what screen readers hear). A failed save shows its full sentence (see .ov-saved[data-state="failed"]).
+  const OV_SAID = {
+    saving: ["Saving…", "Saving. Claude reads it with the other notes once it's saved."],
+    saved: ["Saved", "Saved. Claude reads it with the other notes."],
+    local: ["Local", "Saved in this browser only: this copy has no database, so Claude can't read it. Copy all notes to send them."],
+    offline: ["Local", "Saved in this browser only: the board couldn't reach its database this visit, so Claude can't read it yet. Copy all notes to send them."],
+    failed: ["Not saved yet. Check your connection; it's tried again.", "Not saved yet. Check your connection; it's tried again."],
+  };
+  function paintOvSaid(state) {
+    const el = $("#ovSaved"), [word, full] = OV_SAID[state] || ["", ""];
+    el.dataset.state = state || ""; el.firstElementChild.textContent = word; el.lastElementChild.textContent = full;
+    if (word !== full) el.dataset.tip = full; else delete el.dataset.tip;
+    if (tipFor === el) { if (el.dataset.tip) showTip(el); else hideTip(); }   // a hint showing follows the change
+  }
+  function ovSaid(id, state) { ovRec(id).said = state; if (cur && cur.id === id) paintOvSaid(state); }
   function ovSave(id, fields, ms = 0) {
     const m = ovRec(id); m.fields = Object.assign(m.fields || {}, fields);
     clearTimeout(m.timer); m.timer = 0;
@@ -1845,7 +1867,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const m = ovMeta.get(id); if (!m) return;
     clearTimeout(m.timer); m.timer = 0;
     if (!m.fields) return;
-    if (mode === "local") { m.fields = null; saveLocal(); ovSaid(id, "Saved in this browser only"); return; }
+    if (mode === "local") { m.fields = null; saveLocal(); ovSaid(id, offline ? "offline" : "local"); return; }
     if (mode !== "db" || m.queued) return;                       // still connecting: sent once the store answers
     m.queued = true; enqueue("__overall_" + id, () => writeOv(id));
   }
@@ -1864,10 +1886,10 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       else try { await ref.update(doc); }
       catch (e) { if (!e || e.code !== "invalid_argument" || (await ref.get()).exists) throw e; await ref.set(whole()); }
       m.exists = "yes";
-      ovSaid(id, m.fields ? "Saving…" : "Saved · Claude reads it with the notes");
+      ovSaid(id, m.fields ? "saving" : "saved");
     } catch (e) {
       m.fields = Object.assign({}, fields, m.fields);            // sent again: by itself shortly, and with the next change
-      ovSaid(id, "Not saved yet. Check your connection; it's tried again.");
+      ovSaid(id, "failed");
       throw e;
     } finally { m.flying = null; }
   }
@@ -1875,7 +1897,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (!cur || RO) return;
     overall.set(cur.id, overallEl.value);
     ovSave(cur.id, { text: overallEl.value }, 600);
-    ovSaid(cur.id, "Saving…"); renderOverallMeta();
+    ovSaid(cur.id, "saving"); renderOverallMeta();
   });
   $("#ovToggle").addEventListener("click", () => {
     if (!cur || mode !== "db") return;

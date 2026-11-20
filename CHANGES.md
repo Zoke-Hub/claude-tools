@@ -3,6 +3,14 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-20 · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom:** the save status beside "Notes on the whole image" is one short word that fits beside the heading even in
+  the narrowest notes column ("Saving…", "Saved", "Local"), never cut off with "…". Its full sentence shows the moment
+  the pointer is on it, and screen readers hear it. A save that fails shows its whole message under the heading, in the
+  warning colour, until it goes through. The heading keeps its height while typing, so the box under it no longer
+  jumps when the Open chip appears.
+
 ## 2026-11-20 · PulseWise 1.0.0 (number unchanged), later
 
 - **PulseWise:** a job no longer lands on the wrong agent's beat. A job goes to the agent that started it, else to the
