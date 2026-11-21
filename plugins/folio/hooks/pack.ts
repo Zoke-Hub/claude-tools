@@ -4,25 +4,34 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { BriefDigest, ChunkRecord, PackChat, PackDraft, PackFile, PackGroup, PickerView, PinnedFact } from '../types'
+import type { BriefDigest, ChunkRecord, Ledger, PackChat, PackDraft, PackFile, PackGroup, PickerView, TaskList } from '../types'
 import { NAME_NOTE, outlineText, RECALL_TOOL } from './fold'
-import { briefLists, openTasksOf } from './measure'
 import type { BriefLists } from './measure'
-import { refreshBrief } from './brief'
+import { briefLines, digestOf } from './brief'
+import { importLedger, withPointValues } from './ledger'
+import { catchUp } from './sync'
+import { parkTasks, tasksFromTopics, withParts } from './tasks'
+import { houseRules } from './house'
+import { upgradeView } from './upgrade'
 import { countByKind, redact } from './private'
-import { addActivity, change, EMPTY_VIEW, folioDir, homeDir, normaliseChunk, normaliseView, privateVault, readJson, readOriginal, savePrivate, sessionsDir, writeOriginal } from './store'
+import { addActivity, cardName, cardOf, change, EMPTY_VIEW, folioDir, fromCard, homeDir, indexPart, loadChat, normaliseChunk, privateVault, readJson, readOriginal, savePrivate, sessionEpoch, sessionsDir, writeOriginal } from './store'
+import type { CardFile } from './store'
 import { base, expandHome, relative, slash } from './paths'
 import { isClaudeReplying } from './actions'
 import { errorText } from './debug'
 import { currentChat } from './chunks'
 import { namedPaths, shellCommandsIn, shellCommandsOf } from './shell'
+import { AUDIO_EXT, categorise, STILL_EXT, TEXT_EXT, VIDEO_EXT } from './categories'
+import type { Category } from './categories'
 import type { NamedPath, ShellCommand } from './shell'
 
 const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
 
 export const PACK_PREFIX = 'FolioPack'
 export const FILES_PREFIX = 'FolioFiles'
-const VERSION = 2
+// The pack's form. 1 holds one chat in folio.json and 2 several; 3 gives each
+// chat a folder of its own, with each part's card, its tasks and its ledger.
+const VERSION = 3
 
 // The scan stops after this many entries; a project bigger than that is
 // listed as far as it got.
@@ -33,13 +42,10 @@ const TEXT_BYTES = 1024 * 1024
 // A personal rule or skill travels when this many chunks used it.
 const RULE_USES = 3
 
-const TEXT_EXT = /\.(md|txt|json|jsonc|js|mjs|cjs|ts|tsx|jsx|py|html|css|csv|tsv|ya?ml|toml|sh|srt|vtt|xml|svg|ini|cfg)$/i
 // Folders tools rebuild or keep for themselves, hidden folders included.
 const CACHE_DIR = /^(\..+|node_modules|venv|env|__pycache__|site-packages|dist|build)$/
 export const RENDER_DIR = /^(renders?|outputs?|exports?)$/i
 export const REFERENCE_DIR = /^(references?|refs?|inspiration|moodboards?)$/i
-export const VIDEO_EXT = /\.(mp4|mov|webm|mkv|avi|m4v|mxf)$/i
-export const AUDIO_EXT = /\.(wav|mp3|aac|m4a|aiff?|flac|ogg)$/i
 export const PROJECT_EXT: Array<[RegExp, string]> = [
   [/\.aepx?$/i, 'After Effects projects'],
   [/\.prproj$/i, 'Premiere projects'],
@@ -238,7 +244,6 @@ function folderGroup(path: string, label: string, found: Found[], root: string, 
 
 // A render's round, from a name like "r13_preview_1080p.mp4" or "r4-final.mov".
 export const ROUND = /^r(\d+)(?=[_\-. ])/i
-const STILL_EXT = /\.(png|jpe?g|webp|tiff?|exr|gif)$/i
 const DATA_EXT = /\.(json|md|txt|csv|log|srt|vtt)$/i
 
 // What a round's name says about it: preview or final, and its size.
@@ -328,11 +333,105 @@ function renderGroups(found: Found[], root: string, touched: Set<string>): PackG
     })
 }
 
-// The project's files as the pack's groups, the way this project is laid out:
-// project files by kind, renders by what they render, references and audio,
-// the small text files the chat touched, the project's own folders, then
-// caches. A group the chat used starts ticked; renders and caches start unticked.
-function groupFiles(files: Found[], caches: Found[], root: string, touched: Set<string>): PackGroup[] {
+// A group's files start ticked when the chat used any of them.
+function usedTick(list: Found[], touched: Set<string>): (f: Found) => boolean {
+  const isUsed = list.some(f => touched.has(f.path))
+
+  return () => isUsed
+}
+
+// A render, by the rules: in a renders folder, or a video.
+const isRender = (f: Found, root: string) => relative(f.path, root).split('/').slice(0, -1).some(s => RENDER_DIR.test(s)) || VIDEO_EXT.test(f.path)
+
+// The small text files the chat touched: they go inside the FolioPack itself.
+const isPackText = (f: Found, touched: Set<string>) => touched.has(f.path) && TEXT_EXT.test(f.path) && f.bytes <= TEXT_BYTES
+
+function textsGroup(texts: Found[], touched: Set<string>): PackGroup {
+  return leafGroup('texts', 'Small text files the chat touched', 'pack', texts, touched, () => true, 'scripts, notes and settings files; they go inside the FolioPack, at their places in the project')
+}
+
+// The project's files as the pack's groups. With Haiku's categories (section
+// 7): the small text files the chat touched first, by rule, as they travel
+// inside the FolioPack; then Haiku's categories, a tree of up to three levels
+// (renders by animation, then by round as the rules sort them); then what
+// Haiku left out, grouped by the rules, a row of the rules joining Haiku's of
+// the same name; caches last. With none, the rules alone, as before.
+function groupFiles(files: Found[], caches: Found[], root: string, touched: Set<string>, sorted: readonly Category[] = []): PackGroup[] {
+  const pool = new Map(files.map(f => [f.path, f]))
+  const placed = sorted.map(c => ({ ...c, found: c.files.flatMap(p => (pool.has(p) && !isPackText(pool.get(p)!, touched) ? [pool.get(p)!] : [])) })).filter(c => c.found.length > 0)
+  if (placed.length === 0) return ruleGroups(files, caches, root, touched)
+  const texts = files.filter(f => isPackText(f, touched))
+  const taken = new Set([...texts, ...placed.flatMap(c => c.found)].map(f => f.path))
+  const rest = ruleGroups(files.filter(f => !taken.has(f.path)), caches, root, touched)
+  const roots = [...(texts.length > 0 ? [textsGroup(texts, touched)] : []), ...categoryTree(placed, root, touched)]
+  for (const g of rest) {
+    const same = roots.findIndex(r => r.into === 'files' && g.into === 'files' && r.children !== undefined && g.children !== undefined && r.label.toLowerCase() === g.label.toLowerCase())
+    if (same < 0) roots.push(g)
+    else roots[same] = parentGroup(roots[same]!.id, roots[same]!.label, [...roots[same]!.children!, ...g.children!], roots[same]!.about)
+  }
+
+  return roots
+}
+
+// One level of Haiku's categories: a name, its line, its own files, and the
+// categories under it.
+type CategoryNode = { name: string; about: string; found: Found[]; kids: Map<string, CategoryNode> }
+
+// Haiku's line, then what the files are, in counts.
+const withAbout = (line: string, counts: string) => (line === '' ? counts : `${line.replace(/[.\s]+$/, '')}. ${counts}`)
+
+// Haiku's categories as the pack's tree: a top row for each first name, the
+// names under it as rows inside it, in name order. A category of renders is
+// sorted by round, as the rules sort renders; one with categories under it
+// keeps its own files in a row of their own. Renders start unticked; any
+// other category starts ticked when the chat used it.
+function categoryTree(placed: ReadonlyArray<Category & { found: Found[] }>, root: string, touched: Set<string>): PackGroup[] {
+  const top = new Map<string, CategoryNode>()
+  for (const c of placed) {
+    let level = top
+    let node: CategoryNode | undefined
+    for (const name of c.path) {
+      node = level.get(name.toLowerCase()) ?? { name, about: '', found: [], kids: new Map() }
+      level.set(name.toLowerCase(), node)
+      level = node.kids
+    }
+    node!.found.push(...c.found)
+    if (node!.about === '') node!.about = c.about
+  }
+  const inOrder = (m: Map<string, CategoryNode>) => [...m.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+  const everything = (n: CategoryNode): Found[] => [...n.found, ...[...n.kids.values()].flatMap(everything)]
+  const leaf = (id: string, label: string, about: string, found: Found[]): PackGroup => {
+    if (found.every(f => isRender(f, root))) {
+      const g = renderKinds(id, label, found, touched)
+
+      return { ...g, about: withAbout(about, g.about) }
+    }
+
+    return { ...leafGroup(id, label, 'files', found, touched, usedTick(found, touched)), about: withAbout(about, aboutOf(found, touched)) }
+  }
+  const toGroup = (n: CategoryNode, ids: string[]): PackGroup => {
+    const id = `sort:${ids.join('/')}`
+    const kids = inOrder(n.kids).map(k => toGroup(k, [...ids, k.name]))
+    if (kids.length === 0) return leaf(id, n.name, n.about, n.found)
+    if (n.found.length > 0) kids.push(leaf(`${id}/.`, `The rest of ${n.name}`, '', n.found))
+
+    return parentGroup(id, n.name, kids, withAbout(n.about, aboutOf(everything(n), touched)))
+  }
+
+  // A top row always holds rows: one category alone sits inside it.
+  return inOrder(top).map(n => {
+    const g = toGroup(n, [n.name])
+
+    return g.children !== undefined ? g : parentGroup(`${g.id}:top`, g.label, [g], g.about)
+  })
+}
+
+// The project's files as the rules group them, the way this project is laid
+// out: project files by kind, renders by what they render, references and
+// audio, the small text files the chat touched, the project's own folders,
+// then caches. A group the chat used starts ticked; renders and caches start
+// unticked.
+function ruleGroups(files: Found[], caches: Found[], root: string, touched: Set<string>): PackGroup[] {
   const groups: PackGroup[] = []
   const taken = new Set<string>()
   const take = (found: Found[]) => {
@@ -340,19 +439,15 @@ function groupFiles(files: Found[], caches: Found[], root: string, touched: Set<
     return found
   }
   const segs = (f: Found) => relative(f.path, root).split('/').slice(0, -1)
-  const usedTick = (list: Found[]) => {
-    const isUsed = list.some(f => touched.has(f.path))
-    return () => isUsed
-  }
 
   const kinds: PackGroup[] = []
   for (const [re, label] of PROJECT_EXT) {
     const found = take(files.filter(f => !taken.has(f.path) && re.test(f.path)))
-    if (found.length > 0) kinds.push(leafGroup(`ext:${label}`, label, 'files', found, touched, usedTick(found)))
+    if (found.length > 0) kinds.push(leafGroup(`ext:${label}`, label, 'files', found, touched, usedTick(found, touched)))
   }
   if (kinds.length > 0) groups.push(parentGroup('cat:project', 'Project files', kinds, 'Editing and design projects (After Effects, Premiere, Photoshop and the like), by kind.'))
   const refs = take(files.filter(f => !taken.has(f.path) && segs(f).some(s => REFERENCE_DIR.test(s))))
-  const renders = take(files.filter(f => !taken.has(f.path) && (segs(f).some(s => RENDER_DIR.test(s)) || VIDEO_EXT.test(f.path))))
+  const renders = take(files.filter(f => !taken.has(f.path) && isRender(f, root)))
   if (renders.length > 0) {
     groups.push(parentGroup('cat:renders', 'Renders', renderGroups(renders, root, touched), 'Rendered videos and previews, by what they render. They start unticked: the other computer can render again.'))
   }
@@ -361,14 +456,12 @@ function groupFiles(files: Found[], caches: Found[], root: string, touched: Set<
   if (refs.length > 0) {
     const first = segs(refs[0]!)
     const at = first.findIndex(s => REFERENCE_DIR.test(s))
-    media.push(folderGroup(first.slice(0, at + 1).join('/'), 'References', refs, root, touched, usedTick(refs)))
+    media.push(folderGroup(first.slice(0, at + 1).join('/'), 'References', refs, root, touched, usedTick(refs, touched)))
   }
-  if (audio.length > 0) media.push(leafGroup('audio', 'Audio', 'files', audio, touched, usedTick(audio)))
+  if (audio.length > 0) media.push(leafGroup('audio', 'Audio', 'files', audio, touched, usedTick(audio, touched)))
   if (media.length > 0) groups.push(parentGroup('cat:media', 'References and audio', media, 'Reference videos and images, and sound.'))
-  const texts = take(files.filter(f => !taken.has(f.path) && touched.has(f.path) && TEXT_EXT.test(f.path) && f.bytes <= TEXT_BYTES))
-  if (texts.length > 0) {
-    groups.push(leafGroup('texts', 'Small text files the chat touched', 'pack', texts, touched, () => true, 'scripts, notes and settings files; they go inside the FolioPack, at their places in the project'))
-  }
+  const texts = take(files.filter(f => !taken.has(f.path) && isPackText(f, touched)))
+  if (texts.length > 0) groups.push(textsGroup(texts, touched))
 
   // The rest by the project's own folders.
   const byTop = new Map<string, Found[]>()
@@ -380,7 +473,7 @@ function groupFiles(files: Found[], caches: Found[], root: string, touched: Set<
   }
   const folders = [...byTop]
     .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-    .map(([top, list]) => folderGroup(top, top, list, root, touched, usedTick(list)))
+    .map(([top, list]) => folderGroup(top, top, list, root, touched, usedTick(list, touched)))
   if (folders.length > 0) groups.push(parentGroup('cat:folders', "The project's folders", folders, 'Everything else in the project, folder by folder.'))
   if (caches.length > 0) {
     const cache: PackGroup = {
@@ -542,7 +635,11 @@ function usedRules(v: PickerView, home: string): { rules: PackDraft['rules']; sk
   }
 }
 
-type SavedChat = { id: string; chunks: ChunkRecord[]; pinned: PinnedFact[] }
+// A chat as a pack carries it: its summarised parts with their cards, its
+// tasks and ledger (null for a chat saved before them: the pack's import
+// upgrades it as Folio upgrades an old chat), the brief an older Folio merged,
+// and its index's version.
+type SavedChat = { id: string; version: number; chunks: ChunkRecord[]; tasks: TaskList | null; ledger: Ledger | null; briefDigest: BriefDigest | null }
 
 // Every other chat Folio kept in this project: its folder is the project's, or
 // its files sit in the project.
@@ -554,18 +651,20 @@ async function projectChats($: EngineInterface, root: string, selfId: string): P
   } catch {
     return []
   }
+  // A chat with summarised parts, opened in the project or with files in it.
+  const isHere = (saved: Partial<PickerView>, parts: ChunkRecord[]) => {
+    const cwd = slash(saved.cwd ?? '')
+
+    return parts.length > 0 && (cwd === root || cwd.startsWith(`${root}/`) || parts.some(c => c.paths.some(p => slash(p).startsWith(`${root}/`))))
+  }
   const out: SavedChat[] = []
   for (const entry of entries) {
     if (entry.kind !== 'dir' || entry.name === selfId) continue
-    // Loaded as Folio loads its own chat; one whose index can't be read is left out.
-    const raw = await readJson<Partial<PickerView>>($, `${dir}/${entry.name}/index.json`)
-    if (raw === null) continue
+    // Loaded as Folio loads its own chat, cards and all; one whose index can't be read is left out.
     try {
-      const saved = normaliseView(raw)
-      const chunks = (saved.chunks ?? []).filter(c => c.isSummarised)
-      const cwd = slash(saved.cwd ?? '')
-      const isHere = cwd === root || cwd.startsWith(`${root}/`) || chunks.some(c => c.paths.some(p => slash(p).startsWith(`${root}/`)))
-      if (isHere && chunks.length > 0) out.push({ id: entry.name, chunks, pinned: saved.pinned ?? [] })
+      const saved = await loadChat($, `${dir}/${entry.name}`, isHere)
+      if (saved === null) continue
+      out.push({ id: entry.name, version: saved.version ?? 1, chunks: saved.chunks ?? [], tasks: saved.tasks ?? null, ledger: saved.ledger ?? null, briefDigest: saved.briefDigest ?? null })
     } catch {
       // A chat whose index doesn't read as one is left out.
     }
@@ -590,7 +689,7 @@ function chatTitle(chunks: ChunkRecord[]): string {
 
 // Looks through the project folder and the chat for what a pack could carry:
 // for this chat, the files it touched; for the whole project, every file in it
-// and every other chat Folio kept there.
+// and every other chat Folio kept there. Haiku sorts the files (categories.ts).
 export async function scanProject($: EngineInterface): Promise<PackDraft> {
   const v = await read($, view)
   const cwd = v.cwd
@@ -619,22 +718,40 @@ export async function scanProject($: EngineInterface): Promise<PackDraft> {
     }),
   )
 
+  // Haiku's categories, the same for both scopes; none when it gave no answer.
+  const sorted = (await categorise($, files, root).catch(() => null))?.categories ?? []
+
   return {
     name: base(root),
     root,
     scope: 'chat',
-    groups: groupFiles(files, caches, root, touched),
-    chatGroups: groupFiles(
-      files.filter(f => touched.has(f.path)),
-      [],
+    groups: inProject(groupFiles(files, caches, root, touched, sorted), root),
+    chatGroups: inProject(
+      groupFiles(
+        files.filter(f => touched.has(f.path)),
+        [],
+        root,
+        touched,
+        sorted,
+      ),
       root,
-      touched,
     ),
     chats: chats.map((c): PackChat => ({ id: c.id, chunks: c.chunks.length, title: chatTitle(c.chunks), bytes: chatBytes(c.chunks) })),
     rules,
     skills,
     saveTo: await readSaveTo($),
   }
+}
+
+// The form names each file by its path in the project, not its full path: a
+// big project's form is a quarter smaller (24,834 files: 3.8 million
+// characters of JSON became 2.9 million).
+function inProject(groups: PackGroup[], root: string): PackGroup[] {
+  return groups.map(g => ({
+    ...g,
+    ...(g.files === undefined ? {} : { files: g.files.map(f => ({ ...f, path: relative(f.path, root) })) }),
+    ...(g.children === undefined ? {} : { children: inProject(g.children, root) }),
+  }))
 }
 
 // The groups for the scope chosen.
@@ -680,23 +797,18 @@ export function toggleGroup(groups: PackGroup[], id: string): PackGroup[] {
 export function alwaysLines(v: PickerView, draft: PackDraft): Array<{ id: string; text: string; bytes?: number; about: string[] }> {
   const summarised = v.chunks.filter(c => c.isSummarised)
   const kept = v.chunks.filter(c => c.decision === 'keep').length
-  const passages = v.pinned.filter(p => p.kind === 'passage').length
-  const facts = v.pinned.filter(p => p.kind === 'fact').length
   const outlined = summarised.filter(c => c.sections.length > 0).length
   // The brief as brief.md will hold it.
-  const lists = briefLists(v, summarised)
+  const lists = briefLines(v.ledger, v.tasks)
   const rules = lists.rules.length
   const decisions = lists.decisions.length
   const terms = lists.terms.length
-  const tasks = openTasksOf(v).length
-  const extras = [kept > 0 ? `${kept} kept word for word` : '', passages > 0 ? `${passages} passage${passages === 1 ? '' : 's'} brought back` : '', facts > 0 ? `${facts} pinned fact${facts === 1 ? '' : 's'}` : '']
-    .filter(Boolean)
-    .join(', ')
+  const tasks = lists.openTasks.length
   const sorted = [...summarised].sort((a, b) => a.order - b.order)
   const lines: Array<{ id: string; text: string; bytes?: number; about: string[] }> = [
     {
       id: 'summaries',
-      text: `Summaries of ${summarised.length} chunk${summarised.length === 1 ? '' : 's'}${outlined > 0 ? ` (${outlined} outlined)` : ''}, with their states${extras ? `: ${extras}` : ''}`,
+      text: `Summaries of ${summarised.length} part${summarised.length === 1 ? '' : 's'}${outlined > 0 ? ` (${outlined} outlined)` : ''}, with their states${kept > 0 ? `: ${kept} kept word for word` : ''}`,
       bytes: summaryBytes(summarised),
       about: sorted.slice(0, 30).map(c => `${c.title}${c.decision === 'keep' ? ' (kept word for word)' : ''}`).concat(sorted.length > 30 ? [`+ ${sorted.length - 30} more`] : []),
     },
@@ -707,18 +819,18 @@ export function alwaysLines(v: PickerView, draft: PackDraft): Array<{ id: string
     },
     {
       id: 'originals',
-      text: 'Every chunk word for word, so recall works there too',
+      text: 'Every part word for word, so recall works there too',
       bytes: originalBytes(v.chunks),
-      about: ["Each chunk's full text in originals/, with private items left out. Recall quotes from these on the other computer."],
+      about: ["Each part's full text in originals/, with private items left out. Recall quotes from these on the other computer."],
     },
   ]
   if (draft.scope === 'project' && draft.chats.length > 0) {
     const n = draft.chats.reduce((sum, c) => sum + c.chunks, 0)
     lines.splice(1, 0, {
       id: 'chats',
-      text: `${draft.chats.length} other chat${draft.chats.length === 1 ? '' : 's'} in this project, ${n} chunks`,
+      text: `${draft.chats.length} other chat${draft.chats.length === 1 ? '' : 's'} in this project, ${n} parts`,
       bytes: draft.chats.reduce((sum, c) => sum + c.bytes, 0),
-      about: draft.chats.map(c => `${c.title} · ${c.chunks} chunks`),
+      about: draft.chats.map(c => `${c.title} · ${c.chunks} parts`),
     })
   }
   if (rules > 0) lines.push({ id: 'project-rules', text: `Rules for this project, from the chat · ${rules}`, about: lists.rules })
@@ -748,7 +860,7 @@ function md(v: PickerView, name: string, others: SavedChat[]): { brief: string; 
   const sorted = [...v.chunks].filter(c => c.isSummarised).sort((a, b) => a.order - b.order)
   const list = (title: string, items: string[]) => (items.length > 0 ? `## ${title}\n\n${items.map(i => `- ${i}`).join('\n')}\n` : '')
   // This chat's merged brief, then what the project's other chats add.
-  const lists = briefLists(v, sorted)
+  const lists = briefLines(v.ledger, v.tasks)
   const all = (key: keyof BriefLists) => [...new Set([...lists[key], ...others.flatMap(o => o.chunks.flatMap(c => c.brief[key]))])]
   const brief = [
     `# The brief: ${name}\n`,
@@ -756,16 +868,14 @@ function md(v: PickerView, name: string, others: SavedChat[]): { brief: string; 
     list('Decisions', all('decisions')),
     list('Terms', all('terms')),
     list('Files', all('files')),
-    list('Open tasks', openTasksOf(v)),
-    list('Pinned facts', v.pinned.filter(p => p.kind === 'fact').map(p => p.text)),
-    v.pinned.some(p => p.kind === 'passage') ? `## Brought back word for word\n\n${v.pinned.filter(p => p.kind === 'passage').map(p => `From ${p.chunkIds.join(', ')}:\n\n> ${p.text.replace(/\n/g, '\n> ')}`).join('\n\n')}\n` : '',
+    list('Open tasks', lists.openTasks),
   ]
     .filter(Boolean)
     .join('\n')
   const chunkLines = (chunks: ChunkRecord[]) => [...chunks].sort((a, b) => a.order - b.order).map(c => `${outlineText(c)}${c.decision === 'keep' ? '\n  (kept word for word)' : ''}\n`)
   const outline = [
     `# Outline: ${name}\n`,
-    'Oldest first. Each chunk\'s original is in originals/<id>.md.\n',
+    'Oldest first. Each part\'s original is in originals/<id>.md.\n',
     ...(others.length > 0 ? ['## This chat\n'] : []),
     ...chunkLines(sorted),
     ...others.flatMap(o => [`## Another chat: ${chatTitle(o.chunks)}\n`, ...chunkLines(o.chunks)]),
@@ -780,7 +890,7 @@ function startHere(name: string, v: PickerView, draft: PackDraft, files: { name:
 
   return `# ${packName(name)}
 
-A FolioPack: the study, rules and decisions of the project "${name}", from a chat of ${chunks} chunks, made ${today()} with Folio. It is for starting the same work in a new chat, on any computer.
+A FolioPack: the study, rules and decisions of the project "${name}", from a chat of ${chunks} parts, made ${today()} with Folio. It is for starting the same work in a new chat, on any computer.
 
 ## For Claude: start here
 
@@ -792,8 +902,8 @@ First, before reading anything else in this folder:
 Without Folio:
 
 1. Read \`brief.md\`: the project's rules, decisions, terms, files and open tasks.
-2. Read \`outline.md\`: every chunk of the chat, oldest first. Scan the headings; read a paragraph only when its heading suggests it holds what you need.
-3. \`originals/\` holds every chunk word for word (\`originals/<id>.md\`, the id is in the outline). Search them when you need exact wording, values or paths.
+2. Read \`outline.md\`: every part of the chat, oldest first. Scan the headings; read a paragraph only when its heading suggests it holds what you need.
+3. \`originals/\` holds every part word for word (\`originals/<id>.md\`, the id is in the outline). Search them when you need exact wording, values or paths.
 
 Files, with Folio or without:
 
@@ -808,6 +918,34 @@ Once that is done, ask the person whether to delete the zip file${files ? 's' : 
 
 Private items (keys, passwords, numbers, addresses) were left out of this pack on purpose; ask the person if the work needs one.
 `
+}
+
+// Each chat's folder in a pack: chats/1 is the chat that packed it.
+const chatDir = (i: number) => `chats/${i + 1}`
+const CHAT_DIR = /^chats\/\d{1,4}$/
+
+// JSON cleaned value by value, so a placeholder never breaks the JSON around it.
+function cleanJson(value: unknown, clean: (text: string) => string): string {
+  return JSON.stringify(value, (_, x: unknown) => (typeof x === 'string' ? clean(x) : x))
+}
+
+// What a pack holds of its chats (version 3), as paths inside the pack and
+// their texts: in each chat's folder, its summarised parts' places and states
+// (index.json), its tasks and ledger, and each part's
+// card in parts/, paths relative to the project. No file grows with the
+// number of chats, so each stays far under the engine's 4 MiB a write.
+export function chatFiles(chats: readonly SavedChat[], root: string, clean: (text: string) => string): Array<[string, string]> {
+  return chats.flatMap((chat, i): Array<[string, string]> => {
+    const dir = chatDir(i)
+    const parts = chat.chunks.filter(c => c.isSummarised).map(c => ({ ...c, paths: c.paths.map(p => relative(p, root)) }))
+
+    return [
+      [`${dir}/index.json`, cleanJson({ version: chat.version, parts: parts.map(indexPart), briefDigest: chat.briefDigest }, clean)],
+      ...(chat.tasks === null ? [] : [[`${dir}/tasks.json`, cleanJson(chat.tasks, clean)] as [string, string]]),
+      ...(chat.ledger === null ? [] : [[`${dir}/ledger.json`, cleanJson(chat.ledger, clean)] as [string, string]]),
+      ...parts.map((c): [string, string] => [`${dir}/parts/${cardName(c.id)}`, cleanJson(cardOf(c), clean)]),
+    ]
+  })
 }
 
 // Pack up, from the press to the zips:
@@ -832,12 +970,25 @@ type PackRun =
 let packRun: PackRun = { kind: 'idle' }
 let packCount = 0
 
-// Pack up's state for the panel, declared here too so the scan sees what this file writes.
+// Pack up's button for the panel, declared here too so the scan sees what this file writes.
 const packed = atom({ plugin: 'folio', key: 'packed' } as const, null)
 
 // Whether a pack is under way: Pack up takes no press meanwhile.
 export function isPackBusy(): boolean {
   return packRun.kind === 'writing' || packRun.kind === 'awaiting' || packRun.kind === 'zipping'
+}
+
+// Pack up's button, from packRun alone (SS5): Packing… while a pack is under
+// way, Packed ✓ once the zips are there, Pack up otherwise.
+async function showPack($: EngineInterface) {
+  await update($, packed, () => (isPackBusy() ? ('packing' as const) : packRun.kind === 'done' ? ('done' as const) : null))
+}
+
+// The panel opens: a pack that finished or failed is let go, so the button
+// reads Pack up again; one under way still reads Packing….
+export async function packOnOpen($: EngineInterface) {
+  if (packRun.kind === 'done' || packRun.kind === 'failed') packRun = { kind: 'idle' }
+  await showPack($)
 }
 
 // A new session packs nothing yet.
@@ -865,11 +1016,13 @@ export async function packTurnDone($: EngineInterface, turnId: string): Promise<
   if (packRun !== run) return null
   if (isZipped) {
     packRun = { kind: 'done' }
+    await showPack($)
 
     return 'done'
   }
   if (!isTheTurn) return null
   packRun = { kind: 'failed', why: 'missing' }
+  await showPack($)
 
   return 'missing'
 }
@@ -886,7 +1039,7 @@ function watchPack($: EngineInterface, id: number) {
       const isZipped = await allThere($, run.zips)
       if (packRun !== run) return
       packRun = isZipped ? { kind: 'done' } : { kind: 'failed', why: 'never ran' }
-      await update($, packed, () => (isZipped ? ('done' as const) : null))
+      await showPack($)
       if (!isZipped) $.ui.toast("Claude didn't get to zipping the FolioPack. Press Pack up to try again.")
     })().catch(() => {})
   })
@@ -899,16 +1052,29 @@ function watchPack($: EngineInterface, id: number) {
 export async function packUp($: EngineInterface, draft: PackDraft): Promise<void> {
   if (isPackBusy()) return
   packRun = { kind: 'writing' }
+  const epoch = sessionEpoch()
   try {
-    await writePack($, draft)
+    await showPack($)
+    await writePack($, draft, epoch)
   } catch (err) {
+    // A pack whose session ended was let go with it.
+    if (sessionEpoch() !== epoch) return
     packRun = { kind: 'failed', why: errorText(err) }
+    await showPack($)
     throw err
   }
 }
 
-async function writePack($: EngineInterface, draft: PackDraft): Promise<void> {
-  await refreshBrief($).catch(() => {})
+// A pack whose session ended stops where it is (SS5): the new session's view
+// is not packed, and no prompt goes into its chat.
+function stopIfEnded(epoch: number) {
+  if (sessionEpoch() !== epoch) throw new Error('the session ended before the pack was written')
+}
+
+async function writePack($: EngineInterface, draft: PackDraft, epoch: number): Promise<void> {
+  // Every waiting summary first (C7): the pack carries them.
+  await catchUp($).catch(() => {})
+  stopIfEnded(epoch)
   const v = await read($, view)
   const home = await homeDir($)
   const name = packTitle(draft)
@@ -942,10 +1108,10 @@ async function writePack($: EngineInterface, draft: PackDraft): Promise<void> {
     }
   }
   const groups = groupsOf(draft)
-  const texts = tickedFiles(groups, 'pack').map(f => f.path)
-  for (const path of texts) {
+  // The form names each file by its path in the project.
+  for (const { path } of tickedFiles(groups, 'pack')) {
     try {
-      await $.fs.write(`${dir}/files/${relative(path, draft.root)}`, clean(await $.fs.read(path)))
+      await $.fs.write(`${dir}/files/${path}`, clean(await $.fs.read(`${draft.root}/${path}`)))
     } catch {
       // Unreadable as text: left out.
     }
@@ -953,27 +1119,23 @@ async function writePack($: EngineInterface, draft: PackDraft): Promise<void> {
   const chosen = tickedFiles(groups, 'files')
   const kinds = groups.filter(g => isPackable(g, 'files') && tickOf(g) !== 'none').map(g => g.label)
   const files = chosen.length > 0 ? { name: filesName(name), bytes: tickedBytes(draft, 'files'), groups: kinds } : null
+  const chats: SavedChat[] = [{ id: 'this', version: v.version, chunks: v.chunks, tasks: v.tasks, ledger: v.ledger, briefDigest: v.briefDigest }, ...others]
   const exported = {
     folio: VERSION,
     name,
     made: new Date().toISOString(),
     root: base(draft.root),
     scope: draft.scope,
-    chats: [{ id: 'this', chunks: v.chunks, pinned: v.pinned }, ...others].map(chat => ({
-      id: chat.id,
-      chunks: chat.chunks.filter(c => c.isSummarised).map(c => ({ ...c, paths: c.paths.map(p => relative(p, draft.root)), tidied: [], side: [] })),
-      pinned: chat.pinned,
-    })),
-    // The merged brief travels, so an import needn't write it again.
-    brief: v.briefDigest,
-    files: files ? { ...files, paths: chosen.map(f => relative(f.path, draft.root)) } : null,
+    chats: chats.map((chat, i) => ({ id: chat.id, dir: chatDir(i), parts: chat.chunks.filter(c => c.isSummarised).length })),
+    // The brief as the ledger gives it, in the shape any Folio reads.
+    brief: digestOf(v.ledger, v.tasks, v.chunks.filter(c => c.isSummarised).map(c => c.id)),
+    files: files ? { ...files, paths: chosen.map(f => f.path) } : null,
   }
-  // Cleaned value by value, so a placeholder never breaks the JSON around it.
-  await $.fs.write(`${dir}/folio.json`, JSON.stringify(exported, (_, x: unknown) => (typeof x === 'string' ? clean(x) : x)))
-  await $.fs.write(`${dir}/START-HERE.md`, startHere(name, v, draft, files))
+  for (const [path, text] of [['folio.json', cleanJson(exported, clean)] as [string, string], ...chatFiles(chats, draft.root, clean)]) await $.fs.write(`${dir}/${path}`, text)
+  await $.fs.write(`${dir}/START-HERE.md`, clean(startHere(name, v, draft, files)))
   await savePrivate($)
   if (files) await $.fs.write(`${outDir}/${files.name}.txt`, exported.files!.paths.join('\n'))
-
+  stopIfEnded(epoch)
   await change($, x =>
     addActivity(x, {
       kind: 'pack',
@@ -999,68 +1161,187 @@ async function writePack($: EngineInterface, draft: PackDraft): Promise<void> {
   })
 }
 
-// Brings a FolioPack into this chat: its chunks as they were (folded, kept word
-// for word), its originals for recall, and what recall had brought back.
-// `isOpened` says whether the pack came in, so a rebuild is asked for only then.
+// A pack's folio.json as any version wrote it: version 1 holds one chat's
+// parts, version 2 several, version 3 names each chat's folder.
+type RawPack = {
+  folio?: number
+  name: string
+  chunks?: ChunkRecord[]
+  chats?: Array<{ id?: unknown; dir?: unknown; chunks?: ChunkRecord[] }>
+  brief?: BriefDigest | null
+}
+
+// A chat's index.json in a version 3 pack.
+type PackIndex = { version?: number; parts?: unknown[]; briefDigest?: BriefDigest | null }
+
+// A part id as Folio makes them: letters, digits, dots and hyphens. A pack's
+// ids name files here, so no other id is read (SB4).
+const PART_ID = /^[A-Za-z0-9.-]+$/
+
+// Parts as the pack holds them: a record with an id, nothing else.
+const partsIn = (list: unknown[] | undefined): ChunkRecord[] =>
+  (list ?? []).filter((c): c is ChunkRecord => typeof c === 'object' && c !== null && typeof (c as { id?: unknown }).id === 'string' && PART_ID.test((c as { id: string }).id)).map(c => normaliseChunk(c))
+
+// A pack's chats as this Folio reads them, in the pack's order (the chat that
+// packed it first). In a version 3 pack each chat's folder gives its parts
+// with their cards, its tasks and ledger; a part whose card is missing comes
+// without its summary. An older pack's chats have neither tasks nor ledger;
+// its brief was the packing chat's.
+async function packChats($: EngineInterface, dir: string, raw: RawPack, version: number): Promise<SavedChat[]> {
+  if (version < 3) {
+    const chats = version >= 2 ? (raw.chats ?? []) : [{ chunks: raw.chunks ?? [] }]
+
+    return chats.map((c, i) => ({ id: String(c.id ?? i + 1), version: 2, chunks: partsIn(c.chunks), tasks: null, ledger: null, briefDigest: i === 0 ? (raw.brief ?? null) : null }))
+  }
+  const out: SavedChat[] = []
+  for (const entry of raw.chats ?? []) {
+    // Only a folder of the pack's own form is read.
+    if (typeof entry.dir !== 'string' || !CHAT_DIR.test(entry.dir)) continue
+    const at = `${dir}/${entry.dir}`
+    const index = await readJson<PackIndex>($, `${at}/index.json`)
+    if (index === null) continue
+    const parts = partsIn(index.parts)
+    const cards = await Promise.all(parts.map(c => readJson<Partial<CardFile>>($, `${at}/parts/${cardName(c.id)}`)))
+    const [tasks, ledger] = await Promise.all([readJson<TaskList>($, `${at}/tasks.json`), readJson<Ledger>($, `${at}/ledger.json`)])
+    out.push({
+      id: String(entry.id ?? entry.dir),
+      version: index.version ?? VERSION,
+      chunks: parts.map((c, i) => (cards[i] === null ? { ...c, isSummarised: false } : normaliseChunk({ ...c, ...fromCard(cards[i]!) }))),
+      tasks: Array.isArray(tasks?.tasks) ? tasks : null,
+      ledger: Array.isArray(ledger?.items) ? { ...ledger!, version: ledger!.version ?? 1, next: ledger!.next ?? {} } : null,
+      briefDigest: index.briefDigest ?? null,
+    })
+  }
+
+  return out
+}
+
+// A pack chat with no tasks or ledger goes through the same upgrade as an old
+// chat (upgrade.ts): its parts get tasks by the runs of their topics, and its
+// ledger is built from its brief, a rule Claude's own rules already say left
+// out, with the values of its parts' points. A ledger from before values were
+// kept takes them from the points too.
+async function upgradeChat(chat: SavedChat, isHouseRule: (rule: string) => boolean): Promise<SavedChat & { tasks: TaskList; ledger: Ledger }> {
+  if (chat.tasks !== null && chat.ledger !== null) return { ...chat, tasks: chat.tasks, ledger: withPointValues(chat.ledger, chat.chunks).ledger }
+  const done = await upgradeView({ chunks: chat.chunks, briefDigest: chat.briefDigest, folds: 0 }, 2, async () => null, isHouseRule)
+
+  return { ...chat, ...done.view }
+}
+
+// A pack's chats brought into this chat's view, oldest first (`chats`). Each
+// part not here yet takes this chat's next number, so recall reaches it by
+// number and no number is given twice: the chat's own next parts come after
+// them. It comes in folded, as a summary, even one kept word for word where
+// it was (that was for its live work; Browse puts any of them back). Each of
+// its tasks and ledger items takes a new id here, with its parts' numbers and
+// its task as they are here. A part already here (a pack opened twice) stays
+// as it is, a task with no new part isn't added again, and an item the ledger
+// holds in the same words isn't either. Parts with no task here get one by
+// their topics. What an older Folio's recall pinned stays behind.
+function mergePack(v: PickerView, chats: ReadonlyArray<SavedChat & { tasks: TaskList; ledger: Ledger }>, pack: string): { view: PickerView; added: ChunkRecord[] } {
+  const here = new Set(v.chunks.map(c => c.id))
+  let next = v.nextPart
+  let tasks = v.tasks
+  let ledger = v.ledger
+  const added: ChunkRecord[] = []
+  for (const chat of chats) {
+    const parts = [...chat.chunks].sort((a, b) => a.order - b.order).filter(c => !here.has(c.id))
+    // Where the pack's places land here: each new part's own, else the newest new part at or before it.
+    const places = parts.map((c, i) => [c.order, next + i] as const)
+    const placeOf = (order: number | null) => (order === null || places.length === 0 ? null : ([...places].reverse().find(([o]) => o <= order) ?? places[0]!)[1])
+    const ids = new Map<string, string>()
+    for (const t of chat.tasks.tasks) {
+      if (!parts.some(c => c.task === t.id)) continue
+      ids.set(t.id, `T${tasks.next}`)
+      tasks = { ...tasks, next: tasks.next + 1, tasks: [...tasks.tasks, { ...t, id: `T${tasks.next}` }] }
+    }
+    for (const c of parts) {
+      here.add(c.id)
+      const task = c.task === undefined ? undefined : ids.get(c.task)
+      added.push(
+        normaliseChunk({
+          ...c,
+          order: next++,
+          status: 'folded',
+          decision: c.decision === 'keep' ? null : c.decision,
+          keptAtFold: null,
+          pack,
+          task,
+          taskWhy: task === undefined ? undefined : c.taskWhy,
+        }),
+      )
+    }
+    ledger = importLedger(ledger, chat.ledger, placeOf, task => (task === undefined ? undefined : ids.get(task))).ledger
+  }
+  const chunks = [...v.chunks, ...added]
+  // Parts with no task here: by their topics, as an older chat's parts are (C8).
+  const placed = added.some(c => c.task === undefined) ? tasksFromTopics(chunks, tasks) : { chunks, tasks: parkTasks(withParts(tasks, chunks), chunks) }
+  const isNew = new Set(added.map(c => c.id))
+
+  return { view: { ...v, chunks: placed.chunks, nextPart: next, tasks: placed.tasks, ledger }, added: placed.chunks.filter(c => isNew.has(c.id)) }
+}
+
+// Brings a FolioPack into this chat: its parts as summaries, numbered here as
+// they come in, with their cards, tasks and ledger, and its originals for
+// recall. An older pack goes through the upgrade an
+// old chat does. Opening a pack changes none of Folio's files or settings,
+// only this chat's store. `isOpened` says whether the pack came in, so a
+// rebuild is asked for only then.
 export async function importPack($: EngineInterface, folder: string): Promise<{ text: string; isOpened: boolean }> {
   const dir = slash(folder.trim()).replace(/\/+$/, '')
   // A pack opens into a chat working in a folder: the FolioFiles it came with
   // unzip there.
-  if ((await read($, view)).cwd.trim() === '') return { text: 'This chat has no folder. Open a chat in the project folder, then bring the FolioPack in there.', isOpened: false }
+  const before = await read($, view)
+  if (before.cwd.trim() === '') return { text: 'This chat has no folder. Open a chat in the project folder, then bring the FolioPack in there.', isOpened: false }
   if (!(await $.fs.exists(`${dir}/folio.json`))) return { text: `No folio.json in ${dir}: unzip the FolioPack first and give its folder.`, isOpened: false }
-  const raw = await readJson<{
-    folio?: number
-    name: string
-    chunks?: ChunkRecord[]
-    pinned?: PinnedFact[]
-    chats?: Array<{ chunks: ChunkRecord[]; pinned: PinnedFact[] }>
-    brief?: BriefDigest | null
-  }>($, `${dir}/folio.json`)
+  const raw = await readJson<RawPack>($, `${dir}/folio.json`)
   if (raw === null) return { text: `The folio.json in ${dir} can't be read: unzip the FolioPack again.`, isOpened: false }
-  // The Folio that made the pack says how to read it: version 1 holds one chat,
-  // version 2 several, oldest first. One from a newer Folio may hold what this
-  // one can't read, so it is left closed.
+  // The Folio that made the pack says how to read it. One from a newer Folio
+  // may hold what this one can't read, so it is left closed.
   const version = typeof raw.folio === 'number' ? raw.folio : raw.chats ? 2 : 1
   if (version > VERSION) return { text: `This FolioPack was made by a newer Folio (version ${version}; this one reads up to ${VERSION}). Update Folio, then bring it in again.`, isOpened: false }
-  const chats = version >= 2 ? (raw.chats ?? []) : [{ chunks: raw.chunks ?? [], pinned: raw.pinned ?? [] }]
-  const all = [...chats].reverse().flatMap(chat => [...chat.chunks].sort((a, b) => a.order - b.order))
-  const pinned = chats.flatMap(chat => chat.pinned)
-  // Every chunk comes in folded, as a summary, even one kept word for word in
-  // the chat it came from: that was for its live work. Browse puts any of them
-  // back word for word, and recall's exact mode reads them.
-  const wasKept = all.filter(c => c.decision === 'keep').length
-  const chunks = all.map((c, i) => normaliseChunk({ ...c, order: i - all.length, status: 'folded', decision: c.decision === 'keep' ? null : c.decision, keptAtFold: null, tidied: [], side: [] }))
-  for (const c of chunks) {
+  const isHouseRule = await houseRules($, await homeDir($), before.cwd)
+  // Oldest first: the chat that packed it comes last, the newest.
+  const chats = await Promise.all([...(await packChats($, dir, raw, version))].reverse().map(c => upgradeChat(c, isHouseRule)))
+  const name = typeof raw.name === 'string' ? raw.name : base(dir)
+  // Each new part's original, for recall; a part without one keeps its summary only.
+  for (const c of chats.flatMap(chat => chat.chunks)) {
+    if (before.chunks.some(x => x.id === c.id)) continue
     try {
       const text = (await $.fs.read(`${dir}/originals/${c.id}.md`)).replace(/^# .*\n\n/, '')
       await writeOriginal($, c.id, { text, messages: [], toolResults: {} })
     } catch {
-      // A chunk without its original keeps its summary only.
+      // A part without its original keeps its summary only.
     }
   }
+  // Parts kept word for word where they were.
+  const keptThere = new Set(chats.flatMap(chat => chat.chunks.filter(c => c.decision === 'keep').map(c => c.id)))
+  let added: ChunkRecord[] = []
+  let wasKept = 0
   await change($, v => {
-    const ids = new Set(chunks.map(c => c.id))
+    const merged = mergePack(v, chats, name)
+    added = merged.added
+    wasKept = added.filter(c => keptThere.has(c.id)).length
 
-    return addActivity(
-      {
-        ...v,
-        chunks: [...chunks, ...v.chunks.filter(c => !ids.has(c.id))],
-        // Brought back afresh here: their ages count from this chat's folds.
-        pinned: [...(normaliseView({ pinned }).pinned ?? []).map(p => ({ ...p, lastUsedFold: v.folds, pinnedFold: v.folds })), ...v.pinned],
-        // A chat with no brief of its own takes the pack's merged one.
-        briefDigest: v.briefDigest ?? (raw.brief ? { ...raw.brief, ids: chunks.map(c => c.id) } : null),
-      },
-      { kind: 'import', text: `Opened the FolioPack “${raw.name}”`, detail: `${chunks.length} chunks as summaries${wasKept > 0 ? `; ${wasKept} kept word for word there, back from Browse` : ''}`, chunkIds: [] },
-    )
+    return addActivity(merged.view, {
+      kind: 'import',
+      text: `Opened the FolioPack “${name}”`,
+      detail: `${added.length} parts as summaries${wasKept > 0 ? `; ${wasKept} kept word for word there, back from Browse` : ''}`,
+      chunkIds: [],
+    })
   })
-
-  const text = `Folio opened the FolioPack "${raw.name}": ${chunks.length} chunks as summaries${wasKept > 0 ? ` (${wasKept} were kept word for word in their chat; the person can put them back from Folio's Browse)` : ''}, and ${pinned.length} brought-back facts and passages. They go into your context as one folded history once this reply ends, brief included, so don't read the pack's brief.md or outline.md; recall (${RECALL_TOOL}) searches every original.`
+  const numbers = added.map(c => c.order + 1)
+  const parts =
+    added.length === 0
+      ? 'no new parts (every one of them is here already)'
+      : `${added.length === 1 ? '1 part as a summary' : `${added.length} parts as summaries`}, numbered ${numbers.length === 1 ? numbers[0] : `${numbers[0]} to ${numbers.at(-1)}`} in this chat`
+  const text = `Folio opened the FolioPack "${name}": ${parts}${wasKept > 0 ? ` (${wasKept} were kept word for word in their chat; the person can put them back from Folio's Browse)` : ''}, with their tasks and ledger. They go into your context as one folded history once this reply ends, brief included, so don't read the pack's brief.md or outline.md; recall (${RECALL_TOOL}) reaches them by those numbers and searches every original.`
 
   return { text, isOpened: true }
 }
 
 export const IMPORT_DESCRIPTION =
-  'Opens an unzipped FolioPack (a folder holding folio.json and START-HERE.md) in this chat: its summaries, its brief and what recall brought back, from the computer it came from. Call it before reading the pack\'s other files. Give `path`: the unzipped folder. ' +
+  'Opens an unzipped FolioPack (a folder holding folio.json and START-HERE.md) in this chat: its summaries and its brief, from the computer it came from. Call it before reading the pack\'s other files. Give `path`: the unzipped folder. ' +
   NAME_NOTE
 
 export const IMPORT_SCHEMA = {

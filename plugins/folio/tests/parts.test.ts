@@ -8,7 +8,8 @@ import { briefLists, customTopOf } from '../hooks/measure'
 import { contextParts } from '../hooks/pictures'
 import { redact, reveal } from '../hooks/private'
 import type { Vault } from '../hooks/private'
-import { EMPTY_VIEW, emptyBrief, normaliseChunk, settingsOf } from '../hooks/store'
+import { EMPTY_VIEW, normaliseChunk, settingsOf } from '../hooks/store'
+import { ledgerOf } from './engine'
 import { parseJsonObject, partsOf } from '../hooks/summarize'
 import { suggestionsFor } from '../hooks/suggest'
 import type { PackDraft, PickerView } from '../types'
@@ -54,12 +55,10 @@ test('a kept chunk nobody uses is suggested for summarising after a few folds', 
   expect(suggestionsFor(viewWith({ chunks: [kept, ...later], folds: 2 })).map(s => s.id)).not.toContain('keep:k')
 })
 
-test('side talk is suggested for tidying in Watch, once it saves enough', () => {
+test("side talk is never suggested for tidying, even an older Folio's", () => {
   const side = Array.from({ length: 5 }, (_, n) => ({ n: n + 2, opening: `ok ${n}`, why: 'acknowledgement', tokens: 600 }))
   const chunks = [0, 1, 2, 3].map(i => normaliseChunk({ id: `c${i}`, order: i, title: `C${i}`, isSummarised: true, side: i === 0 ? side : [] }))
-  const found = suggestionsFor(viewWith({ chunks }))
-  expect(found.find(s => s.id === 'tidy')?.sides?.length).toBe(5)
-  expect(suggestionsFor(viewWith({ chunks, snoozed: { tidy: 3 } })).find(s => s.id === 'tidy')).toBeUndefined()
+  expect(suggestionsFor(viewWith({ chunks })).map(s => s.kind)).toEqual([])
 })
 
 test('the pack finds the project folder from the files the chat touched', () => {
@@ -73,12 +72,13 @@ const draft = (skills: string[] = []): PackDraft => ({ name: 'x', root: '/x', sc
 
 test('what always goes in a pack is described from this chat', () => {
   const chunks = [
-    normaliseChunk({ id: 'a', isSummarised: true, decision: 'keep', brief: { requests: [], rules: ['r1'], decisions: ['d1', 'd2'], terms: [], files: [], openTasks: ['t1'] } }),
+    normaliseChunk({ id: 'a', isSummarised: true, decision: 'keep' }),
     normaliseChunk({ id: 'b', isSummarised: true, order: 1, sections: [{ heading: 'h', body: 'b', points: [], from: 0, to: 1 }] }),
   ]
-  const lines = alwaysLines(viewWith({ chunks }), draft(['diagram-maker']))
-  expect(lines[0]!.text).toBe('Summaries of 2 chunks (1 outlined), with their states: 1 kept word for word')
-  expect(lines[1]!.text).toBe('The brief: 1 rules, 2 decisions')
+  const ledger = ledgerOf([{ rules: [{ text: 'r1', isBeyondTask: true }], decisions: [{ text: 'd1' }, { text: 'd2' }], opened: ['t1'] }])
+  const lines = alwaysLines(viewWith({ chunks, ledger }), draft(['diagram-maker']))
+  expect(lines[0]!.text).toBe('Summaries of 2 parts (1 outlined), with their states: 1 kept word for word')
+  expect(lines[1]!.text).toBe('The brief: 1 rules, 2 decisions, 1 open tasks')
   expect(lines.find(l => l.id === 'project-rules')!.about).toEqual(['r1'])
   expect(lines.at(-1)!.text).toBe('Needs the skills: diagram-maker')
 })
@@ -86,17 +86,20 @@ test('what always goes in a pack is described from this chat', () => {
 // A summarised chunk of this many tokens.
 const chunk = (id: string, tokens: number, patch = {}) => normaliseChunk({ id, tokens, isSummarised: true, ...patch })
 
-test("before Haiku's merge, the brief lists newest first for the panel and leaves out one chat's paths", () => {
-  const withBrief = (order: number, rules: string[], files: string[]) => chunk(`c${order}`, 0, { order, brief: { ...emptyBrief(), rules, files } })
-  const v = viewWith({ chunks: [withBrief(0, ['old rule'], ['hooks/a.ts']), withBrief(1, ['new rule'], ['/private/tmp/x/scratchpad/y.png', 'hooks/b.ts'])] })
-  expect(briefLists(v, v.chunks, true)).toMatchObject({ rules: ['new rule', 'old rule'], files: ['hooks/b.ts', 'hooks/a.ts'] })
-  expect(briefLists(v, v.chunks).files).toEqual(['hooks/a.ts', 'hooks/b.ts'])
+test("the brief lists newest first and leaves out one chat's paths", () => {
+  const rule = (text: string) => ({ text, isBeyondTask: true })
+  const ledger = ledgerOf([
+    { rules: [rule('old rule')], files: ['hooks/a.ts'] },
+    { rules: [rule('new rule')], files: ['/private/tmp/x/scratchpad/y.png', 'hooks/b.ts'] },
+  ])
+  expect(briefLists(viewWith({ ledger }))).toMatchObject({ rules: ['new rule', 'old rule'], files: ['hooks/b.ts', 'hooks/a.ts'] })
 })
 
 test("FolioPack's form counts the brief that brief.md will hold", () => {
-  const chunks = [chunk('a', 0, { brief: { ...emptyBrief(), rules: ['r1', 'r1 again'] } })]
-  // Haiku has merged the two rules into one.
-  const v = { ...viewWith({ chunks }), briefDigest: { ids: ['a'], rules: ['r1'], decisions: [], terms: [], files: [], openTasks: [] } }
+  const chunks = [chunk('a', 0)]
+  // The same rule said again by a later part is one item.
+  const ledger = ledgerOf([{ rules: [{ text: 'r1', isBeyondTask: true }] }, { rules: [{ text: 'R1.', isBeyondTask: true }] }])
+  const v = viewWith({ chunks, ledger })
   const lines = alwaysLines(v, draft())
   expect(lines.find(l => l.id === 'brief')!.text).toBe('The brief: 1 rules')
   expect(lines.find(l => l.id === 'project-rules')!.about).toEqual(['r1'])
@@ -112,13 +115,14 @@ test('a trimmed chunk marked fine to fold shows as fine to fold in the bar, as i
 
 test('the bar: marks in place, the part past the ceiling, and no room while the work is over', () => {
   const sized = (v: PickerView) => contextParts(v).filter(p => 'mark' in p || p.size > 0).map(p => p.key)
-  expect(sized(viewWith({ chunks: [chunk('a', 120_000)] }))).toEqual(['work:0', 'target', 'work:1', 'room:1', 'ceiling'])
-  const over = contextParts(viewWith({ chunks: [chunk('a', 230_000)] }))
+  // Balanced: the floor at 250k, the ceiling at 400k.
+  expect(sized(viewWith({ chunks: [chunk('a', 300_000)] }))).toEqual(['work:0', 'target', 'work:1', 'room:1', 'ceiling'])
+  const over = contextParts(viewWith({ chunks: [chunk('a', 430_000)] }))
   const past = over.find(p => p.key === 'over')
   expect(past && 'tip' in past ? past.tip : '').toBe('Past the ceiling by 30k')
   // Over the ceiling with most of the work fine to fold: no room appears, the
   // fine part fills up to the ceiling and runs on past it.
-  const fine = sized(viewWith({ chunks: [chunk('a', 60_000), chunk('b', 200_000, { decision: 'fold', order: 1 })] }))
+  const fine = sized(viewWith({ chunks: [chunk('a', 60_000), chunk('b', 400_000, { decision: 'fold', order: 1 })] }))
   expect(fine).not.toContain('room:1')
   expect(fine).toEqual(['work:0', 'fine:0', 'target', 'fine:1', 'ceiling', 'fine:2'])
   // Every part keeps its place, so the list is the same length whatever changes.
@@ -153,17 +157,47 @@ test('a model answer is read as JSON even with text around it or braces in its s
   expect(parseJsonObject('{not json} {"ok": true}')).toEqual({ ok: true })
 })
 
+test('the marks measure the whole context: they sit where the work reaches them past the kept and fixed parts', () => {
+  // 300k in all, 100k of it Claude Code's own: 200k of work, and the floor
+  // (250k) is reached once the work passes 150k.
+  const context = { tokens: 300_000, window: 1_000_000, compactAt: null, fixed: 100_000, fixedParts: [], mcpServers: [] }
+  const parts = contextParts(viewWith({ chunks: [chunk('a', 200_000)], context }))
+  const size = (key: string) => parts.reduce((s, p) => s + ('size' in p && p.key === key ? p.size : 0), 0)
+  expect([size('work:0'), size('work:1'), size('room:1'), size('fixed')]).toEqual([150_000, 50_000, 100_000, 100_000])
+  const work = parts.find(p => p.key === 'work:1')
+  expect(work && 'tip' in work ? work.tip : '').toContain('above the fold-back line (250k)')
+})
+
+test('the strategies: a ceiling and a floor in real tokens, and the newest 80k kept whatever the ceiling', () => {
+  const of = (strategy: 'light' | 'balanced' | 'lean') => settingsOf({ ...EMPTY_VIEW, settings: { mode: 'auto', strategy } })
+  expect(of('light')).toMatchObject({ ceiling: 550_000, floor: 350_000, keepRecent: 80_000 })
+  expect(of('balanced')).toMatchObject({ ceiling: 400_000, floor: 250_000, keepRecent: 80_000 })
+  expect(of('lean')).toMatchObject({ ceiling: 300_000, floor: 180_000, keepRecent: 80_000 })
+  expect(settingsOf(EMPTY_VIEW).strategy).toBe('balanced')
+})
+
 test('Custom stays below the point Claude compacts by itself, and falls back where it cannot fit', () => {
   // The numbers from a 1M chat: room for the slider's whole range.
-  expect(customTopOf({ compactAt: 965_000, window: 1_000_000, fixed: 40_000 }, 53_000)).toBe(700_000)
-  // Much kept in the chat brings the top down, to a whole stop.
-  expect(customTopOf({ compactAt: 965_000, window: 1_000_000, fixed: 40_000 }, 300_000)).toBe(550_000)
+  expect(customTopOf({ compactAt: 965_000, window: 1_000_000 })).toBe(800_000)
+  // A lower compaction point brings the top down, to a whole stop.
+  expect(customTopOf({ compactAt: 620_000, window: 1_000_000 })).toBe(550_000)
   // Auto-compact off: the window decides.
-  expect(customTopOf({ compactAt: null, window: 1_000_000, fixed: 40_000 }, 300_000)).toBe(550_000)
-  const custom = (customTop: number, customCeiling: number) =>
-    settingsOf({ ...EMPTY_VIEW, settings: { mode: 'auto', strategy: 'custom', customCeiling }, context: { tokens: 1, window: 1, compactAt: null, fixed: 0, fixedParts: [], mcpServers: [], customTop } })
-  // A ceiling above the chat's top comes down to it, with the rest following.
-  expect(custom(500_000, 700_000)).toMatchObject({ ceiling: 500_000, target: 250_000, keepRecent: 100_000 })
-  // A 200k window: the chat runs on Balanced's numbers.
-  expect(custom(100_000, 700_000)).toMatchObject({ ceiling: 200_000, target: 100_000, keepRecent: 40_000 })
+  expect(customTopOf({ compactAt: null, window: 200_000 })).toBe(100_000)
+  const custom = (customTop: number, customReal: number) =>
+    settingsOf({ ...EMPTY_VIEW, settings: { mode: 'auto', strategy: 'custom', customReal }, context: { tokens: 1, window: 1, compactAt: null, fixed: 0, fixedParts: [], mcpServers: [], customTop } })
+  // The floor is 62.5% of the ceiling; a ceiling above the chat's top comes down to it.
+  expect(custom(800_000, 400_000)).toMatchObject({ ceiling: 400_000, floor: 250_000, keepRecent: 80_000 })
+  expect(custom(500_000, 700_000)).toMatchObject({ ceiling: 500_000, floor: 312_500, keepRecent: 80_000 })
+  // A 200k window: the chat runs on Balanced's numbers, brought under its top.
+  expect(custom(100_000, 700_000)).toMatchObject({ ceiling: 100_000, floor: 62_500 })
+})
+
+test('a Custom ceiling saved by an older version starts folding about where it did', () => {
+  const old = (customCeiling: number) => settingsOf({ ...EMPTY_VIEW, settings: { mode: 'auto', strategy: 'custom', customCeiling } })
+  // Until the chat's own part is measured, read about 150k higher in the whole context.
+  expect(old(500_000).ceiling).toBe(650_000)
+  expect(old(350_000).ceiling).toBe(500_000)
+  expect(old(700_000).ceiling).toBe(800_000)
+  // A ceiling set on the new scale wins over the old one.
+  expect(settingsOf({ ...EMPTY_VIEW, settings: { mode: 'auto', strategy: 'custom', customCeiling: 700_000, customReal: 450_000 } }).ceiling).toBe(450_000)
 })

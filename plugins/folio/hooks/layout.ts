@@ -9,7 +9,8 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import { AUDIO_EXT, PROJECT_EXT, REFERENCE_DIR, RENDER_DIR, renderHome, ROUND, VIDEO_EXT, walk } from './pack'
+import { PROJECT_EXT, REFERENCE_DIR, RENDER_DIR, renderHome, ROUND, walk } from './pack'
+import { AUDIO_EXT, VIDEO_EXT } from './categories'
 import type { Found } from './pack'
 import { relative, slash } from './paths'
 import { folioDir, homeDir, readJson } from './store'

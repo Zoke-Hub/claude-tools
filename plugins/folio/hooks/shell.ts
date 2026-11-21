@@ -348,6 +348,96 @@ function lex(src: string, isBash: boolean, inner: string[]): Token[] {
   return out
 }
 
+// Commands that print the files they name, and filters that only pass on
+// what comes before them in a pipe.
+const READERS = /^(cat|head|tail|less|more|bat|batcat|nl|tac)$/
+const SEARCHERS = /^(grep|egrep|fgrep|rg)$/
+const FILTERS = /^(head|tail|cat|nl|sort|uniq|cut|tr|wc|column|fold|grep|egrep|fgrep|rg|sed)$/
+// Commands that print only what they are given (a separator between files).
+const SAYS = /^(echo|printf)$/
+// The search options that take the next word as their value, and the ones
+// that give the pattern (so every other word is a file).
+const VALUE_OPTIONS = /^(-[efABCmdDgtTM]|--(regexp|file|after-context|before-context|context|max-count|glob|type|type-not|max-columns))$/
+const PATTERN_OPTIONS = /^(-e|-f|--regexp|--file)(=|$)/
+
+// The words of a search command after its name that name files: every word
+// not an option (nor an option's value), less the pattern unless an option gave it.
+function searchedFiles(words: string[]): number {
+  let hasPattern = false
+  const operands: string[] = []
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i]!
+    if (PATTERN_OPTIONS.test(w)) hasPattern = true
+    if (VALUE_OPTIONS.test(w)) i += 1
+    else if (!w.startsWith('-')) operands.push(w)
+  }
+
+  return hasPattern ? operands.length : Math.max(0, operands.length - 1)
+}
+
+// sed that only prints (-n, and never -i), with a file after its script.
+function isPrintingSed(words: string[], inPipe: boolean): boolean {
+  if (words.some(w => /^(-i|--in-place)/.test(w))) return false
+  if (inPipe) return true
+  const hasScriptOption = words.some(w => /^(-e|-f|--expression|--file)(=|$)/.test(w))
+  const operands = words.slice(1).filter(w => !w.startsWith('-')).length
+
+  return words.some(w => /^(-n|--quiet|--silent)$|^-[a-zA-Z]*n[a-zA-Z]*$/.test(w)) && operands >= (hasScriptOption ? 1 : 2)
+}
+
+// Whether a shell command only prints files it names: cat, head, tail, less,
+// more, bat, sed -n, or grep and rg over named files, alone, one after
+// another, or piped through filters, perhaps after a cd. Anything that writes
+// a file, runs a command inside it, loops or reads its own input is not.
+export function isFileRead(command: string): boolean {
+  const inner: string[] = []
+  const tokens = lex(command, true, inner)
+  if (inner.length > 0) return false
+  let words: string[] = []
+  let inPipe = false
+  let reads = 0
+  // One simple command, as its words; false when it is not a read.
+  const isRead = (): boolean => {
+    const [name, ...rest] = words
+    if (name === undefined || CD.test(name) || SAYS.test(name)) return true
+    if (inPipe) return FILTERS.test(name) && (name !== 'sed' || isPrintingSed(words, true))
+    reads += 1
+    if (READERS.test(name)) return rest.some(w => !w.startsWith('-'))
+    if (SEARCHERS.test(name)) return searchedFiles(words) > 0
+
+    return name === 'sed' && isPrintingSed(words, false)
+  }
+  const take = (): boolean => {
+    const is = isRead()
+    words = []
+
+    return is
+  }
+  for (let t = 0; t < tokens.length; t++) {
+    const tok = tokens[t]!
+    if (tok.kind === 'word') {
+      words.push(tok.parts.map(p => ('text' in p ? p.text : '$')).join(''))
+      continue
+    }
+    // Output thrown away (2>/dev/null, 2>&1) is fine; output written to a file is not.
+    if (tok.op === '>' || tok.op === '>>') {
+      const target = tokens[t + 1]
+      const isNull = target?.kind === 'word' && literalOf(target) === '/dev/null'
+      const isJoin = target?.kind === 'op' && target.op === '&' && /^[12]$/.test(literalOf(tokens[t + 2]) ?? '')
+      if (!isNull && !isJoin) return false
+      t += isJoin ? 2 : 1
+      continue
+    }
+    if (tok.op === '<') continue
+    if (!['|', '&&', '||', ';'].includes(tok.op)) return false
+    if (!take()) return false
+    inPipe = tok.op === '|'
+  }
+  if (!take()) return false
+
+  return reads > 0
+}
+
 // The paths one command names, and where it leaves its shell when it started
 // in the first of `starts` (null where a cd went somewhere that can't be
 // known). Variables set in the command (NAME=x, $name = 'x', a for loop's

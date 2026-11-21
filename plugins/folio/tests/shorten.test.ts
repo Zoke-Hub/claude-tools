@@ -3,6 +3,7 @@
 
 import { expect, test } from 'claude-code/testing'
 
+import { isFileRead } from '../hooks/shell'
 import { outputId, shorten, SHORTEN_FROM } from '../hooks/shorten'
 import { callTool, DIR, savedView, start, stubEngine } from './engine'
 import type { Engine } from './engine'
@@ -12,12 +13,13 @@ const lines = (n: number) => Array.from({ length: n }, (_, i) => (i === 700 ? 'l
 
 // A tool's result arriving in the chat, as the engine appends it, and the
 // text the chat keeps of it.
-async function arrive($: Engine, tool: string, text: string, toolUseId = 'toolu_big'): Promise<unknown> {
+async function arrive($: Engine, tool: string, text: string, toolUseId = 'toolu_big', agentId?: string): Promise<unknown> {
   const stored = await $.session.append({
     door: 'tool-result',
     origin: { kind: 'tool', tool },
     uuid: `row-${toolUseId}`,
     message: { type: 'user', role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: text }] },
+    ...(agentId === undefined ? {} : { agentId }),
   })
   const block = stored.message?.content[0]
 
@@ -34,7 +36,70 @@ test('a long output keeps its start and end, and the note names what is saved', 
   expect(short).toContain('"output abcd1234 lines ')
   expect(shorten(lines(10), 'abcd1234')).toBeNull()
   // One very long line is cut by characters.
-  expect(shorten('x'.repeat(20_000), 'abcd1234')).toContain('characters 3001–18500 of 20000')
+  expect(shorten('x'.repeat(30_000), 'abcd1234')).toContain('characters 3001–28500 of 30000')
+})
+
+test('only an output past 20,000 characters is shortened', () => {
+  expect(SHORTEN_FROM).toBe(20_000)
+  expect(shorten('x'.repeat(19_000), 'abcd1234')).toBeNull()
+  expect(shorten(lines(400), 'abcd1234')).toBeNull()
+  expect(shorten('x'.repeat(20_001), 'abcd1234')).not.toBeNull()
+})
+
+test('a command that only prints files is told apart from any other', () => {
+  const reads = [
+    'cat hooks/a.ts',
+    'head -n 50 a.ts',
+    'tail -100 log.txt',
+    "sed -n '1,80p' hooks/fold.ts",
+    'grep -n "foo bar" hooks/a.ts hooks/b.ts',
+    'grep -e foo a.ts',
+    'rg -n pattern src/',
+    'cd /x && cat a.ts | head -50',
+    "sed -n 1,40p a.ts; echo ---; sed -n 1,40p b.ts",
+    'cat a.ts 2>/dev/null',
+    'grep -c x a.ts 2>&1',
+    'bat a.ts',
+    'less a.ts',
+  ]
+  const others = [
+    'ls -la',
+    'npm test',
+    'cat > a.ts',
+    'cat a.ts > b.ts',
+    'grep foo',
+    'rg foo',
+    'sed -i s/a/b/ a.ts',
+    "sed 's/a/b/' a.ts",
+    'cat $(ls)',
+    'echo hi',
+    'find . -name x | xargs cat',
+    'for f in a b; do cat $f; done',
+    'cat a.ts &',
+    "python3 - <<'EOF'\nprint(1)\nEOF",
+    'git log | head',
+  ]
+  expect(reads.filter(c => !isFileRead(c))).toEqual([])
+  expect(others.filter(c => isFileRead(c))).toEqual([])
+})
+
+test('a plain file read through the shell, and any output inside a subagent, reach Claude whole', async ($, on) => {
+  const { files } = stubEngine(on, { files: savedView({ chunks: [] }) })
+  // The shell beneath Folio: each call's id, as the engine gives it.
+  const ids: string[] = []
+  on('tool.call', { tool: 'Bash' }, (_, e) => {
+    ids.push(e.tool_use_id ?? '')
+
+    return { result: 'ran' }
+  })
+  await start($)
+  const text = lines(1000)
+  await callTool($, { tool: 'Bash', command: "sed -n '1,1000p' build.log" })
+  expect(await arrive($, 'Bash', text, ids[0])).toBe(text)
+  await callTool($, { tool: 'Bash', command: 'npm run build' })
+  expect(String(await arrive($, 'Bash', text, ids[1])).length).toBeLessThan(SHORTEN_FROM)
+  expect(await arrive($, 'Bash', text, 'toolu_sub', 'agent-1')).toBe(text)
+  expect([...files.keys()].filter(k => k.includes('/outputs/'))).toEqual([`${DIR}/outputs/${outputId(ids[1]!)}.txt`])
 })
 
 test('a long shell output reaches Claude shortened, and recall gives back every line', async ($, on) => {

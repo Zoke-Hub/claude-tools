@@ -4,24 +4,24 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { afterTurn, compactNow, currentHistory, onCompact, REBUILD_ASK, resetActions, setReplying, showFolding } from './actions'
+import { afterTurn, armIdle, coldFold, compactNow, currentHistory, isSameChat, onCompact, REBUILD_ASK, resetActions, setReplying, showFolding } from './actions'
 import { shortTokens } from './chunks'
-import { refreshContext, setDueTokens, workTokens } from './measure'
-import { FILES_PREFIX, IMPORT_DESCRIPTION, IMPORT_SCHEMA, importPack, isPackBusy, notePackTurn, PACK_PREFIX, packTurnDone, resetPack } from './pack'
+import { noteRequest, refreshContext, setDueTokens } from './measure'
+import { FILES_PREFIX, IMPORT_DESCRIPTION, IMPORT_SCHEMA, importPack, notePackTurn, PACK_PREFIX, packOnOpen, packTurnDone, resetPack } from './pack'
 import { HISTORY_BLOCK, RECALL_TOOL } from './fold'
 import { currentLayout, LAYOUT_BLOCK, readLayout } from './layout'
-import { drawPanel, resetPanel, worthALook } from './panel'
-import { RECALL_BLOCK, RECALL_DESCRIPTION, RECALL_SCHEMA, recall, resetRecall } from './recall'
-import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, openStore, setSettings, settingsOf } from './store'
-import { shortenRow } from './shorten'
-import { resetSync, syncChunks } from './sync'
-import { errorText, later, note } from './debug'
+import { drawPanel, layoutOf, resetPanel } from './panel'
+import { AGENT_LINE, noteCut, RECALL_BLOCK, RECALL_DESCRIPTION, RECALL_SCHEMA, recallCall, resetRecall } from './recall'
+import { pointerLine, resetPointers, warmPointers } from './pointers'
+import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, openStore, setSettings, storeFailure } from './store'
+import { noteCommand, shortenRow } from './shorten'
+import { resetHouse } from './house'
+import { noteTurnGrowth, noteTurnStart, resetSync, syncChunks } from './sync'
+import { errorText, later, logEvent, note } from './debug'
 
 const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
-// The panel's open sections and Pack up's state, declared here too so the
-// scan sees what this file writes.
+// The panel's open sections, declared here too so the scan sees what this file writes.
 const open = atom({ plugin: 'folio', key: 'open' } as const, [])
-const packed = atom({ plugin: 'folio', key: 'packed' } as const, null)
 
 const COMMAND = 'folio'
 const PANEL = 'folio-panel'
@@ -31,31 +31,44 @@ const TITLE = 'Folio'
 // under a new id with no session.start, so every hook that reads or writes the
 // store checks the id first: the old session is closed (its index written,
 // every per-session state let go) and the new one's store opened. One check
-// runs at a time.
+// runs at a time. A store that couldn't open throws here, so no hook works on
+// that chat (SB1): each is skipped, and Claude Code goes on without it.
 let binding: Promise<void> | null = null
 
 async function ensureSession($: EngineInterface): Promise<void> {
   while (binding !== null) await binding
   const id = await $.session.id()
-  if (boundId() === id) return
-  binding = rebind($, id).finally(() => (binding = null))
-  await binding
+  if (boundId() !== id) {
+    binding = rebind($, id).finally(() => (binding = null))
+    await binding
+  }
+  const failed = storeFailure()
+  if (failed !== null) throw new Error(`Folio left this chat alone: ${failed}`)
 }
 
 async function rebind($: EngineInterface, id: string) {
   const was = boundId()
-  if (was !== null) await endSession($, was)
-  await openStore($, id)
+  if (was !== null) await endSession($)
+  try {
+    const { upgrade, damaged } = await openStore($, id)
+    if (upgrade !== null) void logEvent($, 'upgrade', upgrade)
+    if (damaged.length > 0) void logEvent($, 'damaged', { files: damaged })
+  } catch (err) {
+    void note($, `the chat's saved files could not be opened: ${errorText(err, true)}`)
+    $.ui.toast(`Folio couldn't open this chat's saved parts (${errorText(err)}). It leaves this chat alone and changes none of its files until Claude Code starts again.`)
+  }
   if (was !== null) void note($, `the chat went on as session ${id}: Folio closed ${was} and opened ${id}`)
 }
 
 // Lets go of everything one session holds: its store, waiting folds and packs,
 // recall's counts, the history the meter waits on, the panel's opened chunk
 // and its FolioPack form.
-async function endSession($: EngineInterface, id: string) {
-  await closeStore($, id)
+async function endSession($: EngineInterface) {
+  await closeStore($)
   resetRecall()
+  resetPointers()
   resetSync()
+  resetHouse()
   resetPack()
   setDueTokens(0)
   await resetActions($)
@@ -67,11 +80,17 @@ async function endSession($: EngineInterface, id: string) {
 // measures the context again and catches up on summaries, so the
 // panel never shows a size from before a compaction.
 async function openPanel($: EngineInterface) {
-  await ensureSession($)
+  try {
+    await ensureSession($)
+  } catch (err) {
+    $.ui.toast(errorText(err))
+
+    return
+  }
   // What fills the context starts shut each time the panel opens.
-  await update($, open, list => [...list.filter(x => x !== 'pack:context'), ...(list.includes('context-closed') ? [] : ['context-closed'])])
+  await update($, open, list => list.filter(x => x !== 'context' && x !== 'pack:context'))
   // A pack Claude is still zipping keeps reading Packing….
-  await update($, packed, () => (isPackBusy() ? ('packing' as const) : null))
+  await packOnOpen($)
   await showFolding($)
   void refreshContext($).catch(() => {})
   later($, () => syncChunks($))
@@ -90,6 +109,25 @@ async function togglePanel($: EngineInterface) {
   }
 }
 
+// Where a prompt comes from, for pointers: the person (at the app, through the
+// bridge or the SDK, or a scheduled prompt) or another chat; not a task's notice
+// nor Folio's own.
+const POINTED = new Set(['composer', 'bridge', 'sdk', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay'])
+
+// The pointer line for a prompt or a brief, against the main chat as Claude
+// has it now. '' when nothing
+// matches or anything fails: a pointer never holds a prompt back.
+async function pointersAt($: EngineInterface, text: string): Promise<string> {
+  try {
+    await ensureSession($)
+    const chat = await $.session.messages().catch(() => null)
+
+    return await pointerLine($, await read($, view), text, chat)
+  } catch {
+    return ''
+  }
+}
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -104,6 +142,11 @@ export const register: Register = (on, options) => {
       await ensureSession($)
       await refreshContext($).catch(() => {})
       await syncChunks($)
+      // The folded parts' names, read once, so the first prompt that names one waits for nothing.
+      if (options.promptPointers !== false) await warmPointers($, await read($, view)).catch(() => {})
+      // Back after the cache has gone cold: a fold first, in Automatic.
+      await coldFold($, 'start').catch(err => note($, `the cold fold at the start failed: ${errorText(err)}`))
+      await armIdle($)
     })
 
     return started
@@ -113,8 +156,7 @@ export const register: Register = (on, options) => {
   // Folio lets go of it. After /clear or a resume the chat goes on under a new
   // id, and the next hook opens that session's store.
   on('session.end', async ($, e, next) => {
-    const id = boundId()
-    if (id !== null) await endSession($, id).catch(err => note($, `closing the session failed: ${errorText(err)}`))
+    if (boundId() !== null) await endSession($).catch(err => note($, `closing the session failed: ${errorText(err)}`))
 
     return next(e)
   })
@@ -128,7 +170,8 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       await ensureSession($)
-      setReplying(true)
+      setReplying($, true)
+      noteTurnStart()
       notePackTurn(e.text, e.turnId)
     }
 
@@ -138,36 +181,48 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     if (e.agentId === undefined) {
-      setReplying(false)
+      setReplying($, false)
       await ensureSession($)
       // Pack up reads Packed once Claude has made the zips; if it didn't,
       // Pack up comes back and says so.
-      const zipped = await packTurnDone($, e.turnId)
-      if (zipped === 'done') await update($, packed, () => 'done' as const)
-      if (zipped === 'missing') {
-        await update($, packed, () => null)
-        $.ui.toast("Claude didn't finish zipping the FolioPack. Press Pack up to try again.")
-      }
+      if ((await packTurnDone($, e.turnId)) === 'missing') $.ui.toast("Claude didn't finish zipping the FolioPack. Press Pack up to try again.")
       // Each step runs even if the one before fails: a size that can't be
       // read must not stop the summaries or Automatic's fold.
       later($, async () => {
         await ensureSession($)
         await refreshContext($).catch(() => {})
         await syncChunks($).catch(err => note($, `sync failed: ${errorText(err, true)}`))
-        await afterTurn($)
+        await afterTurn($).catch(err => note($, `the end of the turn failed: ${errorText(err, true)}`))
+        await armIdle($)
       })
     }
 
     return done
   })
 
+  // Each request the main chat makes: its real size, as its response reports
+  // it. In Automatic, a long reply's closed legs are summarised as it grows.
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    if (e.agentId === undefined && result.usage !== null) {
+      const u = result.usage
+      void noteRequest($, u).catch(err => note($, `a request's size wasn't kept: ${errorText(err)}`))
+      void noteTurnGrowth($, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens).catch(err => note($, `the summaries in a long reply failed: ${errorText(err)}`))
+    }
+
+    return result
+  })
+
+  // Recall, in the main thread or a subagent: each keeps its own memory of
+  // what it was given (R6).
   on('tool.call', { tool: RECALL_TOOL }, async ($, e) => {
-    const query = typeof e.query === 'string' ? e.query : ''
     await ensureSession($)
-    const text = query.trim() === '' ? 'Give a query: what you need from the earlier chat.' : await recall($, query, e.exact === true)
+    const start = Date.now()
+    const { text, log } = await recallCall($, e as unknown as Record<string, unknown>, { agentId: e.agentId, callId: e.tool_use_id })
+    void logEvent($, 'recall', { ...log, ms: Date.now() - start })
 
     return { result: text }
-  }).catch(() => ({ result: 'Recall ran out of time. Try a narrower query, or exact: true.' }))
+  }).catch(() => ({ result: "Recall ran out of time. Try a narrower query, a `kind`, or a part's card." }))
 
   on('tool.call', { tool: 'mcp__folio__import_pack' }, async ($, e) => {
     const path = typeof e.path === 'string' ? e.path : ''
@@ -181,19 +236,46 @@ export const register: Register = (on, options) => {
   }).catch(() => ({ result: 'Folio could not open that FolioPack in time. Try again, or read its START-HERE.md.' }))
 
   // A FolioPack the person drops into the chat: Claude is told what it is and
-  // where to start. Folio's own prompts (packing one up) are left alone.
+  // where to start. And a prompt that names something only folded parts hold
+  // gets one line saying which parts mention it (3.5), unless the setting is
+  // off. Folio's own prompts (packing one up) are left alone.
   on('prompt.submit', async ($, e, next) => {
     const names = [e.text, ...(e.attachments ?? []).map(a => a.filename ?? '')]
-    if (e.origin.kind !== 'composer' || !names.some(n => n.includes(`${PACK_PREFIX} - `))) return next(e)
-    const note = `The message brings a FolioPack (a zip named "${PACK_PREFIX} - <project> - <date>.zip"). Unzip it next to where it is, read START-HERE.md inside it, and follow it. If a "${FILES_PREFIX} - …" zip came too, unzip it into the project folder.`
+    const context = [...(e.context ?? [])]
+    if (e.origin.kind === 'composer' && names.some(n => n.includes(`${PACK_PREFIX} - `))) {
+      context.push(`The message brings a FolioPack (a zip named "${PACK_PREFIX} - <project> - <date>.zip"). Unzip it next to where it is, read START-HERE.md inside it, and follow it. If a "${FILES_PREFIX} - …" zip came too, unzip it into the project folder.`)
+    }
+    if (options.promptPointers !== false && POINTED.has(e.origin.kind) && e.command === undefined && e.isMeta !== true) {
+      const line = await pointersAt($, e.text)
+      if (line !== '') context.push(line)
+    }
 
-    return next({ ...e, context: [...(e.context ?? []), note] })
+    return context.length === (e.context ?? []).length ? next(e) : next({ ...e, context })
+  })
+
+  // A subagent Claude starts gets the recall line in its brief, and pointers
+  // when the brief names something only folded parts hold (section 7). A fork
+  // holds the chat already; a resumed run and a workflow's agent keep their own.
+  on('agent.spawn', async ($, e, next) => {
+    if (e.fork || e.resume !== undefined || e.workflow !== undefined) return next(e)
+    const isSaved = await ensureSession($).then(
+      async () => (await read($, view)).chunks.length > 0,
+      () => false,
+    )
+    if (!isSaved) return next(e)
+    const pointers = options.promptPointers === false ? '' : await pointersAt($, e.prompt)
+
+    return next({ ...e, prompt: `${e.prompt}\n\n${AGENT_LINE}${pointers === '' ? '' : `\n${pointers}`}` })
   })
 
   on('session.compact', async ($, e, next) => {
     await ensureSession($)
+    const done = await onCompact($, e, next, { foldNote: options.foldNote === true })
+    // What recall gave this agent may have left its context now (a compaction
+    // worked out ahead of time, or the same messages handed back, changes nothing).
+    if (e.trigger !== 'precompute' && done.skip === undefined && !isSameChat(e, done)) noteCut(e.agentId)
 
-    return onCompact($, e, next)
+    return done
   })
 
   // The recall line, and once parts have folded, their history. After a
@@ -221,7 +303,14 @@ export const register: Register = (on, options) => {
 
   // A long shell output reaches Claude as its start, its end and a note on how
   // to recall the rest; the whole is saved first. The setting turns it off.
+  // A shell command is noted as it runs, so its output can be told apart
+  // when it arrives: a plain read of files stays whole.
   if (options.shortenOutputs !== false) {
+    on('tool.call', { tool: 'Bash' }, async (_, e, next) => {
+      noteCommand(e.tool_use_id, e.command)
+
+      return next(e)
+    })
     on('session.append', { door: 'tool-result' }, async ($, e, next) => {
       await ensureSession($)
 
@@ -240,7 +329,7 @@ export const register: Register = (on, options) => {
     const v = await read($, view)
     const top = v.context?.customTop ?? CUSTOM_MAX
     if (ceiling >= CUSTOM_MIN && ceiling <= Math.min(top, CUSTOM_MAX) && ceiling % CUSTOM_STEP === 0) {
-      await setSettings($, { customCeiling: ceiling })
+      await setSettings($, { customReal: ceiling })
     }
 
     return done
@@ -249,34 +338,19 @@ export const register: Register = (on, options) => {
   // Tokens saved, with one decimal below 100k (1.3k, 12.4k, 230k, 1.2M).
   const savedShort = (n: number) => (n >= 1000 && n < 100_000 ? `${+(n / 1000).toFixed(1)}k` : shortTokens(n))
 
-  // The ring at the right of the prompt footer: how close the next fold is,
-  // and beside it "Folio", then the tokens saved once there are any, then how
-  // many chunks with exact details the next fold takes. Amber when something
-  // is about to fold and needs a look, blue while Worth a look has something,
-  // dim otherwise.
+  // The footer's dim button at the right of the prompt: "Folio", then the
+  // tokens saved once there are any. It opens and closes the panel; the
+  // panel's meter shows how close the next fold is.
   on('ui.render', { component: 'SessionMode' }, async ($, e) => {
     const v = await read($, view)
-    const elements = $.ui.resolve(e)
-    const { Box, Button, Text } = elements
-    const looks = v.foldNext.length
+    const { Box, Button, Text } = $.ui.resolve(e)
     // "↓" stands for saved, to keep the footer short.
     const saved = v.savedTokens > 0 ? ` ↓${savedShort(v.savedTokens)}` : ''
-    const toLook = worthALook(v).length
 
-    // The desktop draws its own buttons, without colour on what's inside them,
-    // so the button stays dim and the state is a count after it, always shown
-    // (the desktop draws the button first whatever the order): how many fold
-    // next, else how many are worth a look, else 0. Red once the work is past
-    // the ceiling; else amber while some fold next, blue while some are worth
-    // a look, dim at 0.
-    const count = looks > 0 ? looks : toLook
-    const isOver = workTokens(v) >= settingsOf(v).ceiling
-    const tone = isOver ? 'error' : looks > 0 ? 'warning' : toLook > 0 ? 'suggestion' : null
     return (
       <Box flexDirection="row" alignItems="center">
         {e.props.modes.length > 0 && <Text dimColor>{`${e.props.modes.join(' & ')} `}</Text>}
         <Button key="footer-ring" plain dimColor label={`Folio${saved}`} onPress={() => void togglePanel($)} />
-        {tone === null ? <Text dimColor>{` ${count}`}</Text> : <Text color={tone}>{` ${count}`}</Text>}
       </Box>
     )
   })
@@ -302,7 +376,7 @@ export const register: Register = (on, options) => {
   let drawWindow = 0
   on('ui.render', { component: 'Pane', requestId: PANEL }, async ($, e) => {
     const start = Date.now()
-    const drawn = await drawPanel($, e, e.props.bodyColumns, e.props.scroll.bodyRows)
+    const drawn = await drawPanel($, e, e.props.bodyColumns, e.props.scroll.bodyRows, layoutOf(options))
     // A panel that draws slowly or too often is logged, at most once a second.
     draws += 1
     if (start - drawWindow >= 1000) {
@@ -310,7 +384,6 @@ export const register: Register = (on, options) => {
       draws = 0
       drawWindow = start
     }
-
 
     return drawn
   })

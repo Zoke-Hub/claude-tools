@@ -3,13 +3,13 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import { note } from './debug'
-import { emptyBrief } from './store'
-import type { BriefLists } from './measure'
+import { logEvent } from './debug'
+import { noChanges } from './ledger'
+import type { LedgerChanges, NewItem } from './ledger'
 
-import type { Brief, Section } from '../types'
+import type { Section, Task, TurnPlan, Value } from '../types'
 
-// The light model that writes summaries and runs recall.
+// The light model that writes summaries, runs recall and sorts FolioPack's files.
 const LIGHT_MODEL = 'haiku'
 
 // How much Haiku reads at once. A chunk bigger than one part is summarised part
@@ -18,70 +18,89 @@ const PART_TOKENS = 12_000
 const READ_CHARS = 60_000
 // Summary length by chunk size: a line, a few sentences, or an outline.
 const SMALL_TOKENS = 3000
+const VALUES_MOST = 8
 
-type ChunkSummary = {
+// One Haiku answer for one part (B1): its card (title, topic, summary,
+// outline, values) and only what it changed for the ledger. `carriesOn` is
+// null when Haiku didn't say.
+export type PartSummary = {
   title: string
   topic: string
-  continuesPrevious: boolean
+  carriesOn: boolean | null
+  isSideTurn: boolean
   summary: string
   sections: Section[]
-  brief: Brief
-  exactReason: string | null
-  // Side talk Haiku found: message numbers and why.
-  side: Array<{ n: number; why: string }>
+  values: Value[]
+  changes: Omit<LedgerChanges, 'files'>
+  isTaskDone: boolean
+}
+
+// What Haiku reads beside the part: the part before it, the chat's tasks,
+// the open items it may close or replace, and Claude's own words for the turn
+// (its recap and plan), handed over as hints (N1, N2); without them it works
+// from the messages alone (N4).
+type SummaryContext = {
+  previous: { title: string; topic: string; summary: string; task?: string } | null
+  tasks: readonly Task[]
+  openItems: string
+  recap?: string
+  plan?: TurnPlan
 }
 
 // One message of the chunk as Haiku reads it: its number, its text (private
 // items already set apart) and its size.
 export type NumberedMessage = { n: number; text: string; tokens: number }
 
-const BRIEF_RULES = `brief: short items, each one line, exact wording for names, paths and numbers.
-  requests: what the person asked for. rules: standing instructions the person gave ("always", "never"). decisions: choices made and settled. terms: names or words specific to this work, with what they mean. files: paths created, changed or referred to.`
+const VALUES_RULES = `values: the exact ids, colours, file names, paths and numbers worth keeping exact, each with a short name: {"name": "bubble colour", "value": "#F2A623"}. Up to ${VALUES_MOST}; empty when there are none.`
 
-const SIDE_RULES = `side: messages that are side talk and can leave Claude's context: talk about other chats or sessions, notes to move work to another chat, retries of a step that failed, plain acknowledgements ("ok", "go on"). Each as {"n": <message number>, "why": "2 to 4 words"}. Never a message that holds a request, rule, decision, value or file still in force. Usually an empty list.`
+const CHANGE_RULES = `Changes only, for the ledger. Never repeat an item already open; to change one, give the new item with "replaces": the old item's id.
+  rules: instructions the person gave, each {"text": "...", "beyondTask": true|false, "replaces": null}. beyondTask: true when it applies beyond the current task (how the person wants work done from now on), false when it is for this task only.
+  decisions: choices made and settled, each {"text": "...", "replaces": null}.
+  terms: names or words specific to this work, with what they mean, each {"text": "...", "replaces": null}.`
 
-const EXACT_RULES = `exactReason: null for most chunks. Give one short phrase only when someone is likely to need this chunk's exact wording again later and a summary would lose it: a settled spec, measurements or values still in use, code still being worked on, wording the person approved. Never for debug logs, test output, errors or diagnostics already acted on, or file paths (the brief keeps paths).`
+const TASK_RULES = `opened: work this part left unfinished or waiting on the person, one line each, not already an open task.
+- closed: open tasks this part finished, each {"id": "O7", "evidence": "a few words from the part or Claude's recap that show it done"}. None without evidence.
+- worked: ids of open tasks this part worked on without finishing.
+- dropped: ids of open rules, decisions, terms or values no longer in force, with nothing new in their place.
+- taskDone: true when this part finishes the work of its task: the person approved it, it was delivered, or Claude's recap says nothing is left.`
 
-const OPEN_TASKS_RULES = `openTasks: the whole list of work still open after this chunk. Start from "Open tasks so far": keep what is still open, drop what this chunk finished, settled or abandoned, and add what it left unfinished or waiting on the person.`
+const HEAD_RULES = `- title: 3 to 6 words naming what the part did.
+- topic: 2 to 4 words naming the wider subject. Reuse the previous part's topic word for word when this part carries on with it, and a listed task's topic word for word when it goes back to that task.
+- carriesOn: true when the part carries on the previous part's work.
+- sideTurn: true only when the whole part is off the work: chatter, or talk about other chats or sessions.`
 
-const INTRO = `You summarise part of a working chat between a person and Claude, so it can be removed from Claude's context and the summary read in its place. Claude can still look up the original later, so favour what Claude needs to keep working over a full retelling. Messages are numbered [n]. Private items appear as [private: ...] placeholders; never guess or repeat what they hide.
+const INTRO = `You summarise part of a working chat between a person and Claude, so it can be removed from Claude's context and the summary read in its place. Claude can still look up the original later, so favour what Claude needs to keep working over a full retelling. Messages are numbered [n]. Private items appear as [private: ...] placeholders; never guess or repeat what they hide. Claude's own recap and plan, when given, are hints: the messages are what happened.
 
 Answer with JSON only, no prose around it.`
 
 function chunkSystem(length: string): string {
   return `${INTRO} The shape:
-{"title": "...", "topic": "...", "continuesPrevious": true|false, "summary": "...", "brief": {"requests": [], "rules": [], "decisions": [], "terms": [], "files": [], "openTasks": []}, "side": [], "exactReason": null | "..."}
+{"title": "...", "topic": "...", "carriesOn": true|false, "sideTurn": false, "summary": "...", "values": [], "rules": [], "decisions": [], "terms": [], "opened": [], "closed": [], "worked": [], "dropped": [], "taskDone": false}
 
-- title: 3 to 6 words naming what the chunk did.
-- topic: 2 to 4 words naming the wider subject; reuse the previous chunk's topic word for word when this chunk carries on with it.
-- continuesPrevious: true when the chunk carries on the previous chunk's work.
-- summary: ${length}: what was asked, what was done, where it ended.
-- ${BRIEF_RULES}
-  ${OPEN_TASKS_RULES}
-- ${SIDE_RULES}
-- ${EXACT_RULES}
+${HEAD_RULES}
+- summary: ${length}: what was asked, what was done, where it ended. An instruction for this task only belongs here.
+- ${VALUES_RULES}
+- ${CHANGE_RULES}
+- ${TASK_RULES}
 Leave a list empty rather than guessing.`
 }
 
-const PART_SYSTEM = `${INTRO} This is one part of a long chunk. The shape:
-{"heading": "...", "body": "...", "points": [], "brief": {"requests": [], "rules": [], "decisions": [], "terms": [], "files": []}, "side": [], "exactReason": null | "..."}
+const PART_SYSTEM = `${INTRO} This is one piece of a long part. The shape:
+{"heading": "...", "body": "...", "points": [], "values": [], "rules": [], "decisions": [], "terms": []}
 
-- heading: 3 to 8 words naming what this part did, specific enough that someone scanning headings knows whether what they look for is here.
+- heading: 3 to 8 words naming what this piece did, specific enough that someone scanning headings knows whether what they look for is here.
 - body: 1 to 3 sentences: what was asked, what was done, where it ended.
-- points: the exact values, names and paths from this part worth keeping (up to 8, one line each); empty when there are none.
-- ${BRIEF_RULES}
-- ${SIDE_RULES}
-- ${EXACT_RULES}
+- points: the exact values, names and paths from this piece worth keeping (up to 8, one line each); empty when there are none.
+- ${VALUES_RULES}
+- ${CHANGE_RULES}
 Leave a list empty rather than guessing.`
 
-const OUTLINE_SYSTEM = `You name a long chunk of a working chat from its outline. Answer with JSON only:
-{"title": "...", "topic": "...", "continuesPrevious": true|false, "summary": "...", "openTasks": []}
+const OUTLINE_SYSTEM = `You name a long part of a working chat between a person and Claude from its outline. Claude's own recap and plan, when given, are hints. Answer with JSON only:
+{"title": "...", "topic": "...", "carriesOn": true|false, "sideTurn": false, "summary": "...", "opened": [], "closed": [], "worked": [], "dropped": [], "taskDone": false}
 
-- title: 3 to 6 words naming what the chunk did.
-- topic: 2 to 4 words naming the wider subject; reuse the previous chunk's topic word for word when this chunk carries on with it.
-- continuesPrevious: true when the chunk carries on the previous chunk's work.
-- summary: 2 to 3 sentences over the whole chunk.
-- ${OPEN_TASKS_RULES}`
+${HEAD_RULES}
+- summary: 2 to 3 sentences over the whole part.
+- ${TASK_RULES}`
 
 function clip(text: string): string {
   if (text.length <= READ_CHARS) return text
@@ -131,39 +150,61 @@ function text(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback
 }
 
-function briefOf(value: unknown): Brief {
-  const brief = (value ?? {}) as Record<string, unknown>
-
-  return {
-    requests: strings(brief.requests),
-    rules: strings(brief.rules),
-    decisions: strings(brief.decisions),
-    terms: strings(brief.terms),
-    files: strings(brief.files),
-    openTasks: strings(brief.openTasks),
-  }
-}
-
-function sideOf(value: unknown): Array<{ n: number; why: string }> {
+// Items as Haiku gives them: each {"text", "replaces"} or a plain line.
+function itemsOf(value: unknown): NewItem[] {
   if (!Array.isArray(value)) return []
 
   return value.flatMap(item => {
-    const x = item as Record<string, unknown>
+    if (typeof item === 'string') return item.trim() === '' ? [] : [{ text: item.trim() }]
+    const x = (item ?? {}) as Record<string, unknown>
+    const words = text(x.text, '')
+    const replaces = typeof x.replaces === 'string' && x.replaces.trim() !== '' ? x.replaces.trim() : undefined
 
-    return typeof x.n === 'number' ? [{ n: x.n, why: text(x.why, 'side talk') }] : []
+    return words === '' ? [] : [{ text: words, ...(replaces === undefined ? {} : { replaces }) }]
   })
 }
 
-function exactOf(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+function rulesOf(value: unknown): LedgerChanges['rules'] {
+  const raw = Array.isArray(value) ? value : []
+
+  return itemsOf(value).map((r, i) => ({ ...r, isBeyondTask: ((raw[i] ?? {}) as Record<string, unknown>).beyondTask === true }))
 }
 
+function valuesOf(value: unknown): LedgerChanges['values'] {
+  if (!Array.isArray(value)) return []
 
-function mergeBriefs(briefs: Brief[]): Brief {
-  const out = emptyBrief()
-  for (const key of Object.keys(out) as Array<keyof Brief>) out[key] = [...new Set(briefs.flatMap(b => b[key]))]
+  return value.flatMap(item => {
+    const x = (item ?? {}) as Record<string, unknown>
+    const name = text(x.name, '')
+    const v = typeof x.value === 'number' ? String(x.value) : text(x.value, '')
+    const replaces = typeof x.replaces === 'string' && x.replaces.trim() !== '' ? x.replaces.trim() : undefined
 
-  return out
+    return name === '' || v === '' ? [] : [{ name, value: v, ...(replaces === undefined ? {} : { replaces }) }]
+  })
+}
+
+function closedOf(value: unknown): LedgerChanges['closed'] {
+  if (!Array.isArray(value)) return []
+
+  return value.flatMap(item => {
+    const x = (item ?? {}) as Record<string, unknown>
+
+    return typeof x.id === 'string' ? [{ id: x.id.trim(), evidence: text(x.evidence, '') }] : []
+  })
+}
+
+// The new items of a part's answer, or of one piece of a long part.
+function newItemsOf(json: Record<string, unknown>) {
+  return { rules: rulesOf(json.rules), decisions: itemsOf(json.decisions), terms: itemsOf(json.terms), values: valuesOf(json.values) }
+}
+
+// What the part opened and closed: from the one answer, or the outline's.
+function taskChangesOf(json: Record<string, unknown>) {
+  return { opened: strings(json.opened), closed: closedOf(json.closed), worked: strings(json.worked), dropped: strings(json.dropped) }
+}
+
+function carriesOnOf(json: Record<string, unknown>): boolean | null {
+  return typeof json.carriesOn === 'boolean' ? json.carriesOn : null
 }
 
 function numbered(messages: readonly NumberedMessage[]): string {
@@ -192,130 +233,67 @@ export function partsOf(messages: readonly NumberedMessage[]): NumberedMessage[]
   return parts
 }
 
-// One call to the light model, its answer as JSON; null, and a line in the
-// debug log, when there is none.
-export async function complete($: EngineInterface, system: string, prompt: string, maxTokens: number, timeoutMs = 60_000) {
+// What a light-model call is for, as the log names it.
+type LightTask = 'summary' | 'part' | 'outline' | 'digest' | 'recall' | 'categories'
+
+// One call to the light model, its answer as JSON; null when there is none.
+// Each call is a line in the log: what it was for, characters in and out, how
+// long it took, and whether it gave JSON (and why not).
+export async function complete($: EngineInterface, task: LightTask, system: string, prompt: string, maxTokens: number, timeoutMs = 60_000) {
+  const start = Date.now()
   const reply = await $.model.complete({ model: LIGHT_MODEL, system, prompt, maxTokens, timeoutMs })
+  const call = { task, charsIn: system.length + prompt.length, ms: Date.now() - start }
   if (!reply.isAnswered) {
-    await note($, `Haiku gave no answer (${prompt.length} characters asked): ${JSON.stringify(reply).slice(0, 300)}`)
+    void logEvent($, 'haiku', { ...call, charsOut: 0, ok: false, why: reply.reason })
 
     return null
   }
   const json = parseJsonObject(reply.text)
-  if (json === null) await note($, `Haiku's answer wasn't JSON (${reply.text.length} characters, cap ${maxTokens} tokens): ${reply.text.slice(0, 120)} … ${reply.text.slice(-160)}`)
+  void logEvent($, 'haiku', { ...call, charsOut: reply.text.length, ok: json !== null, ...(json === null ? { why: 'not JSON', cap: maxTokens } : {}) })
 
   return json
 }
 
-// How many items each list of the brief keeps at most.
-const BRIEF_MOST = { rules: 25, decisions: 35, terms: 25, files: 20, openTasks: 15 } as const
+// What Haiku reads before the part: the part before it, the chat's tasks,
+// Claude's own words for this turn, and the open items it answers against.
+function contextText(ctx: SummaryContext): string {
+  const before = ctx.previous
+    ? `The previous part: "${ctx.previous.title}" (topic: ${ctx.previous.topic}${ctx.previous.task ? `, task ${ctx.previous.task}` : ''}). ${ctx.previous.summary}`
+    : 'This is the first part of the chat.'
+  const tasks = ctx.tasks.length === 0 ? '' : `\n\nTasks so far, newest first (id, topic):\n${ctx.tasks.map(t => `${t.id} ${t.topic || t.title}`).join('\n')}`
+  const plan = ctx.plan === undefined ? '' : `\n\nClaude's plan for this turn (a hint)${ctx.plan.scope ? `, scope ${ctx.plan.scope}` : ''}:${ctx.plan.steps.map(x => `\n- ${x}`).join('') || ' no steps'}`
+  const recap = ctx.recap === undefined ? '' : `\n\nClaude's own recap of this turn (a hint): ${ctx.recap}`
 
-const BRIEF_GUIDE = `You keep the brief of a working chat between a person and Claude: the rules, decisions, terms and files Claude must keep in mind while the chat's older parts are folded away. You get the brief so far and the items from newer parts of the chat, oldest first. Answer with the lists you are asked for, whole, JSON only.
-
-- Say each thing once. Items that say the same thing become one, in the newest wording.
-- Leave out what a newer item reverses, replaces or marks as superseded, and anything marked done with nothing left to keep.
-- Keep exact names, paths, numbers and quoted wording as they are.
-- One line per item. Newest first in each list.
-- rules: standing instructions from the person. decisions: choices settled and still in force. terms: names specific to this work, with what they mean. files: paths that matter to the work still, with a few words on each.
-- Keep it short: each item one line of at most about 25 words. At most ${BRIEF_MOST.rules} rules, ${BRIEF_MOST.decisions} decisions, ${BRIEF_MOST.terms} terms and ${BRIEF_MOST.files} files; drop the least important first.
-- openTasks: from "Open tasks now", only what is still open. Leave out what the decisions or newer parts show done, settled or dropped, and checks that only waited on something since done. Say each task once. About ${BRIEF_MOST.openTasks} at most, the most current first.`
-
-// The brief is merged in two calls, each answering a few of its lists, so no
-// one answer grows past what the model writes in one go.
-const BRIEF_HALVES = [['rules', 'decisions'], ['terms', 'files', 'openTasks']] as const
-
-function briefSystem(keys: readonly string[]): string {
-  return `${BRIEF_GUIDE}\nAnswer only these lists: {${keys.map(k => `"${k}": []`).join(', ')}}`
+  return `${before}${tasks}${plan}${recap}\n\n${ctx.openItems}`
 }
 
-// The brief with newer items merged in; null when Haiku doesn't answer.
-export async function mergeBrief(
-  $: EngineInterface,
-  current: BriefLists | null,
-  fresh: ReadonlyArray<BriefLists>,
-  openTasks: readonly string[],
-): Promise<(BriefLists & Pick<Brief, 'openTasks'>) | null> {
-  const lists = (b: BriefLists) =>
-    (['rules', 'decisions', 'terms', 'files'] as const).map(k => `${k}:\n${b[k].map(i => `- ${i}`).join('\n')}`).join('\n')
-  const parts = fresh.length > 0 ? fresh.map((b, i) => `<part n="${i + 1}">\n${lists(b)}\n</part>`).join('\n') : 'none'
-  const prompt = `${current ? `<brief>\n${lists(current)}\n</brief>` : '<brief>empty</brief>'}\n\nNewer parts, oldest first:\n${parts}\n\nOpen tasks now:\n${openTasks.map(t => `- ${t}`).join('\n') || 'none'}`
-  const answers = await Promise.all(BRIEF_HALVES.map(keys => complete($, briefSystem(keys), prompt, 6000, 180_000)))
-  if (answers.some(a => a === null)) return null
-  const json = Object.assign({}, ...answers) as Record<string, unknown>
-  const list = (k: keyof typeof BRIEF_MOST) => strings(json[k]).slice(0, BRIEF_MOST[k])
-
-  return { rules: list('rules'), decisions: list('decisions'), terms: list('terms'), files: list('files'), openTasks: list('openTasks') }
-}
-
-const JOIN_SYSTEM = `You join the summaries of neighbouring parts of a working chat, all on one topic, into one summary that Claude reads in their place. Claude can still look up the originals. Say once what the parts repeat; keep every exact value, name and path they give, and where the work ended. Answer with JSON only:
-{"title": "...", "summary": "...", "sections": [{"heading": "...", "body": "...", "points": []}]}
-
-- title: 3 to 6 words naming what the parts did together.
-- summary: 2 to 4 sentences over all of them.
-- sections: one per distinct step of the work, in order, fewer than there are parts when parts repeat each other; heading 3 to 8 words, body 1 to 2 sentences, points the exact values worth keeping (up to 6).`
-
-// One summary for neighbouring folded chunks on one topic, from their own
-// summaries; null when Haiku doesn't answer.
-export async function joinSummaries(
-  $: EngineInterface,
-  parts: ReadonlyArray<{ id: string; text: string }>,
-): Promise<{ title: string; summary: string; sections: Section[] } | null> {
-  const json = await complete($, JOIN_SYSTEM, parts.map((p, i) => `<part n="${i + 1}" id="${p.id}">\n${p.text}\n</part>`).join('\n'), 3000)
-  if (json === null) return null
-  const sections = Array.isArray(json.sections)
-    ? json.sections.map(item => {
-        const x = (item ?? {}) as Record<string, unknown>
-
-        return { heading: text(x.heading, ''), body: text(x.body, ''), points: strings(x.points).slice(0, 6), from: -1, to: -1 }
-      })
-    : []
-
-  return { title: text(json.title, 'Joined parts'), summary: text(json.summary, ''), sections: sections.filter(s => s.heading !== '') }
-}
-
-// A chunk's summary, as long as its size calls for: one line for a small
-// chunk, a few sentences for a bigger one, and for one too big to read at once
-// an outline written part by part, each part a heading Claude can scan.
-export async function summariseChunk(
-  $: EngineInterface,
-  messages: readonly NumberedMessage[],
-  previous: { title: string; topic: string; summary: string } | null,
-  openTasks: readonly string[],
-): Promise<ChunkSummary | null> {
-  const before = previous
-    ? `The previous chunk: "${previous.title}" (topic: ${previous.topic}). ${previous.summary}`
-    : 'This is the first chunk of the chat.'
-  const tasks = openTasks.length === 0 ? 'Open tasks so far: none.' : `Open tasks so far:\n${openTasks.map(t => `- ${t}`).join('\n')}`
+// A part's summary, as long as its size calls for: one line for a small part,
+// a few sentences for a bigger one, and for one too big to read at once an
+// outline written piece by piece, each piece a heading Claude can scan. One
+// call for a part that fits, as before; the answer holds changes only (B1).
+export async function summariseChunk($: EngineInterface, messages: readonly NumberedMessage[], ctx: SummaryContext): Promise<PartSummary | null> {
+  const before = contextText(ctx)
   const tokens = messages.reduce((sum, m) => sum + m.tokens, 0)
   const parts = partsOf(messages)
 
   if (parts.length === 1) {
     const length = tokens < SMALL_TOKENS ? 'one line, under 25 words' : '2 to 3 sentences'
-    const json = await complete($, chunkSystem(length), `${before}\n\n${tasks}\n\nThe chunk:\n<chunk>\n${clip(numbered(messages))}\n</chunk>`, 5000)
+    const json = await complete($, 'summary', chunkSystem(length), `${before}\n\nThe part:\n<part>\n${clip(numbered(messages))}\n</part>`, 5000)
     if (json === null) return null
+    const items = newItemsOf(json)
 
-    return {
-      title: text(json.title, 'Untitled chunk'),
-      topic: text(json.topic, 'General'),
-      continuesPrevious: json.continuesPrevious === true,
-      summary: text(json.summary, ''),
-      sections: [],
-      brief: briefOf(json.brief),
-      exactReason: exactOf(json.exactReason),
-      side: sideOf(json.side),
-    }
+    return answerOf(json, [], items)
   }
 
   const sections: Section[] = []
-  const briefs: Brief[] = []
-  const side: Array<{ n: number; why: string }> = []
-  const reasons: string[] = []
+  const found = { ...noChanges(), values: [] as LedgerChanges['values'] }
   for (const [i, part] of parts.entries()) {
     const heads = sections.map(s => `- ${s.heading}`).join('\n')
     const json = await complete(
       $,
+      'part',
       PART_SYSTEM,
-      `${before}\n\nPart ${i + 1} of ${parts.length}.${heads ? `\nThe parts before it:\n${heads}` : ''}\n\n<part>\n${clip(numbered(part))}\n</part>`,
+      `${before}\n\nPiece ${i + 1} of ${parts.length}.${heads ? `\nThe pieces before it:\n${heads}` : ''}\n\n<piece>\n${clip(numbered(part))}\n</piece>`,
       4000,
     )
     if (json === null) return null
@@ -326,24 +304,58 @@ export async function summariseChunk(
       from: part[0]!.n,
       to: part.at(-1)!.n,
     })
-    briefs.push(briefOf(json.brief))
-    side.push(...sideOf(json.side))
-    const reason = exactOf(json.exactReason)
-    if (reason !== null) reasons.push(reason)
+    const items = newItemsOf(json)
+    found.rules.push(...items.rules)
+    found.decisions.push(...items.decisions)
+    found.terms.push(...items.terms)
+    found.values.push(...items.values)
   }
   const outline = sections.map(s => `## ${s.heading}\n${s.body}${s.points.length > 0 ? `\n${s.points.map(p => `- ${p}`).join('\n')}` : ''}`).join('\n\n')
-  const json = await complete($, OUTLINE_SYSTEM, `${before}\n\n${tasks}\n\nThe outline:\n${outline}`, 4000)
+  const json = await complete($, 'outline', OUTLINE_SYSTEM, `${before}\n\nThe outline:\n${outline}`, 4000)
   if (json === null) return null
-  const brief = mergeBriefs(briefs)
 
+  return answerOf(json, sections, found)
+}
+
+// A part's summary from the answer that names it (the one answer, or the
+// outline's), with its outline and new items gathered.
+function answerOf(json: Record<string, unknown>, sections: Section[], items: Pick<LedgerChanges, 'rules' | 'decisions' | 'terms' | 'values'>): PartSummary {
   return {
-    title: text(json.title, 'Untitled chunk'),
+    title: text(json.title, 'Untitled part'),
     topic: text(json.topic, 'General'),
-    continuesPrevious: json.continuesPrevious === true,
+    carriesOn: carriesOnOf(json),
+    isSideTurn: json.sideTurn === true,
     summary: text(json.summary, ''),
     sections,
-    brief: { ...brief, openTasks: strings(json.openTasks) },
-    exactReason: reasons.length > 0 ? reasons.slice(0, 2).join('; ') : null,
-    side,
+    // A card keeps up to VALUES_MOST, read in one go or piece by piece; the
+    // ledger gets them all.
+    values: items.values.slice(0, VALUES_MOST),
+    changes: { rules: items.rules, decisions: items.decisions, terms: items.terms, values: items.values, ...taskChangesOf(json) },
+    isTaskDone: json.taskDone === true,
   }
+}
+
+const DIGEST_SYSTEM = `You write the digest of one task in a working chat between a person and Claude, so Claude can see at a glance what it was once its parts are folded away. You get the task's parts, oldest first, and Claude's newest recap when there is one. Answer with JSON only:
+{"digest": "...", "stands": "..."}
+
+- digest: two sentences: what the task is, and what it came to.
+- stands: one sentence: where it stands now, and what is left, if anything.`
+
+// The most parts one digest reads: the newest.
+const DIGEST_PARTS = 30
+
+// A task's digest from its parts' summaries (C8); null when Haiku doesn't answer.
+export async function digestTask(
+  $: EngineInterface,
+  task: Pick<Task, 'id' | 'title' | 'status'>,
+  parts: ReadonlyArray<{ n: number; title: string; summary: string; recap?: string }>,
+): Promise<{ digest: string; stands: string } | null> {
+  const shown = parts.slice(-DIGEST_PARTS)
+  const recap = [...parts].reverse().find(p => p.recap !== undefined)?.recap
+  const prompt = `Task ${task.id}: ${task.title} (${task.status}).${parts.length > shown.length ? ` The newest ${shown.length} of its ${parts.length} parts:` : ' Its parts:'}\n${shown.map(p => `${p.n}. ${p.title}: ${p.summary}`).join('\n')}${recap ? `\n\nClaude's newest recap: ${recap}` : ''}`
+  const json = await complete($, 'digest', DIGEST_SYSTEM, prompt, 1000)
+  if (json === null) return null
+  const digest = text(json.digest, '')
+
+  return digest === '' ? null : { digest, stands: text(json.stands, '') }
 }

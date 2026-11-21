@@ -2,8 +2,13 @@
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
 import { mock } from 'claude-code/testing'
+
+import { chunksOf, splitChunks, transcriptText } from '../hooks/chunks'
+import { applyChanges, emptyLedger, noChanges } from '../hooks/ledger'
+import type { LedgerChanges } from '../hooks/ledger'
+import type { Ledger, PickerView } from '../types'
 import type { Engine } from 'claude-code/testing'
-import type { FsEntry, On, RenderSurface, SessionMessage } from 'claude-code'
+import type { FsEntry, ModelForkResult, ModelUsage, On, RenderSurface, SessionMessage } from 'claude-code'
 
 import { HISTORY_BLOCK } from '../hooks/fold'
 
@@ -32,6 +37,12 @@ type StubOptions = {
   messages?: SessionMessage[]
   // The light model's answer to a prompt; null for none.
   model?: (prompt: string) => string | null | Promise<string | null>
+  // What Claude Code measures of the context: its size and its own fixed part,
+  // and where it compacts; `raw` and `source`: the compaction window it measures
+  // against and who set it (`env` when CLAUDE_CODE_AUTO_COMPACT_WINDOW lowered it).
+  usage?: { tokens: number; fixed: number; window?: number; compactAt?: number; raw?: number; source?: string; unreadFirst?: number }
+  // Claude's answer to a fork of the chat ($.model.fork), as the session gives it.
+  fork?: (prompt: string) => ModelForkResult | Promise<ModelForkResult>
   // The session's id as the engine reads it now ("test-session" unless given),
   // so a test can play a /clear, which goes on under a new id.
   id?: () => string
@@ -68,11 +79,11 @@ export function stubEngine(on: On, o: StubOptions = {}) {
   const toasts: string[] = []
   const commands: string[] = []
   const prompts: string[] = []
+  const systems: string[] = []
   const opened: string[] = []
   on('command.register', () => ({ value: { command: 'folio' } }))
   on('tool.register', () => ({ value: { tool: 'mcp__folio__recall' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: o.id?.() ?? 'test-session' }))
   if (o.messages !== undefined) {
     const messages = o.messages
@@ -114,17 +125,68 @@ export function stubEngine(on: On, o: StubOptions = {}) {
   })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: 'done' }))
-  // The context blocks as the plugins above leave them.
-  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
+  // The model beneath each request of a turn: its response reports `reply`.
+  let reply: ModelUsage = NO_USAGE
+  on('turn.step', async function* (_, e) {
+    const usage = { ...reply, model: 'test' }
+    yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage }
+
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage }
+  })
+  if (o.usage !== undefined) {
+    const u = o.usage
+    const breakdown = {
+      categories: [{ name: 'System prompt', tokens: u.fixed, isDeferred: false }],
+      totalTokens: u.tokens,
+      mcpTools: [],
+      isAutoCompactEnabled: u.compactAt !== undefined,
+      autoCompactThreshold: u.compactAt,
+      rawMaxTokens: u.raw ?? u.window ?? 1_000_000,
+      autocompactSource: u.source ?? 'auto',
+    }
+    // The first `unreadFirst` reads fail, as before the session has a size.
+    let reads = 0
+    on('session.usage', () => {
+      reads += 1
+      if (reads <= (u.unreadFirst ?? 0)) throw new Error('no size yet')
+
+      return { value: { startedAt: 0, context: { tokens: u.tokens, window: u.window ?? 1_000_000, breakdown }, rateLimits: [] } as never }
+    })
+  }
   on('model.complete', async (_, e) => {
     prompts.push(e.prompt)
+    systems.push(typeof e.system === 'string' ? e.system : JSON.stringify(e.system ?? ''))
     const text = (await o.model?.(e.prompt)) ?? null
 
     return { value: text === null ? { isAnswered: false, reason: 'empty-reply', text: '', usage: NO_USAGE } : { isAnswered: true, text, usage: NO_USAGE } }
   })
+  const forks: string[] = []
+  on('model.fork', async (_, e) => {
+    forks.push(e.prompt)
+
+    return { value: o.fork === undefined ? { isAnswered: false as const, reason: 'nothing-to-fork' as const } : await o.fork(e.prompt) }
+  })
   mock.env(on, env)
 
-  return { files, clock: mock.clock(on), toasts, commands, prompts, opened }
+  // The next response reports `tokens` of context, `cacheRead` of them from
+  // the prompt cache and the rest written to it.
+  const respondWith = (tokens: number, cacheRead = 0) => {
+    reply = { input_tokens: 0, output_tokens: 100, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: tokens - cacheRead }
+  }
+
+  return { files, clock: mock.clock(on), toasts, commands, prompts, systems, opened, respondWith, forks }
+}
+
+// One request of the main chat, its response reporting `tokens` of context
+// (`cacheRead` of them read from the cache), as a turn's step makes it.
+export async function request($: Engine, engine: { respondWith: (tokens: number, cacheRead?: number) => void }, tokens: number, cacheRead = 0, turnId = 't1') {
+  engine.respondWith(tokens, cacheRead)
+  const stream = $.turn.step({ turnId, index: 0, model: 'test', messageCount: 1 })
+  for await (const _ of stream) {
+    // Read to its end.
+  }
+
+  return stream.result
 }
 
 // Calls one of Folio's tools as Claude would. The kit types each tool's call
@@ -156,6 +218,57 @@ export function savedView(view: object, files = new Map<string, string>()): Map<
   return files
 }
 
+// A session whose chunks were all summarised by an earlier run, each on a
+// topic of its own, with its original on disk.
+export function seed(messages: SessionMessage[], mode: 'watch' | 'auto'): Map<string, string> {
+  const files = new Map<string, string>()
+  const slices = chunksOf(splitChunks(messages))
+  const chunks = slices.map((s, order) => ({
+    id: s.id,
+    ...(s.prompt === undefined ? {} : { prompt: s.prompt, opening: s.opening }),
+    ...(s.firstCall === undefined ? {} : { firstCall: s.firstCall, lastCall: s.lastCall }),
+    order,
+    title: `chunk ${order}`,
+    topic: `topic ${order}`,
+    summary: `summary of chunk ${order}`,
+    tokens: s.tokens,
+    isSummarised: true,
+    status: 'live',
+  }))
+  for (const s of slices) savedOriginal(files, s.id, { text: transcriptText(messages.slice(s.start, s.end)) })
+
+  return savedView({ settings: { mode, strategy: 'balanced' }, chunks, briefDigest: { ids: chunks.map(c => c.id), rules: [], decisions: [], terms: [], files: [], openTasks: [] } }, files)
+}
+
+// The engine beneath Folio, with the chat open and a second gone by; the
+// light model's calls wait for `gate` while a test holds it. As Claude Code
+// does, a compaction a plugin asks for is raised again as the compaction event,
+// through every plugin's hook; one that carries the transcript is the engine's
+// own, and `compacted` keeps what was on disk then.
+export async function openChat($: Engine, on: On, files: Map<string, string>, messages: SessionMessage[], gate = Promise.resolve(), usage?: StubOptions['usage'], fork?: StubOptions['fork']) {
+  const engine = stubEngine(on, { files, messages, model: () => gate.then(() => null), usage, fork })
+  const compacted: Array<Map<string, string>> = []
+  // What a plugin asked to compact with, in order.
+  const pluginAsks: string[] = []
+  on('session.compact', (_, e) => {
+    // The engine hands every compaction the transcript; so does this one.
+    if (!Array.isArray(e.messages)) {
+      pluginAsks.push(e.instructions ?? '')
+
+      return $.session.compact({ instructions: e.instructions, messages } as never)
+    }
+    compacted.push(new Map(files))
+
+    return { messages: [{ role: 'user', text: 'The summary.', toolUses: [] }] }
+  })
+  await start($)
+  await engine.clock.advance(1000)
+
+  return { clock: engine.clock, toasts: engine.toasts, asked: engine.commands, compacted, engine, pluginAsks }
+}
+
+export const saved = (files: Map<string, string>) => JSON.parse(files.get(`${DIR}/index.json`)!) as PickerView
+
 // Folio's panel, mounted as a surface draws it (the desktop's, unless given).
 export function mountPanel<P extends RenderSurface = 'desktop'>($: Engine, o: { surface?: P; columns?: number; rows?: number } = {}) {
   return $.ui.mount({
@@ -165,6 +278,27 @@ export function mountPanel<P extends RenderSurface = 'desktop'>($: Engine, o: { 
     surface: (o.surface ?? 'desktop') as P,
     props: { title: 'Folio', isFocused: false, bodyColumns: o.columns ?? 100, placement: 'dock', scroll: { offset: 0, bodyRows: o.rows ?? 80 }, view: {} },
   })
+}
+
+// Folio's panel as the app opens it: the footer ring pressed (which shuts What
+// fills the context and measures the context again), then the panel drawn.
+export async function openPanel<P extends RenderSurface = 'desktop'>($: Engine, o: { surface?: P; columns?: number; rows?: number } = {}) {
+  const footer = await mountFooter($)
+  await footer.press({ key: 'footer-ring' })
+  await footer.unmount()
+
+  return mountPanel($, o)
+}
+
+// Pack up as the person presses it: FolioPack opened and looked through, then
+// Pack up, and the pack written.
+export async function packUpNow($: Engine, clock: { advance: (ms: number) => Promise<unknown> }) {
+  const ui = await mountPanel($)
+  await ui.press({ key: 'folio-pack' })
+  await clock.advance(1000)
+  await ui.press({ key: 'pack-up' })
+  await clock.advance(1000)
+  await ui.unmount()
 }
 
 // Folio's footer button, as the desktop draws it.
@@ -194,4 +328,10 @@ export function talk(turns: number, size = 20_000): SessionMessage[] {
     { role: 'user', text: `question ${i}`, toolUses: [] },
     { role: 'assistant', text: `answer ${i}: ${'y'.repeat(size)}`, toolUses: [] },
   ]).flat()
+}
+
+// A ledger as these parts, in order, changed it: what each opened, closed and
+// added (`words`: the parts' own words, which a close's evidence must be in).
+export function ledgerOf(parts: Array<Partial<LedgerChanges>>, words = '', isHouseRule = (_: string) => false): Ledger {
+  return parts.reduce((l, changes, order) => applyChanges(l, { order }, { ...noChanges(), ...changes }, words, isHouseRule).ledger, emptyLedger())
 }

@@ -3,6 +3,42 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-21 · Folio 1.0.0 (number unchanged)
+
+A redesign of how Folio keeps a chat. A chat's saved data upgrades the first time it loads: the old `index.json` is kept
+beside it as `index.v1.json`, nothing is deleted, and every part keeps its number.
+
+- **Folio, parts and tasks:** a part is one turn of the chat. Long turns are cut into legs of about 40k, short turns
+  join the part before, and every part belongs to a task (T1, T2…). Each part has a card on disk (`parts/`), with the
+  chat's `tasks.json` and `ledger.json`.
+- **Folio, the ledger:** rules, decisions, terms, values and open tasks, each with an id and a status, in place of the
+  brief that only grew.
+- **Folio, the folded history:** a map with a fixed budget: the tasks, the parts' headings, values by task, the brief and
+  "State now". Exact values (ids, colours, paths, numbers) stay in the context. Old big tool inputs and outputs become
+  one-line notes that say how to recall them.
+- **Folio, folding:** sizes are real tokens, through a ratio measured per chat. A fold starts at the ceiling and goes down
+  to the floor: Light 550k to 350k, Balanced 400k to 250k, Lean 300k to 180k, Custom one slider with the floor at
+  62.5%. A fold that can't pay for itself waits. In Automatic, a fold also runs after an idle hour, and can happen in the
+  middle of a reply when Claude Code compacts there.
+- **Folio, recall:** new parameters (`part`, `kind`, `depth`, `amount`, `ask`, and `asks` for several at once); no model
+  unless asked, whole messages and no repeats; an exact phrase or a short message comes first. A prompt or a subagent's
+  brief that names something only folded parts hold gets one pointer line.
+- **Folio, the log:** one dated file per chat per day in `~/.claude/folio/log/`: Haiku calls, folds, waits and recalls, as
+  sizes and kinds only, never the chat's words.
+- **Folio, the panel:** the strategies in a frame with the slider on its own row; the parts grouped by task, with the
+  tasks under the chat strip; Open tasks; Recent activity, one line per recall with real icons; the meter red past the
+  ceiling; FolioPack pinned at the bottom under a rule. It also draws in the terminal, VS Code and mobile.
+- **Folio, removed:** pins and Brought back, side-message tidying and Put back, joins, Worth a look, the heads-up toast,
+  and the "folds next" count and colours (the meter's figure turns red past the ceiling instead).
+- **Folio, FolioPack:** Haiku sorts the project's files into categories (renders under each animation, segment and final
+  renders apart); Folio's rules fill the gaps and take over when Haiku gives no answer, and answers are kept per
+  project. Packs carry each part's card, the tasks and the ledger (pack form 3); older packs still open.
+- **Folio, fixes:** the chunks wrongly marked "compacted" are found and repaired on upgrade; a failed or cut-short first
+  load no longer empties a chat; a saved file Folio can't read is kept aside, never written over.
+- **Folio, settings:** `shortenOutputs` now shortens only outputs over 20,000 characters, never file reads or outputs
+  inside subagents; `promptPointers` (on) and `foldNote` (off until tried in the app) are new. The note on where the
+  project keeps its files (`projectLayout`, 2026-11-19) carries on as before.
+
 ## 2026-11-20 · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom:** the save status beside "Notes on the whole image" is one short word that fits beside the heading even in

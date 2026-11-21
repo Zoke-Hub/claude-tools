@@ -5,21 +5,22 @@ import { errorText, note } from './debug'
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderChildren } from 'claude-code'
 
-import type { Activity, ChunkRecord, PackDraft, PackGroup, PackStatus, PickerView, PinnedFact, Strategy } from '../types'
-import { compactNow, decide, FOLD_ASK, isFoldPending, isTidied, isUndoable, putBack, snooze, summariseNow, tidyNow, undo, undoChoice, undoEntry, undoSnooze } from './actions'
-import { isInChat, shortTokens, textTokens } from './chunks'
-import { briefLists, keptAndFolded, keptParts, liveJoins, newestInChat, openTasksOf, summaryTokens, tokensOf, workChunks, workTokens } from './measure'
-import type { BriefLists } from './measure'
+import type { Activity, ChunkRecord, LedgerItem, PackDraft, PackGroup, PackStatus, PickerView, Strategy, TaskStatus } from '../types'
+import { compactNow, decide, FOLD_ASK, isFoldPending, isUndoable, snooze, summariseNow, undo, undoChoice, undoEntry, undoSnooze } from './actions'
+import { shortTokens } from './chunks'
+import { keptAndFolded, keptParts, realContext, realOf, summaryTokens, tokensOf, workChunks, workTokens } from './measure'
 import { drawBar, MIN_PART_COLUMNS, PART_PX } from './bars'
 import type { Tick } from './pack'
 import { alwaysLines, bytesText, filesName, filesOf, folderState, groupsOf, isPackBusy, packFolder, packName, packTitle, packUp, privateLine, privateList, scanProject, tickedBytes, tickOf, toggleGroup, writeSaveTo } from './pack'
-import { partNo, partNos, partRef } from './fold'
-import { checkboxSvg, chunkState, chunkTitle, contextParts, FIXED, FULL, heavyTextSvg, HIGH, KEPT, miniSvg, stripKey, stripParts, TRIMMED, WARN, ZIP_ICON } from './pictures'
+import { cappedBrief } from './brief'
+import type { BriefLines } from './brief'
+import { partNo, partNos, runs } from './fold'
+import { ACTIVITY_ICONS, checkboxSvg, chunkState, chunkTitle, contextParts, drawsOf, FIXED, FULL, heavyTextSvg, HIGH, insetSvg, KEPT, miniSvg, OVER, stripKey, stripParts, TRIMMED, WARN, ZIP_ICON } from './pictures'
 import { change, chunkOf, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, homeDir, sessionEpoch, setSettings, settingsOf, STRATEGIES } from './store'
-import { unpin as unpinFact } from './recall'
 import type { Suggestion } from './suggest'
 import { suggestionsFor } from './suggest'
 import { base } from './paths'
+import { isOutputQuery, outputLabel } from './shorten'
 import { DIM, LIGHT, TICK } from './colors'
 
 const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
@@ -28,7 +29,7 @@ const open = atom({ plugin: 'folio', key: 'open' } as const, [])
 const openChunk = atom({ plugin: 'folio', key: 'openChunk' } as const, null)
 const pack = atom({ plugin: 'folio', key: 'pack' } as const, null)
 const packed = atom({ plugin: 'folio', key: 'packed' } as const, null)
-const folding = atom({ plugin: 'folio', key: 'folding' } as const, null)
+const folding = atom({ plugin: 'folio', key: 'folding' } as const, false)
 
 // Open or shut, as a title's arrow says it.
 const arrow = (isOpen: boolean) => (isOpen ? '▾' : '▸')
@@ -43,14 +44,20 @@ const BRIEF_SHOWN = 8
 const CHUNKS_SHOWN = 12
 // How many more items "Show more" adds to a brief list.
 const LIST_PAGE = 30
+// The task id's column in the list of tasks, in cells, so their names line up.
+const TASK_ID_COLUMNS = 4
 // How many folders or files of a FolioPack group show per page.
 const PACK_PAGE = 10
 // How many activity entries show per page.
 const ACTIVITY_SHOWN = 6
+// How many of its parts an opened activity entry lists.
+const ENTRY_ITEMS_SHOWN = 12
+// How many open tasks show at the top of the third box.
+const OPEN_TASKS_SHOWN = 5
 // How many items of each list an opened chunk shows.
 const CHUNK_LIST_SHOWN = 5
 
-const BRIEF_LABELS: Array<[keyof BriefLists | 'openTasks', string]> = [
+const BRIEF_LABELS: Array<[keyof BriefLines, string]> = [
   ['rules', 'rules'],
   ['decisions', 'decisions'],
   ['terms', 'terms'],
@@ -67,37 +74,20 @@ function ago(at: number): string {
 }
 
 // A chunk's size word for word and, once it has a summary that can stand in
-// for it, the summary's size: "17k → 3k".
-function sizeText(c: ChunkRecord): string {
+// for it, the summary's size, in real tokens: "17k → 3k".
+function sizeText(v: PickerView, c: ChunkRecord): string {
   const hasSummary = c.isSummarised && c.decision !== 'keep' && c.status !== 'compacted'
+  const size = shortTokens(realOf(v, c.tokens))
 
-  return hasSummary ? `${shortTokens(c.tokens)} → ${shortTokens(summaryTokens(c))}` : shortTokens(c.tokens)
+  return hasSummary ? `${size} → ${shortTokens(realOf(v, summaryTokens(c)))}` : size
 }
 
-// Chunks worth a look before they fold: a summary may blur exact details. They
-// fold like the rest unless the person keeps them; recall's exact mode returns
-// the details either way.
-export function worthALook(v: PickerView): ChunkRecord[] {
-  const live = v.chunks.filter(isInChat).sort((a, b) => a.order - b.order)
-  const newest = newestInChat(v.chunks)
-
-  return live.filter(c => c.isSummarised && c.exactReason !== null && c.decision === null && !newest.has(c.id))
-}
-
-// Newest first, like the chunks: the latest chunk's items lead. Haiku's merged
-// brief, once written, lists newest first already.
-function mergedBrief(v: PickerView): BriefLists & { openTasks: string[] } {
-  return { ...briefLists(v, v.chunks, true), openTasks: openTasksOf(v) }
-}
-
-// The panel. A drawing error never blanks it: the panel says what went wrong
-// and offers a way back.
-// The part numbers of a few chunks, as recall names them ("32, 35"); '' for
-// none, or for more than three, which their own rows number.
+// The part numbers of a few chunks, as recall names them ("32–33, 35"); ''
+// for none, or for more than three, which their own rows number.
 function partNumbers(v: PickerView, ids: readonly string[]): string {
   const found = partNos(v.chunks, ids)
 
-  return found.length === 0 || found.length > 3 ? '' : found.join(', ')
+  return found.length === 0 || found.length > 3 ? '' : runs(found)
 }
 
 // What a Recent entry is about, by part number; an entry with rows of its own numbers those instead.
@@ -105,13 +95,92 @@ function entryRef(v: PickerView, a: Activity): string {
   return a.ref ?? ((a.items?.length ?? 0) === 0 ? partNumbers(v, a.chunkIds) : '')
 }
 
-// Where something brought back came from: a passage's part and section, a fact's parts.
-function pinRef(v: PickerView, p: PinnedFact): string {
-  return p.ref ?? partNumbers(v, p.chunkIds)
+// An entry's words. An older Folio's say "chunk" where Folio now says "part",
+// and its folds counted side messages tidied, which no longer show.
+function entryWords(text: string): string {
+  return text
+    .replace(/^(Folded|Restored) (\d+) chunk(s?)\b/, '$1 $2 part$3')
+    .replace(/^(Stripped long tool calls in \d+) chunk(s?)$/, '$1 part$2')
+    .replace(/^(\d+) chunk(s?) as summaries/, '$1 part$2 as summaries')
+    .replace(/ and tidied \d+ side messages?$/, '')
+}
+
+// A recall's one line in Recent activity, and the parts it read when the line
+// doesn't name them ("Recall · 3 passages" and "66, 74"). An older Folio wrote
+// "Recalled “<query>”" with how it answered; it reads in the same form.
+function recallLine(v: PickerView, a: Activity): { line: string; parts: string } {
+  const parts = a.ref ?? runs(partNos(v.chunks, a.chunkIds))
+  const old = /^Recalled “(.*)”$/.exec(a.text)
+  if (old === null) return { line: a.text, parts }
+  const query = old[1]!
+  // A part's card or words named the part; words found for a query were passages.
+  if ((a.detail === 'card' || a.detail === 'word for word') && /^part /i.test(query)) return { line: `Recall · ${query} ${a.detail}`, parts: '' }
+  if (a.detail === 'passages' || a.detail === 'word for word') return { line: `Recall · ${a.chunkIds.length} passage${a.chunkIds.length === 1 ? '' : 's'}`, parts }
+  if (a.detail === 'by number') return { line: `Recall · part ${query} word for word`, parts: '' }
+  if (isOutputQuery(query)) return { line: `Recall · ${outputLabel(query)}`, parts: '' }
+
+  return { line: 'Recall · an answer', parts }
+}
+
+// The parts by task: each task's parts newest first, the tasks newest first
+// by their newest part. Parts with no task here (saved before tasks, or whose
+// task is gone) make one group of their own, with no id.
+type TaskGroup = { key: string; id: string; title: string; status: TaskStatus | null; parts: ChunkRecord[] }
+function taskGroups(v: PickerView): TaskGroup[] {
+  const tasks = new Map(v.tasks.tasks.map(t => [t.id, t]))
+  const groups = new Map<string, TaskGroup>()
+  for (const c of [...v.chunks].sort((a, b) => b.order - a.order)) {
+    const task = c.task === undefined ? undefined : tasks.get(c.task)
+    const key = task?.id ?? 'none'
+    const group = groups.get(key) ?? { key, id: task?.id ?? '', title: task === undefined ? 'Parts with no task' : task.title || task.topic || 'Waiting for its summary', status: task?.status ?? null, parts: [] }
+    group.parts.push(c)
+    groups.set(key, group)
+  }
+
+  return [...groups.values()]
 }
 
 // Text zips to about a third of its size (a 4.2 MB pack zipped to 1.2 MB).
 const ZIP_SHARE = 0.3
+
+// Where the list of tasks and the FolioPack footer sit, as the plugin's
+// settings choose: the tasks under the chat strip or in a box of their own,
+// and the footer right after the last box or pinned to the panel's bottom
+// under a thin rule.
+type PanelLayout = { tasks: 'chat' | 'own'; footer: 'after' | 'pinned' }
+const TASKS_PLACES = ['Under the chat strip', 'In a box of their own'] as const
+const FOOTER_PLACES = ['Right after the last box', 'Pinned at the bottom'] as const
+export function layoutOf(options: Readonly<Record<string, unknown>>): PanelLayout {
+  return { tasks: options.tasksPlace === TASKS_PLACES[1] ? 'own' : 'chat', footer: options.footerPlace === FOOTER_PLACES[0] ? 'after' : 'pinned' }
+}
+const DEFAULT_LAYOUT: PanelLayout = { tasks: 'chat', footer: 'after' }
+
+// A quiet line: the strategies' frame and the rule over a pinned footer. A
+// mid-grey, mostly see-through, so it reads on the light and dark themes alike.
+const QUIET_LINE = 'rgba(138,138,138,0.22)'
+
+// Plain text that starts on the same edge as a plain button's words: the
+// surface's inset (drawsOf) as an empty picture before it, so every row of a
+// box starts on one edge. Where the inset is 0, the text alone.
+function edgeOf(elements: ReturnType<EngineInterface['ui']['resolve']>, draws: ReturnType<typeof drawsOf>) {
+  const { Box } = elements
+  const Svg = draws.pictures && draws.inset > 0 && 'Svg' in elements ? elements.Svg : null
+  const spacer = insetSvg(draws.inset)
+
+  return (...children: RenderChildren[]) =>
+    Svg === null ? (
+      <Box flexDirection="column" flexShrink={1} minWidth={0}>
+        {children}
+      </Box>
+    ) : (
+      <Box flexDirection="row" flexShrink={1} minWidth={0}>
+        <Svg source={spacer} alt="space" width={draws.inset} height={1} />
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+          {children}
+        </Box>
+      </Box>
+    )
+}
 
 // The app refuses a panel drawing past 100,000 characters (its documented
 // bound for a tree), and then keeps showing the last one it took, whose
@@ -120,24 +189,28 @@ const ZIP_SHARE = 0.3
 // person opened last kept open, in brief.
 const DRAWING_LIMIT = 90_000
 
-// `rows` is the panel's height in lines: the panel fills it, so FolioPack sits at
-// its bottom and grows upward.
-export async function drawPanel($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0], columns: number, rows: number) {
+// The panel. A drawing error never blanks it: the panel says what went wrong
+// and offers a way back. `rows` is the panel's height in lines: the panel
+// fills it, so a pinned FolioPack sits at its bottom and grows upward.
+// `layout`: where the tasks and the footer sit (the plugin's settings).
+export async function drawPanel($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0], columns: number, rows: number, layout: PanelLayout = DEFAULT_LAYOUT) {
   try {
-    const full = await drawPanelBody($, e, columns, rows, false, false)
+    const drew = { points: false }
+    const full = await drawPanelBody($, e, columns, rows, layout, false, false, drew)
     const fullSize = JSON.stringify(full).length
     if (fullSize <= DRAWING_LIMIT) return full
-    // Shortening leaves an opened chunk's points out: with none open it changes nothing.
-    if ((await read($, openChunk)) !== null) {
-      const short = await drawPanelBody($, e, columns, rows, true, false)
+    // Shortening leaves an opened part's points out: with none drawn (no part
+    // open, or its task or the list shut) it changes nothing.
+    if (drew.points) {
+      const short = await drawPanelBody($, e, columns, rows, layout, true, false)
       const shortSize = JSON.stringify(short).length
-      void note($, `the panel came to ${fullSize} characters, so it was shortened to ${shortSize}${shortSize > DRAWING_LIMIT ? ', then cut to the chunks in brief' : ''}`)
+      void note($, `the panel came to ${fullSize} characters, so it was shortened to ${shortSize}${shortSize > DRAWING_LIMIT ? ', then cut to the parts in brief' : ''}`)
       if (shortSize <= DRAWING_LIMIT) return short
     } else {
-      void note($, `the panel came to ${fullSize} characters, so it was cut to the chunks in brief`)
+      void note($, `the panel came to ${fullSize} characters, so it was cut to the parts in brief`)
     }
 
-    return await drawPanelBody($, e, columns, rows, true, true)
+    return await drawPanelBody($, e, columns, rows, layout, true, true)
   } catch (err) {
     const { Box, Button, Text } = $.ui.resolve(e)
 
@@ -176,7 +249,7 @@ const MIN_PANEL_COLUMNS = 46
 // The body's frame and the cards' padding around a bar, in cells.
 const BAR_INSET = 8
 // The Custom ceiling at which the slider's fill turns amber.
-const CUSTOM_HIGH = 550_000
+const CUSTOM_HIGH = 650_000
 const SLIDER_EMPTY = DIM
 const SLIDER_CLOSED = '#333333'
 // The slider's rounded ends, under the region's free ends (6.5 px: 1 px and
@@ -190,30 +263,42 @@ function sliderEndSvg(color: string, side: 'left' | 'right'): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${SLIDER_END_PX}" height="8"><path d="${d}" fill="${color}"/></svg>`
 }
 
-// `isShort` draws an opened chunk's parts without their points, and `isShut`
-// every section but the chunks and FolioPack shut, to
-// keep the drawing small.
-async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0], columns: number, rows: number, isShort: boolean, isShut: boolean) {
+// `isShort` draws an opened part's sections without their points, and
+// `isShut` every section but the list of tasks and FolioPack shut, to keep the
+// drawing small. `drew.points` says whether an opened part's points were drawn.
+async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0], columns: number, rows: number, layout: PanelLayout, isShort: boolean, isShut: boolean, drew = { points: false }) {
   const elements = $.ui.resolve(e)
   const { Box, Button, Text } = elements
-  const hasSvg = 'Svg' in elements
+  const draws = drawsOf(e.surface)
+  const edge = edgeOf(elements, draws)
+  // The picture and region elements where the surface draws them (the `in`
+  // only tells the type checker the element is there: every table has it).
+  const Svg = draws.pictures && 'Svg' in elements ? elements.Svg : null
+  const Client = draws.slider && 'Client' in elements ? elements.Client : null
+  const hasSvg = Svg !== null
   const barColumns = Math.max(MIN_PANEL_COLUMNS, columns) - BAR_INSET
   const v = await read($, view)
   const openList = await read($, open)
   // While FolioPack is open, only the two top boxes stay above it, with What
   // fills the context shut until it is opened again (under its own key, so it
   // is as it was once FolioPack closes); the rest come back as they were.
+  // What fills the context is open while its key is in the open list, and
+  // each opening of the panel takes the key out.
   const isPacking = openList.includes('pack')
-  const opened = new Set<string>(isShut ? ['context-closed', ...openList.filter(x => x === 'chunks' || x === 'pack' || x.startsWith('pack:'))] : openList)
-  const contextKey = isPacking ? 'pack:context' : 'context-closed'
-  const isContextOpen = isPacking ? opened.has('pack:context') : !opened.has('context-closed')
+  // Shut, only the list of tasks (all it had open, its pages included) and
+  // FolioPack stay open.
+  const opened = new Set<string>(isShut ? openList.filter(x => x === 'chunks' || x.startsWith('chunks:') || x === 'pack' || (x.startsWith('pack:') && x !== 'pack:context')) : openList)
+  const contextKey = isPacking ? 'pack:context' : 'context'
+  const isContextOpen = opened.has(contextKey)
   const openId = await read($, openChunk)
   const status = await read($, pack)
   const draft = status?.phase === 'ready' ? packForm : null
   const settings = settingsOf(v)
+  // The whole context, which the ceiling and the floor measure; the work in
+  // it, what a fold can take; and Folio's kept parts, all in real tokens.
+  const context = realContext(v)
   const work = workTokens(v)
-  const kept = keptParts(v)
-  const asks = worthALook(v)
+  const kept = (k => ({ keptChunks: realOf(v, k.keptChunks), summaries: realOf(v, k.summaries), brief: realOf(v, k.brief), total: realOf(v, k.total) }))(keptParts(v))
   const suggestions = suggestionsFor(v)
 
   // A note shown while the pointer rests on what it sits in.
@@ -224,18 +309,11 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
       </Text>
     </Box>
   )
-  // A count beside a title: blue while there is something to look at.
-  const countTag = (n: number) => (
-    <Text size="footnote" color={n > 0 ? 'suggestion' : undefined} dimColor={n === 0}>
-      · {n}
-    </Text>
-  )
-
   const toggle = (name: string) => () => void update($, open, list => (list.includes(name) ? list.filter(x => x !== name) : [...list, name]))
-  // The brief's lists and the chunk list open one at a time: opening one
+  // The brief's lists and the list of tasks open one at a time: opening one
   // shuts the others (and the page they were on).
   const isOneOf = (x: string) => x.startsWith('brief:') || x === 'chunks' || x.startsWith('chunks:')
-  // Browse all always opens on the list itself, never on a chunk opened before.
+  // Browse all always opens on the list itself, never on a part opened before.
   const toggleOne = (name: string) => () => {
     if (name === 'chunks') void update($, openChunk, () => null)
     void update($, open, list => (list.includes(name) ? list.filter(x => x !== name && !x.startsWith(`${name}:`)) : [...list.filter(x => !isOneOf(x)), name]))
@@ -244,13 +322,12 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
   // The meter shows the new strategy's sizes at once, as both bars do.
   const customTop = v.context?.customTop ?? CUSTOM_MAX
   const canCustom = customTop >= CUSTOM_MIN
-  // Custom's control: the slider where the panel can draw it and there is
-  // room, − and + where it can't draw one (no region, or no pictures for its
-  // ends), and neither on a desktop panel too narrow for the slider.
+  // Custom's control: the slider where the surface draws it (drawsOf) and
+  // there is room, − and + on every other surface, and neither on a desktop
+  // panel too narrow for the slider.
   const isCustom = v.settings.strategy === 'custom'
-  const canSlide = hasSvg && 'Client' in elements
-  const hasSlider = isCustom && canCustom && canSlide && columns >= SLIDER_MIN_COLUMNS
-  const hasSteppers = isCustom && canCustom && !canSlide
+  const hasSlider = isCustom && canCustom && Svg !== null && Client !== null && columns >= SLIDER_MIN_COLUMNS
+  const hasSteppers = isCustom && canCustom && Client === null
   // The slider's far rounded end: closed past what this chat can take, else
   // open. (Its start is the bars' blue, where the fill's gradient starts.)
   const sliderEnd = customTop < CUSTOM_MAX ? SLIDER_CLOSED : SLIDER_EMPTY
@@ -275,34 +352,30 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
 
       return
     }
-    void setSettings($, { customCeiling: next })
+    void setSettings($, { customReal: next })
   }
   // Pressed once, it reads Folding… and takes no second press until Folio
   // confirms the fold or says why none ran; a second press that comes before
   // the panel redraws finds the fold already asked for.
-  const isFolding = (await read($, folding)) !== null
+  const isFolding = await read($, folding)
   const foldNow = () => {
     if (isFoldPending()) return
     void compactNow($, FOLD_ASK).then(({ isDone, why }) => {
       if (!isDone) $.ui.toast(why || 'Nothing folded.')
     })
   }
-  // Unpinned for good: Folio won't pin that question or passage again by itself.
-  const unpin = (id: string) => () =>
-    void unpinFact($, id).then(isDone => {
-      if (isDone) $.ui.toast('Sent back: Claude can still recall it')
-    })
   // A choice or an undo, then a short line saying what changed.
   const said = (fn: () => Promise<unknown>, text: string) => () => void fn().then(() => $.ui.toast(text))
   const quote = (c: ChunkRecord) => `“${chunkTitle(c, false)}”`
 
-  // Worth a look, Recent activity and the brief start open and fold up from
+  // Open tasks, Recent activity and the brief start open and fold up from
   // their titles; a section stays as it was left, in this chat's saved state.
   const isSectionShut = (name: string) => v.collapsed.includes(name)
   const toggleSection = (name: string) => () =>
     void change($, x => ({ ...x, collapsed: x.collapsed.includes(name) ? x.collapsed.filter(n => n !== name) : [...x.collapsed, name] }))
-  // A title that opens and shuts its section. The desktop draws the label; a
-  // terminal draws the text inside, in its medium weight.
+  // A title that opens and shuts its section, its count in its own words
+  // ("Open tasks · 20 ▸"), the arrow right after them. The desktop draws the
+  // label; a terminal draws the text inside, in its medium weight.
   const titleButton = (key: string, title: string, isOpen: boolean, onPress: () => void) => (
     <Button key={key} plain label={`${title} ${arrow(isOpen)}`} onPress={onPress}>
       <Text size="footnote" weight="medium">
@@ -311,141 +384,186 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
     </Button>
   )
   const sectionTitle = (name: string, title: string) => titleButton(`section-${name}`, title, !isSectionShut(name), toggleSection(name))
-  // Measured close to the word itself, so "by Zoke" sits just after it.
-  const title = heavyTextSvg('Folio', 22, undefined, 0.455)
-  // The mode's one line sits under its buttons, on the right.
-  const header = (
-    <Box flexDirection="row" justifyContent="space-between" alignItems="flex-start" gap="sm">
-      {/* The picture ends just past the word, so no gap is added after it. */}
-      <Box flexDirection="row" alignItems="flex-end" gap={hasSvg ? undefined : 'xs'} flexShrink={0}>
-        {hasSvg ? (
-          <elements.Svg source={title.source} alt="Folio" width={title.width} height={title.height} />
-        ) : (
-          <Text size="title" weight="bold">
-            Folio
-          </Text>
-        )}
-        {/* One line at any width. */}
-        <Box flexShrink={0}>
-          <Text size="caption" dimColor wrap="truncate-end">
-            by Zoke
+  // A title row: the title, then a dim hint beside it.
+  const titleRow = (button: RenderChildren, hint?: string) => (
+    <Box flexDirection="row" alignItems="center" gap="xs">
+      {button}
+      {hint !== undefined && (
+        <Box flexShrink={1} minWidth={0}>
+          <Text size="footnote" dimColor wrap="truncate-end">
+            {hint}
           </Text>
         </Box>
+      )}
+    </Box>
+  )
+  // A box's sections, one under another: 8 apart while shut, 16 after one
+  // that is open, so an open section's rows stay with their title.
+  const stack = (sections: Array<{ node: RenderChildren; isOpen: boolean } | null>) => {
+    const shown = sections.filter((s): s is { node: RenderChildren; isOpen: boolean } => s !== null)
+
+    return shown.map((s, i) => (
+      <Box flexDirection="column" marginTop={i === 0 ? undefined : shown[i - 1]!.isOpen ? 'md' : 'xs'}>
+        {s.node}
       </Box>
-      <Box flexDirection="column" alignItems="flex-end" gap="xs" flexShrink={1} minWidth={0}>
+    ))
+  }
+  // Measured close to the word itself, so "by Zoke" sits just after it.
+  const title = heavyTextSvg('Folio', 22, undefined, 0.455)
+  // The title and the mode's buttons on one row; the mode's one line under
+  // the title, on its edge.
+  const header = (
+    <Box flexDirection="column" gap="xs">
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+        {/* The picture ends just past the word, so no gap is added after it. */}
+        <Box flexDirection="row" alignItems="flex-end" gap={hasSvg ? undefined : 'xs'} flexShrink={0}>
+          {Svg !== null ? (
+            <Svg source={title.source} alt="Folio" width={title.width} height={title.height} />
+          ) : (
+            <Text size="title" weight="bold">
+              Folio
+            </Text>
+          )}
+          {/* One line at any width. */}
+          <Box flexShrink={0}>
+            <Text size="caption" dimColor wrap="truncate-end">
+              by Zoke
+            </Text>
+          </Box>
+        </Box>
         <Box flexDirection="row" gap="xs" flexShrink={0}>
           <Button key="mode-watch" label="Watch" {...choice(v.settings.mode === 'watch')} onPress={setMode('watch')} />
           <Button key="mode-auto" label="Automatic" {...choice(v.settings.mode === 'auto')} onPress={setMode('auto')} />
         </Box>
-        <Text size="caption" dimColor wrap="truncate-end">
-          {v.settings.mode === 'auto' ? 'Folds the oldest work by itself. Every fold can be undone.' : "Shows what it would fold. Folds only when you press Fold now; Claude Code's own compaction still runs."}
-        </Text>
       </Box>
+      <Text size="caption" dimColor wrap="truncate-end">
+        {v.settings.mode === 'auto' ? 'Folds the oldest work by itself. Every fold can be undone.' : "Folds only when you press Fold now; Claude Code's own compaction still runs."}
+      </Text>
     </Box>
   )
 
-  const meterTip =
-    v.settings.mode === 'auto'
-      ? `Folds back to ${shortTokens(settings.target)} when it reaches ${shortTokens(settings.ceiling)}`
-      : `At ${shortTokens(settings.ceiling)}, Automatic folds it back to ${shortTokens(settings.target)}`
-  const isKnown = v.context !== null || work > 0
+  // In Watch the line under the strategies already says where Automatic would
+  // fold, so the figures have a hover note only in Automatic.
+  const meterTip = v.settings.mode === 'auto' ? `Folds back to ${shortTokens(settings.floor)} when it reaches ${shortTokens(settings.ceiling)}` : null
+  const isKnown = v.context !== null || v.real.tokens !== null || context > 0
+  // Past the ceiling, the figure turns red.
+  const isOver = isKnown && context >= settings.ceiling
+  const figureText = isKnown ? `${shortTokens(context)} of ${shortTokens(settings.ceiling)}${isOver ? ', past the ceiling' : ''}` : 'Not measured yet'
   // The heavy figures are wider than an average letter.
-  const figure = heavyTextSvg(isKnown ? shortTokens(work) : '—', 26, isKnown ? { text: `of ${shortTokens(settings.ceiling)}`, size: 15, gap: 7 } : undefined, 0.64)
-  const bar = drawBar(elements, 'bar', contextParts(v), 'Hover for each part', barColumns)
+  const figure = heavyTextSvg(isKnown ? shortTokens(context) : '—', 26, isKnown ? { text: `of ${shortTokens(settings.ceiling)}`, size: 15, gap: 7 } : undefined, 0.64, isOver ? OVER : undefined)
+  const bar = drawBar(elements, hasSvg, 'bar', contextParts(v), 'Hover for each part', barColumns)
+  // The strategies: where pictures are drawn, a quiet frame round the four,
+  // the chosen one filled, so they read as one control.
+  const strategyButtons = STRATEGY_ORDER.map(s => <Button key={`strategy-${s}`} label={STRATEGIES[s].label} {...choice(s === v.settings.strategy)} onPress={setStrategy(s)} />)
+  const strategies = hasSvg ? (
+    <Box flexDirection="row" alignItems="center" gap="xs" flexShrink={0} borderStyle="round" borderColor={QUIET_LINE} padding="xs">
+      {strategyButtons}
+    </Box>
+  ) : (
+    <Box flexDirection="row" gap="xs" flexShrink={0}>
+      {strategyButtons}
+    </Box>
+  )
+  // Custom's slider has a row of its own under the four, from the text edge.
+  // The panel draws its two rounded ends (under the region's edges); the
+  // region over them draws the track and the knob, which covers an end at the
+  // lowest or highest stop. The ends' colours never change during a drag (the
+  // panel redraws only when the pointer comes up), so neither depends on the
+  // value. The app loads ./slider.tsx again only when the plugin reloads,
+  // which a change to this file does; a change to the slider alone shows
+  // after the next reload or a restart.
+  const slider = hasSlider && Svg !== null && Client !== null && (
+    <Box flexDirection="row" alignItems="center" gap="sm" minWidth={0}>
+      <Box key="folio-slider-ends" position="relative" flexDirection="row" alignItems="center" flexGrow={1} flexShrink={1} minWidth={0} height={1}>
+        <Box position="absolute" top={0} left={0} height={1} flexDirection="column" justifyContent="center">
+          <Svg source={sliderEndSvg(FULL, 'left')} alt="start" width={SLIDER_END_PX} height={PART_PX} />
+        </Box>
+        <Box position="absolute" top={0} right={0} height={1} flexDirection="column" justifyContent="center">
+          <Svg source={sliderEndSvg(sliderEnd, 'right')} alt="end" width={SLIDER_END_PX} height={PART_PX} />
+        </Box>
+        {/* Positioned too, and after the ends, so the region is drawn over them. */}
+        <Box position="relative" flexGrow={1} flexShrink={1} width={0} minWidth={0} height={1}>
+          <Client
+            key="folio-custom-slider"
+            module="./slider.tsx"
+            props={{ value: settings.ceiling, min: CUSTOM_MIN, max: CUSTOM_MAX, top: customTop, step: CUSTOM_STEP, highAt: CUSTOM_HIGH, colors: { fill: FULL, high: HIGH, empty: SLIDER_EMPTY, closed: SLIDER_CLOSED, thumb: LIGHT } }}
+            width="100%"
+          />
+        </Box>
+      </Box>
+      {columns >= VALUE_MIN_COLUMNS && <Box flexShrink={0}>{ceilingText}</Box>}
+    </Box>
+  )
+  // Three groups, 16 apart: the figure, the bar and its hover line; the
+  // strategies with their slider and line, 4 apart; What fills the context.
   // The hover box sits above the figures and shows while the pointer is on them.
   const meter = (
     <Box flexDirection="column">
-      <Box flexDirection="row" alignItems="flex-end" justifyContent="space-between" gap="sm">
-        <Box key="folio-meter" position="relative" flexDirection="row" alignItems="flex-end" flexShrink={0}>
-          {hasSvg ? (
-            <elements.Svg source={figure.source} alt={isKnown ? `${shortTokens(work)} of ${shortTokens(settings.ceiling)}` : 'Not measured yet'} width={figure.width} height={figure.height} />
-          ) : (
-            <Text size="title" weight="bold" tabular>
-              {isKnown ? `${shortTokens(work)} of ${shortTokens(settings.ceiling)}` : '—'}
-            </Text>
-          )}
-          {tipBox(meterTip, { bottom: 2, left: 0 })}
-        </Box>
-        <Box key="folio-saved" position="relative" flexShrink={1} minWidth={0}>
-          {v.savedTokens > 0 ? (
-            <Text size="footnote" color="success" wrap="truncate-end">
-              {shortTokens(v.savedTokens)} tokens saved so far
-            </Text>
-          ) : (
-            <Text size="footnote" dimColor wrap="truncate-end">
-              Nothing saved yet
-            </Text>
-          )}
-          {tipBox('Context tokens Folio has kept out of this chat so far, by folding, trimming and tidying. Undo gives them back.', { bottom: 1, right: 0 })}
-        </Box>
-      </Box>
-      {bar}
-      {v.working !== null && (
-        <Text size="caption" dimColor wrap="truncate-end">
-          {v.working}…
-        </Text>
-      )}
-      {/* The strategy is its own group: wider apart from the meter above it than
-          its own lines are from each other. */}
-      <Box flexDirection="column" gap={0} marginTop="sm">
-        <Box flexDirection="row" alignItems="center" gap="sm">
-          <Box flexDirection="row" gap="xs" flexShrink={0}>
-            {STRATEGY_ORDER.map(s => (
-              <Button key={`strategy-${s}`} label={STRATEGIES[s].label} {...choice(s === v.settings.strategy)} onPress={setStrategy(s)} />
-            ))}
+      {edge(
+        <Box flexDirection="row" alignItems="flex-end" justifyContent="space-between" gap="sm">
+          <Box key="folio-meter" position="relative" flexDirection="row" alignItems="flex-end" flexShrink={0}>
+            {Svg !== null ? (
+              <Svg source={figure.source} alt={figureText} width={figure.width} height={figure.height} />
+            ) : (
+              <Text size="title" weight="bold" tabular color={isOver ? 'error' : undefined}>
+                {isKnown ? `${shortTokens(context)} of ${shortTokens(settings.ceiling)}` : '—'}
+              </Text>
+            )}
+            {meterTip !== null && tipBox(meterTip, { bottom: 2, left: 0 })}
           </Box>
-          {/* Custom's slider sits beside the buttons, only while Custom is
-              chosen and there is room. The panel draws its two rounded ends
-              (under the region's edges); the region over them draws the track
-              and the knob, which covers an end at the lowest or highest stop.
-              The ends' colours never change during a drag (the panel redraws
-              only when the pointer comes up), so neither depends on the
-              value. The app loads ./slider.tsx again only when the plugin
-              reloads, which a change to this file does; a change to the
-              slider alone shows after the next reload or a restart. */}
-          {hasSlider && (
-            <Box flexDirection="row" alignItems="center" gap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
-              <Box key="folio-slider-ends" position="relative" flexDirection="row" alignItems="center" flexGrow={1} flexShrink={1} minWidth={0} height={1}>
-                <Box position="absolute" top={0} left={0} height={1} flexDirection="column" justifyContent="center">
-                  <elements.Svg source={sliderEndSvg(FULL, 'left')} alt="start" width={SLIDER_END_PX} height={PART_PX} />
-                </Box>
-                <Box position="absolute" top={0} right={0} height={1} flexDirection="column" justifyContent="center">
-                  <elements.Svg source={sliderEndSvg(sliderEnd, 'right')} alt="end" width={SLIDER_END_PX} height={PART_PX} />
-                </Box>
-                {/* Positioned too, and after the ends, so the region is drawn over them. */}
-                <Box position="relative" flexGrow={1} flexShrink={1} width={0} minWidth={0} height={1}>
-                  <elements.Client
-                    key="folio-custom-slider"
-                    module="./slider.tsx"
-                    props={{ value: settings.ceiling, min: CUSTOM_MIN, max: CUSTOM_MAX, top: customTop, step: CUSTOM_STEP, highAt: CUSTOM_HIGH, colors: { fill: FULL, high: HIGH, empty: SLIDER_EMPTY, closed: SLIDER_CLOSED, thumb: LIGHT } }}
-                    width="100%"
-                  />
-                </Box>
+          {/* On the figure's baseline: the picture ends as far under it as this line does. */}
+          <Box key="folio-saved" position="relative" flexShrink={1} minWidth={0}>
+            {v.savedTokens > 0 ? (
+              <Text size="footnote" color="success" wrap="truncate-end">
+                {shortTokens(v.savedTokens)} tokens saved so far
+              </Text>
+            ) : (
+              <Text size="footnote" dimColor wrap="truncate-end">
+                Nothing saved yet
+              </Text>
+            )}
+            {tipBox('Context tokens Folio has kept out of this chat so far, by folding and stripping. Undo gives them back.', { bottom: 1, right: 0 })}
+          </Box>
+        </Box>,
+        bar,
+        v.working !== null && (
+          <Text size="caption" dimColor wrap="truncate-end">
+            {v.working}…
+          </Text>
+        ),
+      )}
+      <Box flexDirection="column" marginTop="md">
+        {edge(
+          <Box flexDirection="row" alignItems="center" gap="sm">
+            {strategies}
+            {hasSteppers && (
+              <Box flexDirection="row" alignItems="center" gap="xs" flexShrink={0}>
+                <Button key="custom-less" plain dimColor label="−" onPress={stepCeiling(-CUSTOM_STEP)} />
+                <Button key="custom-more" plain dimColor label="+" onPress={stepCeiling(CUSTOM_STEP)} />
+                {ceilingText}
               </Box>
-              {columns >= VALUE_MIN_COLUMNS && <Box flexShrink={0}>{ceilingText}</Box>}
-            </Box>
-          )}
-          {hasSteppers && (
-            <Box flexDirection="row" alignItems="center" gap="xs" flexShrink={0}>
-              <Button key="custom-less" plain dimColor label="−" onPress={stepCeiling(-CUSTOM_STEP)} />
-              <Button key="custom-more" plain dimColor label="+" onPress={stepCeiling(CUSTOM_STEP)} />
-              {ceilingText}
-            </Box>
+            )}
+          </Box>,
+        )}
+        {slider && <Box flexDirection="column" paddingTop="xs">{edge(slider)}</Box>}
+        {/* The chosen strategy's two numbers, where a fold starts and where it stops. */}
+        <Box flexDirection="column" paddingTop="xs">
+          {edge(
+            <Text size="footnote" dimColor wrap="truncate-end">
+              {v.settings.mode === 'auto' ? 'Folds' : 'Automatic folds'} at {shortTokens(settings.ceiling)}, down to {shortTokens(settings.floor)}
+            </Text>,
+            isCustom && canCustom && customTop < CUSTOM_MAX && (
+              <Text size="caption" dimColor wrap="truncate-end">
+                This chat goes up to {shortTokens(customTop)}, so Claude doesn't compact it first.
+              </Text>
+            ),
+            isCustom && !canCustom && (
+              <Text size="caption" color={WARN}>
+                This chat's context is too small for Custom, so it's using Balanced.
+              </Text>
+            ),
           )}
         </Box>
-        <Text size="footnote" dimColor wrap="truncate-end">
-          {v.settings.mode === 'auto' ? 'Folds' : 'Automatic folds'} at {shortTokens(settings.ceiling)}, back to {shortTokens(settings.target)} · newest {shortTokens(settings.keepRecent)} stays word for word
-        </Text>
-        {isCustom && canCustom && customTop < CUSTOM_MAX && (
-          <Text size="caption" dimColor wrap="truncate-end">
-            This chat goes up to {shortTokens(customTop)}, so Claude doesn't compact it first.
-          </Text>
-        )}
-        {isCustom && !canCustom && (
-          <Text size="caption" color={WARN}>
-            This chat's context is too small for Custom, so it's using Balanced.
-          </Text>
-        )}
       </Box>
     </Box>
   )
@@ -457,12 +575,14 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
   }
   const row = (name: string, tokens: number, share: number, color: string, isMain = false, note = '') => (
     <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" paddingLeft={isMain ? undefined : 'md'}>
-      <Text size="footnote" weight={isMain ? 'medium' : 'regular'} dimColor={!isMain} wrap="truncate-end">
-        {name}
-        {note !== '' && <Text color="suggestion">{note}</Text>}
-      </Text>
-      <Box flexDirection="row" alignItems="center" gap="sm">
-        {hasSvg && <elements.Svg source={miniSvg(share, color)} alt="" />}
+      {edge(
+        <Text size="footnote" weight={isMain ? 'medium' : 'regular'} dimColor={!isMain} wrap="truncate-end">
+          {name}
+          {note !== '' && <Text color="suggestion">{note}</Text>}
+        </Text>,
+      )}
+      <Box flexDirection="row" alignItems="center" gap="sm" flexShrink={0}>
+        {Svg !== null && <Svg source={miniSvg(share, color)} alt="" />}
         <Text size="footnote" tabular>
           {shortTokens(tokens)}
         </Text>
@@ -474,30 +594,22 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
   const liveTokens = tokensOf(liveChunks)
   const trimTokens = tokensOf(trimmedChunks)
   const trimShare = liveTokens + trimTokens > 0 ? trimTokens / (liveTokens + trimTokens) : 0
-  const whole = Math.max(1, v.context?.tokens ?? work + kept.total)
+  const whole = Math.max(1, context)
   const isOverAim = kept.total > settings.keptAim
+  // A group of its own, 16 under the strategies, with the context's size
+  // beside its title as other titles have their hint.
   const contextSection = (
-    <Box flexDirection="column">
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginTop="md" gap="sm">
-        {titleButton(`open-${contextKey}`, 'What fills the context', isContextOpen, toggle(contextKey))}
-        {v.context && (
-          <Box flexShrink={1} minWidth={0}>
-            <Text size="footnote" dimColor wrap="truncate-end">
-              {shortTokens(v.context.tokens)} of {shortTokens(v.context.window)}
-            </Text>
-          </Box>
-        )}
-      </Box>
+    <Box flexDirection="column" marginTop="md">
+      {titleRow(titleButton(`open-${contextKey}`, 'What fills the context', isContextOpen, toggle(contextKey)), v.context ? `${shortTokens(context)} of ${shortTokens(v.context.window)}` : undefined)}
       {isContextOpen && (
-        <Box flexDirection="column" gap="xs">
-          {row('Work · counts toward the fold', work, work / whole, FULL, true)}
-          {row(`Word for word (${liveChunks.length} chunk${liveChunks.length === 1 ? '' : 's'})`, Math.round(work * (1 - trimShare)), (work * (1 - trimShare)) / whole, FULL)}
-          {trimmedChunks.length > 0 && row(`Old tool output, trimmed (${trimmedChunks.length})`, Math.round(work * trimShare), (work * trimShare) / whole, TRIMMED)}
+        <Box flexDirection="column" gap="xs" paddingTop="xs">
+          {row('Work · what a fold can take', work, work / whole, FULL, true)}
+          {row(`Word for word (${liveChunks.length} part${liveChunks.length === 1 ? '' : 's'})`, Math.round(work * (1 - trimShare)), (work * (1 - trimShare)) / whole, FULL)}
+          {trimmedChunks.length > 0 && row(`Tool calls, stripped (${trimmedChunks.length})`, Math.round(work * trimShare), (work * trimShare) / whole, TRIMMED)}
           {row(`Summaries and kept parts · ${shortTokens(kept.total)} of ${shortTokens(settings.keptAim)}`, kept.total, kept.total / whole, isOverAim ? WARN : KEPT, true)}
           {keptChunks.length > 0 && row(`Kept word for word (${keptChunks.length})`, kept.keptChunks, kept.keptChunks / whole, KEPT, false, tag('keep-unused'))}
           {foldedChunks.length > 0 && row(`Folded summaries (${foldedChunks.length})`, kept.summaries, kept.summaries / whole, KEPT)}
           {kept.brief > 0 && row('The brief', kept.brief, kept.brief / whole, KEPT)}
-          {v.pinned.length > 0 && row(`Brought back by recall (${v.pinned.length})`, kept.pinned, kept.pinned / whole, KEPT)}
           {v.context !== null && v.context.fixed > 0 && row("Claude Code's own · fixed", v.context.fixed, v.context.fixed / whole, FIXED, true)}
           {v.context?.fixedParts.map(p => row(p.name, p.tokens, p.tokens / whole, FIXED, false, /mcp/i.test(p.name) ? tag('connectors') : ''))}
           {isOverAim && (
@@ -510,14 +622,14 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
     </Box>
   )
 
-  // Fold now sits at the right end of the strip's hover line, inside its box.
   const chunkBar = drawBar(
     elements,
+    hasSvg,
     'strip',
     stripParts(v, Math.floor(barColumns / MIN_PART_COLUMNS)),
     // The resting line is the strip's colour key, for the states the chat has.
     [
-      'Hover a chunk',
+      'Hover a part',
       ...stripKey(v).flatMap(k => [
         '  ',
         <Text color={k.color}>■</Text>,
@@ -525,16 +637,15 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
       ]),
     ],
     barColumns,
-    <Box marginTop="sm">
-      <Button key="fold-now" label={isFolding ? 'Folding…' : 'Fold now'} onPress={foldNow} />
-    </Box>,
   )
+  // Fold now sits at the right of the box's title row, the strip under them.
   const strip = (
     <Box flexDirection="column" gap="xs">
-      <Text size="footnote" weight="medium">
-        Chat, oldest → newest
-      </Text>
-      {chunkBar}
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+        {edge(<Text wrap="truncate-end">Chat, oldest → newest</Text>)}
+        <Button key="fold-now" label={isFolding ? 'Folding…' : 'Fold now'} onPress={foldNow} />
+      </Box>
+      {edge(chunkBar)}
     </Box>
   )
 
@@ -554,134 +665,68 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
             <Button key={`sum-${s.id}`} label="Summarise it" onPress={() => void summariseNow($, s.chunkIds[0]!)} />,
             <Button key={`keep-${s.id}`} label="Not now" onPress={() => void snooze($, s.id, 3, s.title)} />,
           ]}
-          {s.kind === 'tidy' && [
-            <Button key="tidy-now" label="Tidy them" onPress={() => void tidyNow($, (s.sides ?? []).map(x => ({ chunkId: x.chunkId, n: x.n })))} />,
-            <Button key="tidy-show" label={opened.has('tidy-list') ? 'Hide them' : 'Show them'} onPress={toggle('tidy-list')} />,
-            <Button key="tidy-later" label="Not now" onPress={() => void snooze($, s.id, 3, s.title)} />,
-          ]}
           {s.kind === 'connectors' && <Button key="connectors-ok" label="Got it" onPress={() => void snooze($, s.id, 1_000_000, s.title)} />}
         </Box>
       </Box>
-      {s.kind === 'tidy' &&
-        opened.has('tidy-list') &&
-        (s.sides ?? []).map(x => (
-          <Text size="footnote" dimColor wrap="truncate-end">
-            • “{x.opening}” · {x.why}
-          </Text>
-        ))}
     </Box>
   )
 
-  // A dropdown's title, its count (blue while it has something, like the
-  // suggestion tags in What fills the context), and its note beside them.
-  const dropdown = (name: string, title: string, count: number, note: string) => (
-    <Box flexDirection="row" alignItems="center" gap="xs" marginTop="md">
-      {titleButton(`open-${name}`, title, opened.has(name), toggle(name))}
-      {countTag(count)}
-      <Text size="footnote" dimColor wrap="truncate-end">
-        · {note}
-      </Text>
-    </Box>
-  )
-  const suggestionSection = (
-    <Box flexDirection="column">
-      {dropdown('suggestions', 'Suggestions', suggestions.length, 'ways to save 2k or more')}
-      {opened.has('suggestions') &&
-        (suggestions.length === 0 ? (
-          <Box flexDirection="column">
-            <Text size="footnote" dimColor wrap="truncate-end">
-              Nothing to suggest right now. Kept chunks nobody uses, side talk and idle connectors show here.
-            </Text>
-          </Box>
-        ) : (
-          suggestions.map(suggestionCard)
-        ))}
-    </Box>
-  )
+  // Suggestions, shown only while there are some.
+  const isSuggestionsOpen = opened.has('suggestions')
+  const suggestionSection =
+    suggestions.length === 0
+      ? null
+      : {
+          isOpen: isSuggestionsOpen,
+          node: [
+            titleRow(titleButton('open-suggestions', `Suggestions · ${suggestions.length}`, isSuggestionsOpen, toggle('suggestions')), 'ways to save 2k or more'),
+            isSuggestionsOpen && edge(...suggestions.map(suggestionCard)),
+          ],
+        }
 
-  const foldNextCount = asks.filter(c => v.foldNext.includes(c.id)).length
-  const looks = (
-    <Box flexDirection="column">
-      <Box flexDirection="row" justifyContent="space-between" gap="sm">
-        <Box flexDirection="row" alignItems="center" gap="xs">
-          {sectionTitle('looks', 'Worth a look')}
-          {countTag(asks.length)}
-          {foldNextCount > 0 && (
-            <Text size="footnote" color="warning">
-              · {foldNextCount} fold next
-            </Text>
-          )}
-        </Box>
-        {asks.length > 0 && !isSectionShut('looks') && (
-          <Text size="footnote" dimColor wrap="truncate-end">
-            these fold like the rest unless you keep them
-          </Text>
-        )}
-      </Box>
-      {asks.length === 0 && !isSectionShut('looks') && (
-        <Text size="footnote" dimColor wrap="truncate-end">
-          Nothing to look at. Everything folds on its own.
-        </Text>
-      )}
-      {(isSectionShut('looks') ? [] : asks).map(c => (
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" paddingY="xs">
-          <Box flexDirection="column" flexShrink={1} minWidth={0}>
-            <Box flexDirection="row" alignItems="flex-end" gap="xs" minWidth={0}>
-              <Text weight="medium" color={v.foldNext.includes(c.id) ? 'warning' : undefined} wrap="truncate-end">
-                {c.title}
-              </Text>
-              <Text size="footnote" dimColor>
-                · {sizeText(c)}
-              </Text>
-              {v.foldNext.includes(c.id) && (
-                <Text size="caption" color="warning">
-                  · folds next
-                </Text>
-              )}
-            </Box>
-            <Text size="footnote" dimColor wrap="truncate-end">
-              {c.exactReason}
-            </Text>
-          </Box>
-          <Box flexDirection="row" gap="xs" flexShrink={0}>
-            <Button key={`keep-${c.id}`} label="Keep word for word" onPress={said(() => decide($, c.id, 'keep'), `Kept ${quote(c)} word for word`)} />
-            <Button key={`fold-${c.id}`} plain dimColor label="Fine to fold" onPress={said(() => decide($, c.id, 'fold'), `${quote(c)} folds with the rest`)} />
-          </Box>
-        </Box>
-      ))}
-    </Box>
-  )
-
-  const broughtBack = (
-    <Box flexDirection="column">
-      {dropdown('brought-back', 'Brought back', v.pinned.length, 'recalled twice, back in view')}
-      {opened.has('brought-back') && v.pinned.length === 0 && (
-        <Text size="footnote" dimColor wrap="truncate-end">
-          Nothing yet. A fact or passage Claude recalls twice comes back into view here.
-        </Text>
-      )}
-      {opened.has('brought-back') &&
-        v.pinned.map(p => {
-          const from = chunkOf(v, p.chunkIds[0] ?? '')
-
-          return (
-            <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" paddingY="xs">
-              <Box flexDirection="column" flexShrink={1} minWidth={0}>
-                <Text wrap="truncate-end">
-                  {p.kind === 'passage' ? '⌕ ' : '• '}
-                  {pinRef(v, p) && <Text dimColor>{pinRef(v, p)} </Text>}
-                  {p.kind === 'passage' ? `Passage from “${from?.title ?? p.chunkIds[0]}”` : p.text}
-                </Text>
-                <Text size="footnote" dimColor wrap="truncate-end">
-                  {p.kind === 'passage' ? `recalled ${p.recalls}× · ${shortTokens(textTokens(p.text))} · the rest stays summarised` : `pinned fact · recalled ${p.recalls}× · ${ago(p.pinnedAt)}`}
-                </Text>
+  // Open tasks: the brief's newest open items with their ids, so what is
+  // still to do sits at the top; the rest follow in the brief's Open tasks.
+  // The brief is worked out once a draw, here, and its lists read from it.
+  const ledgerTasks = cappedBrief(v.ledger, v.tasks)
+  // The brief holds the newest open tasks up to its cap; older ones past it
+  // are only in the ledger.
+  const pastCap = ledgerTasks.more.task ?? 0
+  const openCount = ledgerTasks.openTasks.length + pastCap
+  const openShown = isSectionShut('open-tasks') ? [] : ledgerTasks.openTasks.slice(0, OPEN_TASKS_SHOWN)
+  const inBrief = ledgerTasks.openTasks.length - openShown.length
+  // Shown only while something is open.
+  const openTasks =
+    openCount === 0
+      ? null
+      : {
+          isOpen: openShown.length > 0,
+          node: [
+            titleRow(sectionTitle('open-tasks', `Open tasks · ${openCount}`), 'the newest open items from the ledger'),
+            openShown.length > 0 && (
+              <Box flexDirection="column" paddingTop="xs">
+                {edge(
+                  ...openShown.map(x => (
+                    <Box flexDirection="row" alignItems="flex-start" gap="sm">
+                      <Box width={TASK_ID_COLUMNS} flexShrink={0}>
+                        <Text size="footnote" dimColor>
+                          {x.id}
+                        </Text>
+                      </Box>
+                      <Text size="footnote" wrap="truncate-end">
+                        {x.text}
+                      </Text>
+                    </Box>
+                  )),
+                  openCount > openShown.length && (
+                    <Text size="caption" dimColor>
+                      + {inBrief} more in the brief's Open tasks{pastCap > 0 ? `, and ${pastCap} older ${pastCap === 1 ? 'one' : 'ones'} only in the ledger` : ''}
+                    </Text>
+                  ),
+                )}
               </Box>
-              <Button key={`unpin-${p.id}`} label={p.kind === 'passage' ? 'Send back' : 'Unpin'} onPress={unpin(p.id)} />
-            </Box>
-          )
-        })}
-    </Box>
-  )
+            ),
+          ],
+        }
 
   // A long list shows a page at a time, with Previous and Next and the range
   // in view, so a long list never makes the panel's drawing too big for the
@@ -704,277 +749,403 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
       controls:
         total > first ? (
           <Box flexDirection="row" gap="xs" alignItems="center">
-            <Text size="caption" dimColor>
-              {start + 1}–{end}
-            </Text>
+            {edge(
+              <Text size="caption" dimColor>
+                {start + 1}–{end}
+              </Text>,
+            )}
             {at > 0 && <Button key={`${name}:prev`} plain dimColor label={`Previous ${back}`} onPress={setPage(name, at - 1)} />}
             {ahead > 0 && <Button key={`${name}:next`} plain dimColor label={`Next ${ahead}`} onPress={setPage(name, at + 1)} />}
           </Box>
         ) : null,
     }
   }
-  const icon = { fold: '⇲', trim: '✂', tidy: '✦', recall: '⌕', undo: '↺', pin: '•', unpin: '◦', choice: '✓', snooze: '◌', pack: '▣', import: '▣' } as const
+  // Each kind of entry Folio makes now, with its mark: an icon where the
+  // surface draws pictures, a text mark on the terminal. An older Folio's
+  // tidies and pins stay in the saved list, not shown.
+  const icon: Partial<Record<Activity['kind'], string>> = { fold: '⇲', trim: '✂', recall: '⌕', undo: '↺', choice: '✓', snooze: '◌', pack: '▣', import: '▣' }
+  const iconSvg: Partial<Record<Activity['kind'], string>> = { ...ACTIVITY_ICONS, import: ACTIVITY_ICONS.pack }
+  const entries = v.activity.filter(a => icon[a.kind] !== undefined)
+  // An entry: its mark in a column of its own on the text edge, centred on
+  // the first line; its words (strings and Text only), the arrow after them
+  // when it opens; and the lines under them, on the words' edge. On the
+  // terminal the mark is the first letter of the words.
+  const ICON_PX = 14
+  const entry = (kind: Activity['kind'], words: RenderChildren, opener: RenderChildren, ...under: RenderChildren[]) =>
+    edge(
+      <Box flexDirection="row" gap="xs" minWidth={0}>
+        {Svg !== null && (
+          <Box height={1} flexDirection="row" alignItems="center" flexShrink={0}>
+            <Svg source={iconSvg[kind]!} alt="" width={ICON_PX} height={ICON_PX} />
+          </Box>
+        )}
+        <Box flexDirection="column" flexShrink={1} minWidth={0}>
+          <Box flexDirection="row" alignItems="center" gap="xs" minWidth={0}>
+            <Text wrap="truncate-end">
+              {Svg === null && `${icon[kind]} `}
+              {words}
+            </Text>
+            {opener}
+          </Box>
+          {under}
+        </Box>
+      </Box>,
+    )
+  // Rows under an entry, on its words' edge: past its mark's column where one is drawn.
+  const underEntry = (...rows: RenderChildren[]) =>
+    edge(
+      <Box flexDirection="row" gap="xs" minWidth={0}>
+        {Svg !== null && <Svg source={insetSvg(ICON_PX)} alt="" width={ICON_PX} height={1} />}
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+          {rows}
+        </Box>
+      </Box>,
+    )
   // The activity, newest first, a page at a time, so an older fold can still be found and undone.
-  const activityPages = pager('activity', v.activity.length, ACTIVITY_SHOWN, ACTIVITY_SHOWN)
-  const activity = (
-    <Box flexDirection="column">
-      <Box flexDirection="row" marginTop="md">
-        {sectionTitle('activity', 'Recent activity')}
-      </Box>
-      {v.activity.length === 0 && !isSectionShut('activity') && (
-        <Text size="footnote" dimColor wrap="truncate-end">
-          Nothing yet. Folds, trims, tidies, recalls and your choices show here.
-        </Text>
-      )}
-      {(isSectionShut('activity') ? [] : v.activity.slice(activityPages.start, activityPages.end)).map(a => {
-        const items = a.items ?? []
+  const activityPages = pager('activity', entries.length, ACTIVITY_SHOWN, ACTIVITY_SHOWN)
+  const isActivityOpen = !isSectionShut('activity')
+  const activityRows = (isActivityOpen ? entries.slice(activityPages.start, activityPages.end) : []).map(a => {
+        // An older Folio's tidied side messages are left out of the list.
+        const items = (a.items ?? []).filter(item => item.kind === 'chunk')
         const isOpen = opened.has(`act:${a.id}`)
-        // Undo stays while something of the entry is still out: a chunk not
-        // restored yet, or a side message not put back. An entry from before
-        // entries listed their items goes by its chunks.
-        const isOut = (item: { kind: 'chunk' | 'side'; chunkId: string; n?: number }) => {
-          const c = chunkOf(v, item.chunkId)
+        // Undo stays while a chunk of the entry is still out, not restored
+        // yet. An entry from before entries listed their items goes by its chunks.
+        const isOut = (id: string) => {
+          const c = chunkOf(v, id)
 
-          return item.kind === 'chunk' ? c !== undefined && isUndoable(c) : isTidied(c, item.n)
+          return c !== undefined && isUndoable(c)
         }
-        const canUndo =
-          (a.kind === 'fold' || a.kind === 'trim' || a.kind === 'tidy') &&
-          (items.length > 0 ? items.some(isOut) : a.chunkIds.some(id => isOut({ kind: 'chunk', chunkId: id }) || (chunkOf(v, id)?.tidied.length ?? 0) > 0))
+        const canUndo = (a.kind === 'fold' || a.kind === 'trim') && (items.length > 0 ? items.some(item => isOut(item.chunkId)) : a.chunkIds.some(isOut))
         const canUndoChoice =
           (a.kind === 'choice' && a.chunkIds.some(id => v.chunks.find(c => c.id === id && c.decision === a.choice && c.status !== 'folded' && c.status !== 'compacted'))) ||
           (a.kind === 'snooze' && a.suggestion !== undefined && v.snoozed[a.suggestion] !== undefined)
-        const shown = items.slice(0, 12)
+        const shown = items.slice(0, ENTRY_ITEMS_SHOWN)
+        // Its words: the parts it names, then what it did. (A list, not a
+        // fragment, which the panel would draw as a box inside the text.)
+        const words = [entryRef(v, a) && <Text dimColor>{entryRef(v, a)} </Text>, entryWords(a.text)]
         // A choice whose chunk Claude Code's own compaction has since taken.
         const isTakenSince = a.kind === 'choice' && a.chunkIds.length > 0 && a.chunkIds.every(id => chunkOf(v, id)?.status === 'compacted')
+        // A recall is one line: what came back, the parts it read, and when.
+        if (a.kind === 'recall') {
+          const { line, parts } = recallLine(v, a)
+
+          return (
+            <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" paddingY="xs">
+              {entry('recall', [line, parts !== '' && <Text dimColor> · {parts}</Text>], null)}
+              <Box flexShrink={0}>
+                <Text size="footnote" dimColor>
+                  {ago(a.at)}
+                </Text>
+              </Box>
+            </Box>
+          )
+        }
 
         return (
           <Box flexDirection="column" paddingY="xs">
             <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
-              <Box flexDirection="column" flexShrink={1} minWidth={0}>
-                <Box flexDirection="row" gap="xs" minWidth={0}>
-                  {items.length > 0 && <Button key={`act-${a.id}`} plain dimColor label={arrow(isOpen)} onPress={toggle(`act:${a.id}`)} />}
-                  <Text wrap="truncate-end">
-                    {icon[a.kind]} {entryRef(v, a) && <Text dimColor>{entryRef(v, a)} </Text>}
-                    {a.text}
-                  </Text>
-                </Box>
+              {entry(
+                a.kind,
+                words,
+                items.length > 0 && <Button key={`act-${a.id}`} plain dimColor label={arrow(isOpen)} onPress={toggle(`act:${a.id}`)} />,
                 <Text size="footnote" dimColor wrap="truncate-end">
                   {ago(a.at)}
-                  {a.detail ? ` · ${isTakenSince ? 'since compacted by Claude Code; recall still reads it' : a.detail}` : ''}
-                </Text>
-              </Box>
+                  {a.detail ? ` · ${isTakenSince ? 'since compacted by Claude Code; recall still reads it' : entryWords(a.detail)}` : ''}
+                </Text>,
+              )}
               {canUndo && <Button key={`undo-${a.id}`} plain dimColor label={items.length > 1 ? 'Undo all' : 'Undo'} onPress={said(() => (items.length > 0 ? undoEntry($, a.id) : undo($, a.chunkIds)), 'Undone: back word for word')} />}
               {canUndoChoice && <Button key={`undo-choice-${a.id}`} plain dimColor label="Undo" onPress={said(() => (a.kind === 'snooze' ? undoSnooze($, a.id) : undoChoice($, a.id)), 'Undone')} />}
             </Box>
             {isOpen && (
-              <Box flexDirection="column" paddingLeft="md" marginTop="xs">
-                {shown.map(item => {
-                  const c = chunkOf(v, item.chunkId)
-                  const canRestore = item.kind === 'chunk' && c !== undefined && isUndoable(c)
-                  const canPutBack = item.kind === 'side' && isTidied(c, item.n)
+              <Box flexDirection="column" marginTop="xs">
+                {underEntry(
+                  ...shown.map(item => {
+                    const c = chunkOf(v, item.chunkId)
+                    const canRestore = c !== undefined && isUndoable(c)
 
-                  return (
-                    <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
-                      <Text size="footnote" wrap="truncate-end">
-                        {c && <Text dimColor>{partRef(c, item.kind === 'side' ? item.n : undefined)} </Text>}
-                        {item.text}
-                        <Text dimColor> · {item.detail}</Text>
-                      </Text>
-                      {canRestore && <Button key={`restore-${a.id}-${item.chunkId}`} label="Restore" onPress={said(() => undo($, [item.chunkId]), `Restored “${item.text}” word for word`)} />}
-                      {canPutBack && <Button key={`putback-${a.id}-${item.chunkId}-${item.n}`} label="Put back" onPress={said(() => putBack($, [{ chunkId: item.chunkId, n: item.n! }]), 'Put back in the chat')} />}
-                    </Box>
-                  )
-                })}
-                {items.length > shown.length && (
-                  <Text size="caption" dimColor>
-                    + {items.length - shown.length} more
-                  </Text>
+                    return (
+                      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+                        <Text size="footnote" wrap="truncate-end">
+                          {c && <Text dimColor>{partNo(c)} </Text>}
+                          {item.text}
+                          <Text dimColor> · {item.detail}</Text>
+                        </Text>
+                        {canRestore && <Button key={`restore-${a.id}-${item.chunkId}`} label="Restore" onPress={said(() => undo($, [item.chunkId]), `Restored “${item.text}” word for word`)} />}
+                      </Box>
+                    )
+                  }),
+                  items.length > shown.length && (
+                    <Text size="caption" dimColor>
+                      + {items.length - shown.length} more
+                    </Text>
+                  ),
                 )}
               </Box>
             )}
           </Box>
         )
-      })}
-      {!isSectionShut('activity') && activityPages.controls}
-    </Box>
-  )
+  })
+  const activity = {
+    isOpen: isActivityOpen,
+    node: [
+      titleRow(sectionTitle('activity', 'Recent activity')),
+      isActivityOpen && (
+        <Box flexDirection="column" paddingTop="xs">
+          {entries.length === 0 &&
+            edge(
+              <Text size="footnote" dimColor wrap="truncate-end">
+                Nothing yet. Folds, strips, recalls and your choices show here.
+              </Text>,
+            )}
+          {activityRows}
+          {activityPages.controls}
+        </Box>
+      ),
+    ],
+  }
 
-  const brief = mergedBrief(v)
+  // Newest first, as the ledger keeps them.
+  const lines = (items: LedgerItem[]) => items.map(x => x.text)
+  const brief: BriefLines = { rules: lines(ledgerTasks.rules), decisions: lines(ledgerTasks.decisions), terms: lines(ledgerTasks.terms), files: lines(ledgerTasks.files), openTasks: lines(ledgerTasks.openTasks) }
   // The brief: one line per list, each opening to its first items, then more
   // a page at a time.
   const listItems = (name: string, items: string[], shown: number) => {
     const { start, end, controls } = pager(name, items.length, shown, LIST_PAGE)
 
     return (
-      <Box flexDirection="column" paddingLeft="md" gap="xs">
-        <Text size="footnote">{items.slice(start, end).map(item => `• ${item}`).join('\n')}</Text>
+      <Box flexDirection="column" paddingLeft="md" paddingTop="xs" gap="xs">
+        {edge(<Text size="footnote">{items.slice(start, end).map(item => `• ${item}`).join('\n')}</Text>)}
         {controls}
       </Box>
     )
   }
+  // The brief's title, its hint beside it; then one row per list, 8 apart,
+  // and 16 after one that is open.
+  const isBriefOpen = !isSectionShut('brief')
+  const briefLists = BRIEF_LABELS.filter(([key]) => isBriefOpen && brief[key].length > 0).map(([key, name]) => {
+    const id = `brief:${key}`
+
+    return {
+      isOpen: opened.has(id),
+      node: [
+        <Button key={`open-${id}`} plain dimColor label={`${name[0]!.toUpperCase()}${name.slice(1)} · ${brief[key].length} ${arrow(opened.has(id))}`} onPress={toggleOne(id)} />,
+        opened.has(id) && listItems(id, brief[key], BRIEF_SHOWN),
+      ],
+    }
+  })
   const briefSection = (
     <Box flexDirection="column">
-      <Box flexDirection="row">{sectionTitle('brief', 'The brief · always kept · newest first')}</Box>
-      {BRIEF_LABELS.filter(([key]) => !isSectionShut('brief') && brief[key].length > 0).map(([key, name]) => {
-        const id = `brief:${key}`
-
-        return (
-          <Box flexDirection="column">
-            <Button key={`open-${id}`} plain dimColor label={`${name[0]!.toUpperCase()}${name.slice(1)} · ${brief[key].length} ${arrow(opened.has(id))}`} onPress={toggleOne(id)} />
-            {opened.has(id) && listItems(id, brief[key], BRIEF_SHOWN)}
-          </Box>
-        )
-      })}
-      {!isSectionShut('brief') && BRIEF_LABELS.every(([key]) => brief[key].length === 0) && (
-        <Text size="footnote" dimColor wrap="truncate-end">
-          Empty so far: it fills as chunks are summarised.
-        </Text>
-      )}
-    </Box>
-  )
-
-
-  const sorted = [...v.chunks].sort((a, b) => a.order - b.order)
-  const joins = liveJoins(v)
-  const chunkCard = (c: ChunkRecord) => (
-    <Box flexDirection="column" borderStyle="round" borderDimColor padding="sm" marginTop="xs">
-      {/* What can be done with it comes first, above its summary. */}
-      <Box flexDirection="row" gap="xs" marginBottom="xs">
-        {c.status === 'compacted' ? (
-          <Text size="footnote" dimColor>
-            Claude Code's own compaction took this out of the chat. Recall still reads its original.
-          </Text>
-        ) : c.status === 'folded' && c.decision !== 'keep' ? (
-          <Button key={`restore-${c.id}`} label="Restore word for word" onPress={said(() => undo($, [c.id]), `Restored ${quote(c)} word for word`)} />
-        ) : (
-          [
-            <Button key={`keep-chunk-${c.id}`} label="Keep word for word" {...choice(c.decision === 'keep')} onPress={said(() => decide($, c.id, 'keep'), `Kept ${quote(c)} word for word`)} />,
-            // A restored chunk (folded, kept word for word) goes back to its
-            // summary: the chat is rebuilt for it, and its size saved again.
-            <Button
-              key={`fold-chunk-${c.id}`}
-              label="Fine to fold"
-              {...choice(c.decision === 'fold')}
-              onPress={c.status === 'folded' ? said(() => summariseNow($, c.id), `${quote(c)} goes back to its summary`) : said(() => decide($, c.id, 'fold'), `${quote(c)} folds with the rest`)}
-            />,
-          ]
-        )}
-      </Box>
-      <Text>
-        {c.summary ||
-          (c === sorted.at(-1)
-            ? 'The newest chunk: still growing, so not summarised yet. Haiku summarises it once the next chunk starts.'
-            : 'Not summarised yet: Haiku is on its way to it.')}
-      </Text>
-      {isShut && c.sections.length > 0 && (
-        <Text size="footnote" dimColor>
-          Its {c.sections.length} parts are too long to show here with everything else. Shut the other sections, or ask Claude to recall them.
-        </Text>
-      )}
-      {(isShut ? [] : c.sections).map(s => (
-        <Box flexDirection="column" marginTop="xs">
-          <Text size="footnote" weight="medium">
-            {s.heading}
-          </Text>
-          {s.body !== '' && (
-            <Text size="footnote" dimColor>
-              {s.body}
-            </Text>
-          )}
-          {(isShort ? [] : s.points).map(point => (
-            <Text size="footnote" dimColor>
-              • {point}
-            </Text>
-          ))}
-        </Box>
-      ))}
-      {BRIEF_LABELS.filter(([key]) => !isShut && c.brief[key].length > 0).map(([key, name]) => (
-        <Box flexDirection="column" marginTop="xs">
-          <Text size="footnote" weight="medium">
-            {name[0]!.toUpperCase()}
-            {name.slice(1)}
-          </Text>
-          {c.brief[key].slice(0, CHUNK_LIST_SHOWN).map(item => (
-            <Text size="footnote" dimColor>
-              • {item}
-            </Text>
-          ))}
-          {c.brief[key].length > CHUNK_LIST_SHOWN && (
-            <Text size="caption" dimColor>
-              + {c.brief[key].length - CHUNK_LIST_SHOWN} more in the brief
-            </Text>
-          )}
-        </Box>
-      ))}
-    </Box>
-  )
-  // Every chunk, newest first, a page at a time.
-  const newestFirst = [...sorted].reverse()
-  const chunkPages = pager('chunks', sorted.length, CHUNKS_SHOWN, CHUNKS_SHOWN)
-  // With one chunk opened, the list steps aside and shows just that chunk.
-  const opening = openId === null ? undefined : sorted.find(c => c.id === openId)
-  const chunkRows = opening !== undefined ? [opening] : newestFirst.slice(chunkPages.start, chunkPages.end)
-  const chunkList = (
-    <Box flexDirection="column">
-      <Box flexDirection="row" marginTop="md">
-        <Text size="footnote" weight="medium">
-          Chunks · newest first
-        </Text>
-      </Box>
-      <Button key="open-chunks" plain dimColor label={`Browse all ${sorted.length} chunks ${arrow(opened.has('chunks'))}`} onPress={toggleOne('chunks')} />
-      {opened.has('chunks') &&
-        chunkRows.map(c => (
-          <Box flexDirection="column" paddingY="xs">
-            <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
-              <Box flexDirection="row" alignItems="center" gap="sm" flexShrink={1} minWidth={0}>
-                {/* The part's number, the one recall and Claude's history use. */}
-                <Text size="footnote" dimColor>
-                  {partNo(c)}
-                </Text>
-                <Button key={`chunk-${c.id}`} plain label={`${chunkTitle(c, c === sorted.at(-1))} ${arrow(openId === c.id)}`} onPress={() => void update($, openChunk, o => (o === c.id ? null : c.id))} />
-              </Box>
+      {titleRow(sectionTitle('brief', 'The brief'), 'always kept · newest first')}
+      {isBriefOpen && (
+        <Box flexDirection="column" paddingTop="xs">
+          {stack(briefLists)}
+          {BRIEF_LABELS.every(([key]) => brief[key].length === 0) &&
+            edge(
               <Text size="footnote" dimColor wrap="truncate-end">
-                {sizeText(c)} · {chunkState(c)}
-                {(n => (n > 1 ? ` · one summary with ${n - 1} more` : ''))(joins.find(j => j.ids.includes(c.id))?.ids.length ?? 0)}
-                {v.foldNext.includes(c.id) ? ' · folds next' : ''}
-                {c.recalls > 0 ? ` · recalled ${c.recalls}×` : ''}
-                {v.pinned.some(p => p.kind === 'passage' && p.chunkIds.includes(c.id)) ? ' · ⌕ passage back' : ''}
+                Empty so far: it fills as parts are summarised.
+              </Text>,
+            )}
+        </Box>
+      )}
+    </Box>
+  )
+
+
+  // The newest part, which is still growing.
+  const newestId = v.chunks.reduce<ChunkRecord | null>((n, c) => (n === null || c.order > n.order ? c : n), null)?.id
+  const chunkCard = (c: ChunkRecord) => {
+    if (!isShort && !isShut && c.sections.some(s => s.points.length > 0)) drew.points = true
+
+    return (
+      <Box flexDirection="column" borderStyle="round" borderDimColor padding="sm" marginTop="xs">
+        {/* What can be done with it comes first, above its summary. */}
+        <Box flexDirection="row" gap="xs" marginBottom="xs">
+          {c.status === 'compacted' ? (
+            <Text size="footnote" dimColor>
+              Claude Code's own compaction took this out of the chat. Recall still reads its original.
+            </Text>
+          ) : c.status === 'folded' && c.decision !== 'keep' ? (
+            <Button key={`restore-${c.id}`} label="Restore word for word" onPress={said(() => undo($, [c.id]), `Restored ${quote(c)} word for word`)} />
+          ) : (
+            [
+              <Button key={`keep-chunk-${c.id}`} label="Keep word for word" {...choice(c.decision === 'keep')} onPress={said(() => decide($, c.id, 'keep'), `Kept ${quote(c)} word for word`)} />,
+              // A restored chunk (folded, kept word for word) goes back to its
+              // summary: the chat is rebuilt for it, and its size saved again.
+              <Button
+                key={`fold-chunk-${c.id}`}
+                label="Fine to fold"
+                {...choice(c.decision === 'fold')}
+                onPress={c.status === 'folded' ? said(() => summariseNow($, c.id), `${quote(c)} goes back to its summary`) : said(() => decide($, c.id, 'fold'), `${quote(c)} folds with the rest`)}
+              />,
+            ]
+          )}
+        </Box>
+        <Text>
+          {c.summary ||
+            (c.id === newestId
+              ? 'The newest part: still growing, so not summarised yet. Haiku summarises it once the next part starts.'
+              : 'Not summarised yet: Haiku is on its way to it.')}
+        </Text>
+        {isShut && c.sections.length > 0 && (
+          <Text size="footnote" dimColor>
+            Its {c.sections.length} sections are too long to show here with everything else. Shut the other sections, or ask Claude to recall them.
+          </Text>
+        )}
+        {(isShut ? [] : c.sections).map(s => (
+          <Box flexDirection="column" marginTop="xs">
+            <Text size="footnote" weight="medium">
+              {s.heading}
+            </Text>
+            {s.body !== '' && (
+              <Text size="footnote" dimColor>
+                {s.body}
               </Text>
-            </Box>
-            {openId === c.id && chunkCard(c)}
+            )}
+            {(isShort ? [] : s.points).map(point => (
+              <Text size="footnote" dimColor>
+                • {point}
+              </Text>
+            ))}
           </Box>
         ))}
-      {opened.has('chunks') && opening !== undefined && (
-        <Button key="chunks-back" plain dimColor label={`← Back to all ${sorted.length} chunks`} onPress={() => void update($, openChunk, () => null)} />
-      )}
-      {opened.has('chunks') && opening === undefined && chunkPages.controls}
+        {BRIEF_LABELS.filter(([key]) => !isShut && c.brief[key].length > 0).map(([key, name]) => (
+          <Box flexDirection="column" marginTop="xs">
+            <Text size="footnote" weight="medium">
+              {name[0]!.toUpperCase()}
+              {name.slice(1)}
+            </Text>
+            {c.brief[key].slice(0, CHUNK_LIST_SHOWN).map(item => (
+              <Text size="footnote" dimColor>
+                • {item}
+              </Text>
+            ))}
+            {c.brief[key].length > CHUNK_LIST_SHOWN && (
+              <Text size="caption" dimColor>
+                + {c.brief[key].length - CHUNK_LIST_SHOWN} more in the brief
+              </Text>
+            )}
+          </Box>
+        ))}
+      </Box>
+    )
+  }
+  // A part's row: its number, its name (which opens its card) and how it stands.
+  const partRow = (c: ChunkRecord) => (
+    <Box flexDirection="column" paddingY="xs">
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+        {edge(
+          <Box flexDirection="row" alignItems="center" gap="sm" minWidth={0}>
+            {/* The part's number, the one recall and Claude's history use, in a
+                column of its own width so the names start on one edge. */}
+            <Box width={TASK_ID_COLUMNS} flexShrink={0}>
+              <Text size="footnote" dimColor>
+                {partNo(c)}
+              </Text>
+            </Box>
+            <Button key={`chunk-${c.id}`} plain label={`${chunkTitle(c, c.id === newestId)} ${arrow(openId === c.id)}`} onPress={() => void update($, openChunk, o => (o === c.id ? null : c.id))} />
+          </Box>,
+        )}
+        <Text size="footnote" dimColor wrap="truncate-end">
+          {sizeText(v, c)} · {chunkState(c)}
+          {c.recalls > 0 ? ` · recalled ${c.recalls}×` : ''}
+        </Text>
+      </Box>
+      {openId === c.id && chunkCard(c)}
+    </Box>
+  )
+  // The tasks, newest first, a page at a time. One task opens at a time (as
+  // "chunks:task:<id>", with its page after it), to its parts, newest first, a
+  // page at a time; with one part opened, the task shows just that part.
+  const groups = taskGroups(v)
+  const taskPages = pager('chunks', groups.length, CHUNKS_SHOWN, CHUNKS_SHOWN)
+  const taskKey = (g: TaskGroup) => `chunks:task:${g.key}`
+  const isInTask = (x: string, key: string) => x === key || x.startsWith(`${key}:`)
+  const toggleTask = (g: TaskGroup) => () => {
+    const key = taskKey(g)
+    void update($, openChunk, () => null)
+    void update($, open, list => (list.includes(key) ? list.filter(x => !isInTask(x, key)) : [...list.filter(x => !x.startsWith('chunks:task:')), key]))
+  }
+  const taskRow = (g: TaskGroup) => {
+    const isOpen = opened.has(taskKey(g))
+    const opening = isOpen && openId !== null ? g.parts.find(c => c.id === openId) : undefined
+    const partPages = pager(taskKey(g), g.parts.length, CHUNKS_SHOWN, CHUNKS_SHOWN)
+    const numbers = g.parts.map(partNo)
+
+    return (
+      <Box flexDirection="column" paddingY="xs">
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+          {edge(
+            <Box flexDirection="row" alignItems="center" gap="sm" minWidth={0}>
+              <Box width={TASK_ID_COLUMNS} flexShrink={0}>
+                <Text size="footnote" dimColor>
+                  {g.id}
+                </Text>
+              </Box>
+              <Button key={`task-${g.key}`} plain label={`${g.title} ${arrow(isOpen)}`} onPress={toggleTask(g)} />
+            </Box>,
+          )}
+          <Text size="footnote" dimColor wrap="truncate-end">
+            {numbers.length === 1 ? 'part' : 'parts'} {runs(numbers)}
+            {numbers.length > 1 ? ` · ${numbers.length} parts` : ''}
+            {g.status === null ? '' : ` · ${g.status}`}
+          </Text>
+        </Box>
+        {isOpen && (
+          <Box flexDirection="column" paddingLeft="md">
+            {(opening !== undefined ? [opening] : g.parts.slice(partPages.start, partPages.end)).map(partRow)}
+            {opening !== undefined && (
+              <Button key="chunks-back" plain dimColor label={`← Back to all ${g.parts.length} parts ${g.id === '' ? 'with no task' : `of ${g.id}`}`} onPress={() => void update($, openChunk, () => null)} />
+            )}
+            {opening === undefined && partPages.controls}
+          </Box>
+        )}
+      </Box>
+    )
+  }
+  const tasks = (
+    <Box flexDirection="column">
+      {edge(<Text wrap="truncate-end">Tasks · newest first</Text>)}
+      <Button key="open-chunks" plain dimColor label={`Browse all ${groups.length} task${groups.length === 1 ? '' : 's'} ${arrow(opened.has('chunks'))}`} onPress={toggleOne('chunks')} />
+      {opened.has('chunks') && groups.slice(taskPages.start, taskPages.end).map(taskRow)}
+      {opened.has('chunks') && taskPages.controls}
     </Box>
   )
 
-
-  // Five boxes: the context, the chat's chunks, what needs a look and what
-  // happened, the brief and every chunk, and FolioPack.
+  // The boxes: the context; the chat's parts, with its tasks under the strip
+  // or in a box of their own after it; the open tasks and what happened; the
+  // brief; and FolioPack. While FolioPack is open only the top two stay, the
+  // tasks left out.
   const card = (...children: RenderChildren[]) => (
     <Box flexDirection="column" borderStyle="round" borderDimColor paddingX="md" paddingY="sm" marginTop="md">
       {children}
     </Box>
   )
+  const isPinned = layout.footer === 'pinned'
+  // A thin rule across the panel over a pinned footer: a line one pixel high
+  // (5% of a line) in the middle of its own line.
+  const rule = (
+    <Box height={1} flexDirection="column" justifyContent="center" marginTop="md">
+      <Box height="5%" backgroundColor={QUIET_LINE} />
+    </Box>
+  )
 
-  // FolioPack sits at the very bottom of the panel and grows upward.
   return (
     <Box flexDirection="column" padding="sm" minHeight={rows} minWidth={MIN_PANEL_COLUMNS}>
       {header}
       {isShut && (
         <Text size="footnote" color="warning">
-          Too much was open to show at once, so only the chunks and FolioPack stay open, in brief.
+          Too much was open to show at once, so only the parts and FolioPack stay open, in brief.
         </Text>
       )}
       {card(meter, contextSection)}
-      {card(strip)}
-      {!isPacking && card(looks, suggestionSection, broughtBack, activity)}
-      {!isPacking && card(briefSection, chunkList)}
-      <Box flexGrow={1} />
-      {await packSection($, elements, v, status, draft, opened, toggle, pager)}
+      {card(strip, layout.tasks === 'chat' && !isPacking && <Box flexDirection="column" marginTop="md">{tasks}</Box>)}
+      {layout.tasks === 'own' && !isPacking && card(tasks)}
+      {!isPacking && card(stack([openTasks, suggestionSection, activity]))}
+      {!isPacking && card(briefSection)}
+      {/* Pinned, FolioPack sits at the very bottom of the panel under its rule and grows upward. */}
+      {isPinned && <Box flexGrow={1} />}
+      {isPinned && rule}
+      {await packSection($, elements, draws, v, status, draft, opened, toggle, pager, isPinned)}
     </Box>
   )
 }
@@ -985,10 +1156,12 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
 let packForm: PackDraft | null = null
 let isScanning = false
 
-// A new session: no chunk opened, no FolioPack form from the old one's project
-// scan, and Pack up as it starts.
+// A new session: nothing open (no FolioPack, no task or part of the old chat,
+// whose task ids the new one uses again), no FolioPack form from the old
+// one's project scan, and Pack up as it starts.
 export async function resetPanel($: EngineInterface) {
   packForm = null
+  await update($, open, () => [])
   await update($, openChunk, () => null)
   await update($, pack, () => null)
   await update($, packed, () => null)
@@ -1011,7 +1184,8 @@ async function rescan($: EngineInterface) {
 async function scan($: EngineInterface) {
   if (isScanning) return
   isScanning = true
-  // A scan of a session that ended meanwhile is dropped.
+  // A scan of a session that ended meanwhile is dropped. FolioPack opened in
+  // the new session meanwhile waits on it, so it looks again once it ends.
   const epoch = sessionEpoch()
   try {
     await setForm($, null, 'scanning')
@@ -1022,6 +1196,7 @@ async function scan($: EngineInterface) {
   } finally {
     isScanning = false
   }
+  if (sessionEpoch() !== epoch && (await read($, open)).includes('pack')) await scan($)
 }
 
 // FolioPack: everything this project's work needs, packed for another chat on
@@ -1031,14 +1206,22 @@ async function scan($: EngineInterface) {
 async function packSection(
   $: EngineInterface,
   elements: ReturnType<EngineInterface['ui']['resolve']>,
+  draws: ReturnType<typeof drawsOf>,
   v: PickerView,
   status: PackStatus,
   draft: PackDraft | null,
   opened: Set<string>,
   toggle: (name: string) => () => void,
   pager: (name: string, total: number, first: number, page: number) => { start: number; end: number; controls: RenderChildren },
+  isPinned: boolean,
 ) {
   const { Box, Button, Text } = elements
+  const edge = edgeOf(elements, draws)
+  // After the last box, 16 under it; pinned, right under the rule.
+  const above = isPinned ? undefined : ('md' as const)
+  // Pictures where the surface draws them (the `in` only tells the type
+  // checker the element is there: every surface's table has it).
+  const Svg = draws.pictures && 'Svg' in elements ? elements.Svg : null
   const isOpen = opened.has('pack')
   const packedState = await read($, packed)
   const openPack = async () => {
@@ -1075,10 +1258,12 @@ async function packSection(
     const isFailed = status?.phase === 'failed'
 
     return (
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" borderStyle="round" borderDimColor paddingX="md" paddingY="sm" marginTop="sm">
-        <Text size="footnote" dimColor>
-          {isFailed ? `FolioPack couldn't look through the project: ${status.error}` : 'Looking through the project…'}
-        </Text>
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" borderStyle="round" borderDimColor paddingX="md" paddingY="sm" marginTop={above}>
+        {edge(
+          <Text size="footnote" dimColor>
+            {isFailed ? `FolioPack couldn't look through the project: ${status.error}` : 'Looking through the project…'}
+          </Text>,
+        )}
         <Box flexDirection="row" gap="xs">
           {isFailed && <Button key="pack-rescan" label="Look again" onPress={() => void scan($)} />}
           <Button key="pack-close" label="Close" onPress={toggle('pack')} />
@@ -1086,12 +1271,16 @@ async function packSection(
       </Box>
     )
   }
+  // Shut: one line and its button, in a box after the last one, or pinned
+  // without a box, on the boxes' text edges.
   if (!isOpen || draft === null) {
     return (
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" borderStyle="round" borderDimColor paddingX="md" paddingY="sm" marginTop="sm">
-        <Text size="footnote" dimColor>
-          Pack this chat or the whole project for another computer
-        </Text>
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" paddingX="md" paddingY="sm" marginTop={above} borderStyle={isPinned ? undefined : 'round'} borderDimColor={!isPinned}>
+        {edge(
+          <Text size="footnote" dimColor>
+            Pack this chat or the whole project for another computer
+          </Text>,
+        )}
         <Button key="folio-pack" label="FolioPack" onPress={() => void openPack()} />
       </Box>
     )
@@ -1109,8 +1298,8 @@ async function packSection(
   // `name` says what the box ticks, for a reader that can't see it.
   const glyph = (tick: Tick, id: string, onPress: () => void, name: string) => (
     <Box position="relative" flexShrink={0}>
-      {'Svg' in elements ? (
-        <elements.Svg source={checkboxSvg(tick)} alt={`${tick === 'all' ? 'ticked' : tick === 'some' ? 'partly ticked' : 'not ticked'}${name ? `: ${name}` : ''}`} width={14} height={14} />
+      {Svg !== null ? (
+        <Svg source={checkboxSvg(tick)} alt={`${tick === 'all' ? 'ticked' : tick === 'some' ? 'partly ticked' : 'not ticked'}${name ? `: ${name}` : ''}`} width={14} height={14} />
       ) : (
         <Text color={tick === 'none' ? undefined : TICK}>{tick === 'all' ? '☑' : tick === 'some' ? '⊟' : '☐'}</Text>
       )}
@@ -1183,7 +1372,7 @@ async function packSection(
               row(
                 glyph(f.isChecked ? 'all' : 'none', f.path, flip(f.path), base(f.path)),
                 f.path,
-                f.path.startsWith(`${draft.root}/`) ? f.path.slice(draft.root.length + 1).split('/').slice(-2).join('/') : f.path,
+                f.path.split('/').slice(-2).join('/'),
                 f.bytes > 0 ? bytesText(f.bytes) : undefined,
                 false,
               ),
@@ -1197,7 +1386,7 @@ async function packSection(
   const zip = (file: string, size: string) =>
     line(
       <Box flexDirection="row" gap="xs" alignItems="center">
-        {'Svg' in elements && <elements.Svg source={ZIP_ICON} alt="zip" width={14} height={14} />}
+        {Svg !== null && <Svg source={ZIP_ICON} alt="zip" width={14} height={14} />}
         <Text size="footnote">{file}</Text>
       </Box>,
       size,
@@ -1221,14 +1410,14 @@ async function packSection(
   const packBytes = always.reduce((s, l) => s + (l.bytes ?? 0), 0) + tickedBytes(draft, 'pack')
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderDimColor paddingX="md" paddingY="sm" marginTop="sm">
+    <Box flexDirection="column" borderStyle="round" borderDimColor paddingX="md" paddingY="sm" marginTop={above}>
       <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
         <Box flexDirection="row" gap="xs">
           <Button key="scope-chat" label="This chat" {...choice(draft.scope === 'chat')} onPress={() => patch(d => ({ ...d, scope: 'chat' }))} />
           <Button key="scope-project" label="Whole project" {...choice(draft.scope === 'project')} onPress={() => patch(d => ({ ...d, scope: 'project' }))} />
         </Box>
         <Box width="40%" flexShrink={0} flexDirection="row" justifyContent="flex-end">
-          {'Input' in elements ? (
+          {draws.input ? (
             <elements.Input key="pack-name" label="Name" placeholder="Project name" value={draft.name} onInput={value => patch(d => ({ ...d, name: value }))} onSubmit={value => patch(d => ({ ...d, name: value }))} />
           ) : (
             <Text>{name}</Text>
@@ -1279,7 +1468,7 @@ async function packSection(
                 {row(
                   glyph(r.isChecked ? 'all' : 'none', `rule-${r.path}`, () => patch(d => ({ ...d, rules: d.rules.map(x => (x.path === r.path ? { ...x, isChecked: !x.isChecked } : x)) })), r.label),
                   `rule-${r.path}`,
-                  `${r.label} · used in ${r.uses} chunks`,
+                  `${r.label} · used in ${r.uses} parts`,
                   undefined,
                   true,
                 )}
@@ -1334,7 +1523,7 @@ async function packSection(
             dragged in from Finder or Explorer pastes its path). */}
         <Box flexDirection="row" alignItems="flex-end" gap="sm">
           <Box flexGrow={1}>
-            {'Input' in elements ? (
+            {draws.input ? (
               <elements.Input key="pack-save-to" label="Saves to" placeholder="~/FolioPacks" value={saveTo} onInput={setSaveTo} onSubmit={setSaveTo} />
             ) : (
               <Text size="footnote" weight="medium">

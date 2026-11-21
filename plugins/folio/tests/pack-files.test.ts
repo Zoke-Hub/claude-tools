@@ -40,12 +40,14 @@ function treeOf(root: string, files: Array<[string, number]>): Record<string, Fs
 // (big files apart in FolioFiles, small text files in the FolioPack itself).
 async function scan($: Engine, on: On, o: { files: Array<[string, number]>; root?: string; cwd?: string; messages?: SessionMessage[]; disk?: Map<string, string>; env?: Record<string, string>; scope?: 'project' }) {
   const root = o.root ?? '/w'
-  stubEngine(on, { tree: treeOf(root, o.files), files: o.disk, messages: o.messages, env: o.env })
+  const { clock } = stubEngine(on, { tree: treeOf(root, o.files), files: o.disk, messages: o.messages, env: o.env })
   on('session.usage', () => ({ value: { startedAt: T0 } as never }))
   await start($, o.cwd ?? root)
   const ui = await mountPanel($, { columns: 110, rows: 400 })
   await ui.press({ key: 'folio-pack' })
   if (o.scope === 'project') await ui.press({ key: 'scope-project' })
+  // The scan and the sorting of its files finish.
+  await clock.advance(1000)
   // What goes in the FolioPack itself (the small text files) sits under "always".
   await ui.press({ key: 'open-always' })
   const seen = new Set<string>()
@@ -53,7 +55,9 @@ async function scan($: Engine, on: On, o: { files: Array<[string, number]>; root
   const files = new Set<string>()
   for (;;) {
     const buttons = await ui.findAll({ type: 'Button' })
-    for (const b of buttons) if (b.key?.startsWith(`box-${root}/`)) files.add(b.key.slice(4))
+    // A file's tick is keyed by its path in the project; a group's by its id ("cat:renders", "renders:A17", "texts").
+    const isFile = (rel: string) => !/^[\w-]+:/.test(rel) && /[/.]/.test(rel)
+    for (const b of buttons) if (b.key?.startsWith('box-') && isFile(b.key.slice(4))) files.add(`${root}/${b.key.slice(4)}`)
     const row = buttons.find(b => b.key?.startsWith('name-') && !seen.has(b.key))
     if (row?.key === undefined) break
     seen.add(row.key)

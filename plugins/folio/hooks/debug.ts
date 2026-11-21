@@ -3,13 +3,66 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import { folioDir, homeDir } from './store'
+import { safeName } from './paths'
+import { boundId, folioDir, homeDir } from './store'
 
-// A short log of presses and panel draws, to find clicks that do nothing:
-// ~/.claude/folio/debug.log, the newest 300 lines.
-const KEPT_LINES = 300
-let lines: string[] = []
-let isWriting = false
+// Folio's log: one JSON line per event, in one file per chat per day,
+// ~/.claude/folio/log/<YYYY-MM-DD>/<chat id>.jsonl. Each line has the date
+// and time, the chat, the kind, and the event's fields: sizes, counts, times
+// and reasons, never the chat's words. Only the chat's own Folio writes its
+// file. The engine can't add to a file, so each write is the whole file: Folio
+// keeps the file's text as it last wrote it, adds the waiting lines, and
+// writes again, one write at a time, so no line is lost. Nothing is deleted.
+
+type LogFields = Record<string, unknown>
+
+let waiting: Array<{ path: string; line: string }> = []
+// The text of the file written last, so the next write adds to it.
+let written: { path: string; text: string } | null = null
+let writing: Promise<void> | null = null
+// The home folder, asked for once.
+let homeFolder: string | null = null
+
+export function logPath(home: string, at: string, chat: string): string {
+  return `${folioDir(home)}/log/${at.slice(0, 10)}/${safeName(chat) || 'unknown'}.jsonl`
+}
+
+// Adds one line to this chat's log. Resolves once it is on disk; a failure
+// to write is dropped, since the log is a help, never a cause of failure.
+export async function logEvent($: EngineInterface, kind: string, fields: LogFields = {}): Promise<void> {
+  try {
+    const at = new Date(await $.clock.now()).toISOString()
+    const chat = boundId() ?? (await $.session.id().catch(() => null)) ?? 'unknown'
+    homeFolder ??= await homeDir($)
+    waiting.push({ path: logPath(homeFolder, at, chat), line: JSON.stringify({ at, chat, kind, ...fields }) })
+    if (writing === null) writing = flush($)
+    await writing
+  } catch {
+    // The log is a help, never a cause of failure.
+  }
+}
+
+// Writes every waiting line, file by file, until none waits. The check that
+// none waits and the end of the run happen together, so a line added at any
+// moment is either in this run or starts the next.
+async function flush($: EngineInterface): Promise<void> {
+  while (waiting.length > 0) {
+    const batch = waiting
+    waiting = []
+    for (const path of [...new Set(batch.map(b => b.path))]) {
+      const lines = batch.filter(b => b.path === path).map(b => `${b.line}\n`)
+      try {
+        const before = written?.path === path ? written.text : await $.fs.read(path).catch(() => '')
+        const text = `${before}${lines.join('')}`
+        await $.fs.write(path, text)
+        written = { path, text }
+      } catch {
+        // Lines that can't be written are let go.
+      }
+    }
+  }
+  writing = null
+}
 
 // An error as one line of text; `withPlace` adds the line it was thrown from.
 export function errorText(err: unknown, withPlace = false): string {
@@ -26,16 +79,7 @@ export function later($: EngineInterface, work: () => Promise<unknown>) {
   })
 }
 
+// A plain note, for what has no kind of its own (kind "note").
 export async function note($: EngineInterface, text: string) {
-  lines = [...lines, `${new Date().toISOString().slice(11, 23)} ${text}`].slice(-KEPT_LINES)
-  if (isWriting) return
-  isWriting = true
-  try {
-    const home = await homeDir($)
-    await $.fs.write(`${folioDir(home)}/debug.log`, `${lines.join('\n')}\n`)
-  } catch {
-    // The log is a help, never a cause of failure.
-  } finally {
-    isWriting = false
-  }
+  await logEvent($, 'note', { text })
 }

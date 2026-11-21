@@ -2,70 +2,13 @@
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
 import { expect, test } from 'claude-code/testing'
-import type { SessionMessage } from 'claude-code'
 
-import { FOLD_ASK, REBUILD_ASK } from '../hooks/actions'
+import { FOLD_ASK } from '../hooks/actions'
 import { outputId, shorten } from '../hooks/shorten'
-import { chunksOf, FOLD_MARK, messageTexts, shortTokens, splitChunks, textTokens, TIDY_MARK, toolResultsOf, transcriptText, TRIM_MARK } from '../hooks/chunks'
-import { FOLD_LINE, outlineText } from '../hooks/fold'
-import { summaryTokens } from '../hooks/measure'
-import { normaliseChunk } from '../hooks/store'
+import { chunksOf, messageTexts, splitChunks, TIDY_MARK, toolResultsOf, TRIM_MARK } from '../hooks/chunks'
 import type { Original } from '../hooks/store'
-import type { ChunkRecord, PickerView } from '../types'
-import { callTool, chat, DIR, historyNow, HOME, mountPanel, savedOriginal, savedView, start, stubEngine, talk } from './engine'
-import type { Engine, On } from './engine'
-
-// A session whose chunks were all summarised by an earlier run, each on a
-// topic of its own, with its original on disk.
-function seed(messages: SessionMessage[], mode: 'watch' | 'auto'): Map<string, string> {
-  const files = new Map<string, string>()
-  const slices = chunksOf(splitChunks(messages))
-  const chunks = slices.map((s, order) => ({
-    id: s.id,
-    anchor: s.anchor,
-    order,
-    title: `chunk ${order}`,
-    topic: `topic ${order}`,
-    summary: `summary of chunk ${order}`,
-    tokens: s.tokens,
-    isSummarised: true,
-    status: 'live',
-  }))
-  for (const s of slices) savedOriginal(files, s.id, { text: transcriptText(messages.slice(s.start, s.end)) })
-
-  return savedView({ settings: { mode, strategy: 'balanced' }, chunks, briefDigest: { ids: chunks.map(c => c.id), rules: [], decisions: [], terms: [], files: [], openTasks: [] } }, files)
-}
-
-// The engine beneath Folio, with the chat open and a second gone by; the
-// light model's calls wait for `gate` while a test holds it. As Claude Code
-// does, a compaction a plugin asks for is raised again as the compaction event,
-// through every plugin's hook; one that carries the transcript is the engine's
-// own, and `compacted` keeps what was on disk then. `requested` lists each
-// compaction a plugin asked for, by its instructions, and what it came to.
-async function openChat($: Engine, on: On, files: Map<string, string>, messages: SessionMessage[], gate = Promise.resolve()) {
-  const engine = stubEngine(on, { files, messages, model: () => gate.then(() => null) })
-  const compacted: Array<Map<string, string>> = []
-  const requested: Array<{ instructions: string | undefined; result: unknown }> = []
-  on('session.compact', async (_, e) => {
-    // The engine hands every compaction the transcript; so does this one.
-    if (!Array.isArray(e.messages)) {
-      const asked = { instructions: e.instructions, result: undefined as unknown }
-      requested.push(asked)
-      asked.result = await $.session.compact({ instructions: e.instructions, messages } as never)
-
-      return asked.result as never
-    }
-    compacted.push(new Map(files))
-
-    return { messages: [{ role: 'user', text: 'The summary.', toolUses: [] }] }
-  })
-  await start($)
-  await engine.clock.advance(1000)
-
-  return { clock: engine.clock, toasts: engine.toasts, asked: engine.commands, compacted, requested }
-}
-
-const saved = (files: Map<string, string>) => JSON.parse(files.get(`${DIR}/index.json`)!) as PickerView
+import type { Ledger } from '../types'
+import { callTool, chat, DIR, HOME, mountPanel, openChat, packUpNow, request, saved, savedOriginal, savedView, seed, start, stubEngine, talk } from './engine'
 
 test("a long turn's new work is saved before Claude Code's own compaction runs", async ($, on) => {
   const messages = talk(40)
@@ -81,86 +24,17 @@ test("a long turn's new work is saved before Claude Code's own compaction runs",
 
 test('every chat carries a line pointing to recall, as a block of its own', async ($, on) => {
   const messages = talk(2)
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   await openChat($, on, seed(messages, 'watch'), messages)
   const { blocks } = await $.prompt.context({ blocks: [{ name: 'currentDate', text: 'today' }] })
   expect(blocks.map(b => b.name)).toEqual(['currentDate', 'folio'])
   expect(blocks[1]!.text).toContain('mcp__folio__recall')
-  expect(blocks[1]!.text).toContain('exact: true')
+  // It names the new ways in: kinds and a part's card.
+  expect(blocks[1]!.text).toContain('kind "command"')
+  expect(blocks[1]!.text).toContain('part "32"')
 })
 
-// A folded chunk's lines in the history, as Claude reads them.
-const lineOf = (c: Pick<ChunkRecord, 'id' | 'order' | 'title' | 'topic' | 'summary'>) => outlineText(normaliseChunk(c))
-
-test("a fold leaves one short line in the chat, and Folio's context block holds the whole history", async ($, on) => {
-  const messages = talk(40)
-  const files = seed(messages, 'watch')
-  await openChat($, on, files, messages)
-  const folded = (await $.session.compact({ instructions: FOLD_ASK, messages } as never)) as { messages: SessionMessage[] }
-  const gone = saved(files).chunks.filter(c => c.status === 'folded')
-  expect(gone.length).toBeGreaterThan(0)
-  // The chat: the fold's line, then what it kept, and none of the history.
-  expect(folded.messages[0]!.text).toBe(FOLD_LINE)
-  expect(FOLD_LINE).not.toContain('\n')
-  expect(folded.messages.filter(m => m.text.startsWith(FOLD_MARK))).toHaveLength(1)
-  expect(JSON.stringify(folded.messages)).not.toContain('Folded parts, oldest first')
-  // Claude: the whole history, with every folded part in it.
-  const history = await historyNow($)
-  expect(history.startsWith(FOLD_MARK)).toBe(true)
-  expect(history).toContain('call the recall tool (mcp__folio__recall)')
-  for (const c of gone) expect(history).toContain(lineOf(c))
-})
-
-test("the history stays in its block after Claude Code's own compaction, and takes in a FolioPack's parts at its rebuild", async ($, on) => {
-  const messages = talk(40)
-  const files = seed(messages, 'watch')
-  const { clock, requested } = await openChat($, on, files, messages)
-  await $.session.compact({ instructions: FOLD_ASK, messages } as never)
-  const folded = saved(files).chunks.filter(c => c.status === 'folded')
-  await $.session.compact({ instructions: 'Keep the plan', messages } as never)
-  const history = await historyNow($)
-  for (const c of folded) expect(history).toContain(lineOf(c))
-  // Claude opens a FolioPack in a reply: the rebuild it asks for once the reply
-  // ends brings the pack's part into the history.
-  files.set('/v1/folio.json', JSON.stringify({ folio: 1, name: 'One chat', chunks: [{ id: 'old1', order: 0, title: 'From a one-chat pack', summary: 'the zebrafish plan', isSummarised: true, status: 'folded' }], pinned: [] }))
-  await reply.start($)
-  await callTool($, { tool: 'mcp__folio__import_pack', path: '/v1' })
-  await reply.end($)
-  await clock.advance(2000)
-  expect(requested.map(r => r.instructions)).toEqual([REBUILD_ASK])
-  expect(await historyNow($)).toContain('the zebrafish plan')
-})
-
-test('a chat folded before the history moved to its block: the next fold takes the long message away', async ($, on) => {
-  const messages = talk(40)
-  const files = seed(messages, 'watch')
-  // An earlier Folio wrote the whole history into the chat as its fold's message.
-  const old: SessionMessage = { role: 'user', text: `${FOLD_MARK}\n\nEarlier parts of this chat were folded by Folio.\n\nFolded parts, oldest first:\n1. Old work [old0] (old): the zebrafish plan`, toolUses: [] }
-  const index = saved(files)
-  const chunks = [{ id: 'old0', order: 0, title: 'Old work', topic: 'old', summary: 'the zebrafish plan', tokens: 5000, isSummarised: true, status: 'folded' }, ...index.chunks.map(c => ({ ...c, order: c.order + 1 }))]
-  savedView({ ...index, chunks, folds: 1 }, files)
-  savedOriginal(files, 'old0', { text: 'User: the zebrafish plan\nClaude: done' })
-  const transcript = [old, ...messages]
-  await openChat($, on, files, transcript)
-  const folded = (await $.session.compact({ instructions: FOLD_ASK, messages: transcript } as never)) as { messages: SessionMessage[] }
-  expect(saved(files).folds).toBe(2)
-  expect(folded.messages.filter(m => m.text.startsWith(FOLD_MARK)).map(m => m.text)).toEqual([FOLD_LINE])
-  expect(JSON.stringify(folded.messages)).not.toContain('zebrafish')
-  // The old part and the newly folded ones are in the history Claude reads.
-  const history = await historyNow($)
-  expect(history).toContain('1. Old work [old0] (old): the zebrafish plan')
-  for (const c of saved(files).chunks.filter(c => c.status === 'folded' && c.id !== 'old0')) expect(history).toContain(lineOf(c))
-})
-
-test("a history of over 200,000 characters reaches Claude whole, through the engine's context chain", async ($, on) => {
-  const parts = Array.from({ length: 60 }, (_, i) => ({ id: `big${i}`, order: i, title: `Part ${i}`, topic: `topic ${i}`, summary: `start ${i} ${'s'.repeat(4000)} end ${i}`, tokens: 20_000, isSummarised: true, status: 'folded' }))
-  stubEngine(on, { files: savedView({ chunks: parts }), messages: talk(2) })
-  await start($)
-  const history = await historyNow($)
-  expect(history.length).toBeGreaterThan(200_000)
-  for (const p of parts) expect(history).toContain(lineOf(p))
-})
-
-test('a trim or a tidy in the chat never replaces the saved words', async ($, on) => {
+test('a trim or an older tidy in the chat never replaces the saved words, and an older tidy\'s words stay saved', async ($, on) => {
   const messages = chat(12)
   const files = seed(messages, 'watch')
   const first = chunksOf(splitChunks(messages))[0]!
@@ -178,7 +52,7 @@ test('a trim or a tidy in the chat never replaces the saved words', async ($, on
   const kept = JSON.parse(files.get(path)!) as Original
   expect(kept.toolResults[result.tool_use_id]).toBe(result.text)
   expect(kept.messages[3]).toBe('Claude: done 0')
-  expect(kept.tidiedRaw).toEqual({ 3: 'done 0' })
+  expect((kept as Original & { tidiedRaw?: unknown }).tidiedRaw).toEqual({ 3: 'done 0' })
 })
 
 test("a shortened output is whole again in its chunk's saved original", async ($, on) => {
@@ -189,7 +63,7 @@ test("a shortened output is whole again in its chunk's saved original", async ($
   // The chunk's first tool output reached Claude shortened; Folio saved the whole.
   const at = first.start + 2
   const result = messages[at]!.toolResults![0]!
-  const whole = Array.from({ length: 900 }, (_, i) => `build line ${i}`).join('\n')
+  const whole = Array.from({ length: 2000 }, (_, i) => `build line ${i}`).join('\n')
   const id = outputId(result.tool_use_id)
   files.set(`${DIR}/outputs/${id}.txt`, whole)
   messages[at] = { ...messages[at]!, toolResults: [{ ...result, text: shorten(whole, id)! }] }
@@ -199,7 +73,7 @@ test("a shortened output is whole again in its chunk's saved original", async ($
   expect(kept.toolResults[result.tool_use_id]).toBe(whole)
 })
 
-test('Undo all on a tidy takes its saving off the total', async ($, on) => {
+test("an older Folio's tidy stays in the saved list, unshown, with no Undo or Put back", async ($, on) => {
   const messages = talk(4)
   const files = seed(messages, 'watch')
   const index = saved(files)
@@ -209,17 +83,27 @@ test('Undo all on a tidy takes its saving off the total', async ($, on) => {
   savedView({ ...index, savedTokens: 485, activity: [{ id: 'a1', kind: 'tidy', at: 1, text: 'Tidied 1 side message', detail: '485 tokens out', chunkIds: [id], items: [item] }] }, files)
   const { clock } = await openChat($, on, files, messages)
   const ui = await mountPanel($)
-  await ui.press({ key: 'undo-a1' })
+  expect(await ui.find({ type: 'Text', text: /Tidied 1 side message/ })).toBeFalsy()
+  expect(await ui.find({ key: 'undo-a1' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: 'Put back' })).toBeFalsy()
+  await ui.press({ key: 'mode-auto' })
   await clock.advance(1000)
-  expect(saved(files).savedTokens).toBe(0)
-  expect(saved(files).chunks[0]!.tidied).toEqual([])
+  // Saved again on a change, the entry is still there; the part's old fields
+  // are left out of the index and its card, and the kept copy holds them.
+  const after = saved(files) as unknown as { activity: Array<{ id: string }>; chunks: Array<{ tidied?: number[]; side?: unknown[] }> }
+  expect(after.activity.map(a => a.id)).toContain('a1')
+  expect([after.chunks[0]!.tidied, after.chunks[0]!.side]).toEqual([undefined, undefined])
+  expect(JSON.parse(files.get(`${DIR}/parts/p-${id.toLowerCase().replace(/[^a-z0-9.-]/g, '-')}.json`) ?? '{}').side).toBeUndefined()
+  const copy = JSON.parse(files.get(`${DIR}/index.v1.json`)!) as { chunks: Array<{ tidied?: number[]; side?: unknown[] }> }
+  expect([copy.chunks[0]!.tidied, copy.chunks[0]!.side?.length]).toEqual([[1], 1])
 })
 
-test('a fold waits for a brief merge already running', async ($, on) => {
+test('a fold waits for the summaries already running', async ($, on) => {
   const messages = talk(40)
-  const files = seed(messages, 'watch')
-  // A brief that hasn't taken in the chunks yet, so a merge starts on load.
-  savedView({ ...saved(files), briefDigest: null }, files)
+  const files = seed(messages, 'auto')
+  // One closed part not summarised yet, so a summary starts on load.
+  const index = saved(files)
+  savedView({ ...index, chunks: index.chunks.map((c, i) => (i === 2 ? { ...c, isSummarised: false } : c)) }, files)
   let release = () => {}
   const { clock } = await openChat($, on, files, messages, new Promise<void>(r => (release = r)))
   let isFolded = false
@@ -251,7 +135,7 @@ test('a FolioPack that fails to open asks for no rebuild; one that opens does', 
 test("a FolioPack is read by the version of Folio that made it; a newer one isn't opened", async ($, on) => {
   const messages = talk(4)
   const files = seed(messages, 'watch')
-  await openChat($, on, files, messages)
+  const { clock } = await openChat($, on, files, messages)
   const chunk = { id: 'old1', order: 0, title: 'From a one-chat pack', summary: 'one chat', isSummarised: true, status: 'folded' }
   files.set('/v1/folio.json', JSON.stringify({ folio: 1, name: 'One chat', chunks: [chunk], pinned: [] }))
   files.set('/v9/folio.json', JSON.stringify({ folio: 9, name: 'From the future', chats: [{ chunks: [chunk], pinned: [] }] }))
@@ -259,8 +143,25 @@ test("a FolioPack is read by the version of Folio that made it; a newer one isn'
   expect(newer).toContain('made by a newer Folio (version 9')
   expect(saved(files).chunks.some(c => c.id === 'old1')).toBe(false)
   const one = JSON.stringify(await callTool($, { tool: 'mcp__folio__import_pack', path: '/v1' }))
-  expect(one).toContain('Folio opened the FolioPack \\"One chat\\": 1 chunks')
+  expect(one).toContain('Folio opened the FolioPack \\"One chat\\": 1 part as a summary, numbered 5 in this chat')
+  await clock.advance(1000)
   expect(saved(files).chunks.find(c => c.id === 'old1')?.status).toBe('folded')
+})
+
+test("a FolioPack's brief starts an empty ledger, and its parts are given tasks by their topics", async ($, on) => {
+  const messages = talk(4)
+  const files = savedView({ chunks: [] })
+  const { clock } = await openChat($, on, files, messages)
+  const part = (id: string, order: number, topic: string) => ({ id, order, title: topic, topic, summary: `about ${topic}`, isSummarised: true, status: 'folded' })
+  const brief = { ids: ['a', 'b'], rules: ['Number every render'], decisions: [], terms: [], files: [], openTasks: ['check the legend'] }
+  files.set('/p/folio.json', JSON.stringify({ folio: 2, name: 'Maps', chats: [{ chunks: [part('a', 0, 'Map routes'), part('b', 1, 'Map routes'), part('c', 2, 'Legend')], pinned: [] }], brief }))
+  await callTool($, { tool: 'mcp__folio__import_pack', path: '/p' })
+  await clock.advance(1000)
+  const ledger = JSON.parse(files.get(`${DIR}/ledger.json`)!) as Ledger
+  expect(ledger.items.map(x => [x.text, x.isOld])).toEqual([['Number every render', true], ['check the legend', true]])
+  const of = (id: string) => saved(files).chunks.find(c => c.id === id)!
+  // The chat's own parts are in T1 already.
+  expect([of('a').task, of('b').task, of('c').task]).toEqual(['T2', 'T2', 'T3'])
 })
 
 class FullDisk extends Map<string, string> {
@@ -283,20 +184,28 @@ test("a save that fails doesn't stop Claude Code's compaction", async ($, on) =>
   expect(compacted.length).toBe(1)
 })
 
-test('Fold now folds the oldest chunks, and Undo brings them back word for word', async ($, on) => {
+test('Fold now folds the oldest chunks, even under the floor, and Undo brings them back word for word', async ($, on) => {
   const messages = talk(40)
   const files = seed(messages, 'watch')
-  const { clock } = await openChat($, on, files, messages)
+  const { clock, engine } = await openChat($, on, files, messages)
   const ui = await mountPanel($)
+  // The last request carried 220k, under Balanced's 250k floor.
+  await request($, engine, 220_000)
+  await clock.advance(100)
 
   // Fold now, as the person presses it.
   await ui.press({ key: 'fold-now' })
   await clock.advance(1000)
-  const after = saved(files)
-  const gone = after.chunks.filter(c => c.status === 'folded')
+  const folded = saved(files)
+  const gone = folded.chunks.filter(c => c.status === 'folded')
   expect(gone.length).toBeGreaterThan(0)
-  expect(after.folds).toBe(1)
-  expect(after.savedTokens).toBeGreaterThan(0)
+  expect(folded.folds).toBe(1)
+  // What it saved is the real drop the next request shows.
+  expect(folded.savedTokens).toBe(0)
+  await request($, engine, 90_000)
+  await clock.advance(100)
+  const after = saved(files)
+  expect(after.savedTokens).toBe(130_000)
   expect(after.activity[0]?.kind).toBe('fold')
   // Opened in Recent, each folded chunk's row starts with its part number.
   await ui.press({ key: `act-${after.activity[0]!.id}` })
@@ -315,10 +224,12 @@ test('Fold now folds the oldest chunks, and Undo brings them back word for word'
   expect(undone.activity[0]?.kind).toBe('undo')
 })
 
-test('Automatic folds by itself once the work passes the ceiling', async ($, on) => {
+test('Automatic folds by itself once the context passes the ceiling', async ($, on) => {
   const messages = chat(70)
   const files = seed(messages, 'auto')
-  const { clock, asked } = await openChat($, on, files, messages)
+  const { clock, asked, engine } = await openChat($, on, files, messages)
+  // Balanced's ceiling is 400k of real context.
+  await request($, engine, 420_000)
   await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1' })
   await clock.advance(1000)
   expect(saved(files).folds === 1 || asked.includes(`compact ${FOLD_ASK}`)).toBe(true)
@@ -360,12 +271,7 @@ test('a pack holds no private value, even one that appears unlabelled', async ($
   savedOriginal(files, first, { text: `User: the test uses expect(hidden).not.toContain('${secret}')` })
   on('prompt.submit', (_, e) => ({ text: e.text }))
   const { clock } = await openChat($, on, files, messages)
-  const ui = await mountPanel($)
-  await ui.press({ key: 'folio-pack' })
-  await clock.advance(1000)
-  await ui.press({ key: 'pack-up' })
-  await clock.advance(1000)
-  await ui.unmount()
+  await packUpNow($, clock)
 
   const packed = [...files].filter(([path]) => path.startsWith(`${HOME}/FolioPacks/`))
   const startHere = packed.find(([path]) => path.endsWith('/START-HERE.md'))?.[1] ?? ''
@@ -376,88 +282,24 @@ test('a pack holds no private value, even one that appears unlabelled', async ($
   expect(packed.filter(([, text]) => text.includes(secret)).map(([path]) => path)).toEqual([])
 })
 
-// A chat that goes on under a new id after /clear: an old chat on disk with a
-// folded part only it holds ("zebrafish"), and the new chat's own prompts.
-function clearedChat(on: On) {
-  const session = { id: 'test-session' }
-  const files = savedView({
-    settings: { mode: 'auto', strategy: 'balanced' },
-    chunks: [{ id: 'old0', order: 0, title: 'Old work', topic: 'old', summary: 'the zebrafish plan', tokens: 5000, isSummarised: true, status: 'folded' }],
-    savedTokens: 4000,
-    folds: 1,
-  })
-  savedOriginal(files, 'old0', { text: 'User: the zebrafish plan\nClaude: done' })
-  const messages: SessionMessage[] = talk(4)
-  const answer = '{"found": true, "answer": "the zebrafish plan is done", "quotes": [], "confidence": "high"}'
-  const engine = stubEngine(on, { files, messages, id: () => session.id, model: () => answer })
-  on('session.compact', (_, e) => ({ messages: e.messages ?? [] }))
-
-  // The person types /clear: the old chat ends, the new one has its own prompts.
-  const clear = async ($: Engine, newId = 'chat-2') => {
-    await $.session.end({ reason: 'clear', sessionId: session.id, resume: { id: session.id } })
-    session.id = newId
-    messages.splice(0, messages.length, ...Array.from({ length: 6 }, (_, i): SessionMessage[] => [
-      { role: 'user', text: `fresh question ${i}`, toolUses: [] },
-      { role: 'assistant', text: `fresh answer ${i}: ${'z'.repeat(9000)}`, toolUses: [] },
-    ]).flat())
-  }
-
-  return { ...engine, files, messages, session, clear }
-}
-
-const indexOf = (files: Map<string, string>, id: string) => JSON.parse(files.get(`${HOME}/.claude/folio/sessions/${id}/index.json`) ?? 'null') as PickerView | null
-
-test('after /clear Folio works in the new chat: its own folder, no old summaries, no old recall', async ($, on) => {
-  const { files, clock, messages, clear } = clearedChat(on)
+test('Pack up runs the summaries a small Watch chat was waiting with, and packs the brief the ledger gives', async ($, on) => {
+  const messages = talk(4)
+  const files = savedView({ chunks: [] })
+  const answer = { title: 'A turn', topic: 'Talk', carriesOn: true, summary: 'One turn.', rules: [{ text: 'Number every render', beyondTask: true }], opened: [] }
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  const engine = stubEngine(on, { files, messages, model: () => JSON.stringify(answer) })
   await start($)
-  await clock.advance(1000)
-  // Recall in the old chat finds its part and caches the answer.
-  expect(JSON.stringify(await callTool($, { tool: 'mcp__folio__recall', query: 'the zebrafish plan' }))).toContain('the zebrafish plan is done')
-  const before = indexOf(files, 'test-session')!.chunks.map(c => [c.id, c.status])
-  const originals = () => [...files.keys()].filter(k => k.startsWith(`${DIR}/originals/`)).sort()
-  const oldOriginals = originals()
-  await clear($)
-  await $.turn.start({ text: 'fresh question 5', turnId: 't1' })
-  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1' })
-  await clock.advance(1000)
-
-  // The new chat's chunks are saved in its own folder; the old chat's index is as it was.
-  const fresh = indexOf(files, 'chat-2')
-  expect(fresh?.chunks.length).toBeGreaterThan(0)
-  expect(fresh?.chunks.some(c => c.id === 'old0')).toBe(false)
-  expect(fresh?.savedTokens ?? 0).toBe(0)
-  // The old chat keeps its own chunks as they were (none taken for compacted)
-  // and gets none of the new chat's, nor their originals.
-  expect(indexOf(files, 'test-session')!.chunks.map(c => [c.id, c.status])).toEqual(before)
-  expect(before.some(([, status]) => status === 'live')).toBe(true)
-  expect(originals()).toEqual(oldOriginals)
-  // The mode chosen in this window carries on.
-  expect(fresh?.settings.mode).toBe('auto')
-
-  // A rebuild in the new chat holds none of the old chat's summaries, nor does
-  // the history Claude reads after it.
-  const rebuilt = await $.session.compact({ instructions: REBUILD_ASK, messages } as never)
-  expect(JSON.stringify(rebuilt)).not.toContain('zebrafish')
-  expect(await historyNow($)).not.toContain('zebrafish')
-  // Recall answers from the new chat only, not from the old chat's cache.
-  expect(JSON.stringify(await callTool($, { tool: 'mcp__folio__recall', query: 'the zebrafish plan', exact: true }))).not.toContain('zebrafish plan\\nClaude')
-  expect(JSON.stringify(await callTool($, { tool: 'mcp__folio__recall', query: 'the zebrafish plan' }))).toContain('Nothing in the saved parts')
-})
-
-test('a session that changes without a /clear Folio saw is found at the next turn', async ($, on) => {
-  const { files, clock, messages, session } = clearedChat(on)
-  await start($)
-  await clock.advance(1000)
-  const before = indexOf(files, 'test-session')!.chunks.map(c => [c.id, c.status])
-  // Another chat takes this one's place in the same window (a resume), and no
-  // session.end reached Folio.
-  session.id = 'chat-3'
-  messages.splice(0, messages.length, { role: 'user', text: 'resumed prompt', toolUses: [] }, { role: 'assistant', text: 'resumed reply', toolUses: [] })
-  await $.turn.start({ text: 'resumed prompt', turnId: 't1' })
-  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1' })
-  await clock.advance(1000)
-  expect(indexOf(files, 'chat-3')?.chunks.length).toBe(1)
-  expect(indexOf(files, 'test-session')!.chunks.map(c => [c.id, c.status])).toEqual(before)
+  await engine.clock.advance(1000)
+  expect(engine.prompts).toHaveLength(0)
+  const ui = await mountPanel($)
+  await ui.press({ key: 'folio-pack' })
+  await engine.clock.advance(1000)
+  await ui.press({ key: 'pack-up' })
+  await engine.clock.advance(1000)
+  await ui.unmount()
+  expect(engine.prompts.length).toBeGreaterThan(0)
+  const pack = [...files].find(([path]) => path.startsWith(`${HOME}/FolioPacks/`) && path.endsWith('/folio.json'))![1]
+  expect((JSON.parse(pack) as { brief: { rules: string[] } }).brief.rules).toEqual(['Number every render'])
 })
 
 test('Fold now pressed while Claude is replying waits, then folds once the reply ends', async ($, on) => {
@@ -485,228 +327,20 @@ test('Fold now pressed while Claude is replying waits, then folds once the reply
   await ui.unmount()
 })
 
-// A chat that has folded once, with its fold's entry in Recent and the panel
-// open; `base` is what earlier folds saved.
-async function foldedOnce($: Engine, on: On, base = 0) {
+test('a fold waits at most 5 minutes for summaries that never come, then folds without them', async ($, on) => {
   const messages = talk(40)
-  const files = seed(messages, 'watch')
-  savedView({ ...saved(files), savedTokens: base }, files)
-  const chat = await openChat($, on, files, messages)
-  const ui = await mountPanel($)
-  await ui.press({ key: 'fold-now' })
-  await chat.clock.advance(1000)
-  const entry = saved(files).activity[0]!
-  const first = entry.items![0]!.chunkId
-  await ui.press({ key: `act-${entry.id}` })
-  chat.requested.length = 0
-
-  return { ...chat, files, ui, entry, first }
-}
-
-const reply = {
-  start: ($: Engine) => $.turn.start({ text: 'go on', turnId: 't2' }),
-  end: ($: Engine) => $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1000, isAborted: false, turnId: 't2' }),
-}
-
-test('Fold now, then Restore, in one reply: both are done once it ends, and Fold now comes back', async ($, on) => {
-  const { files, ui, entry, first, clock, requested } = await foldedOnce($, on)
-  await reply.start($)
-  await ui.press({ key: 'fold-now' })
-  await ui.press({ key: `restore-${entry.id}-${first}` })
-  await clock.advance(100)
-  expect(requested).toEqual([])
-  expect(await ui.find({ type: 'Button', text: 'Folding…' })).toBeTruthy()
-  await reply.end($)
-  await clock.advance(2000)
-  // One compaction did both: the fold (it found nothing more, so it rebuilt)
-  // and the restored chunk back word for word.
-  expect(requested.map(r => r.instructions)).toEqual([FOLD_ASK])
-  expect(await historyNow($)).toContain('restored word for word')
-  expect(saved(files).chunks.find(c => c.id === first)?.decision).toBe('keep')
-  expect(await ui.find({ type: 'Button', text: 'Fold now' })).toBeTruthy()
-  await ui.unmount()
-})
-
-test('Restore, then Fold now, in one reply: a fold that finds nothing still rebuilds', async ($, on) => {
-  const { ui, entry, first, clock, requested, toasts } = await foldedOnce($, on)
-  await reply.start($)
-  await ui.press({ key: `restore-${entry.id}-${first}` })
-  await ui.press({ key: 'fold-now' })
-  await reply.end($)
-  await clock.advance(2000)
-  expect(requested).toHaveLength(1)
-  expect(await historyNow($)).toContain('restored word for word')
-  expect(toasts.some(t => t.startsWith('Nothing to fold'))).toBe(false)
-  expect(await ui.find({ type: 'Button', text: 'Fold now' })).toBeTruthy()
-  await ui.unmount()
-})
-
-test('two presses of Fold now before the panel redraws ask for one fold', async ($, on) => {
-  const messages = talk(40)
-  const { clock, requested } = await openChat($, on, seed(messages, 'watch'), messages)
-  const ui = await mountPanel($)
-  await Promise.all([ui.press({ key: 'fold-now' }), ui.press({ key: 'fold-now' })])
-  await clock.advance(1000)
-  expect(requested.map(r => r.instructions)).toEqual([FOLD_ASK])
-  await ui.unmount()
-})
-
-test('a fold Claude Code never starts is let go: Fold now comes back by itself and says so', async ($, on) => {
-  const messages = talk(40)
-  const { clock, toasts } = stubEngine(on, { files: seed(messages, 'watch'), messages })
-  // Claude Code takes the ask and never runs it (a /compact prompt dropped).
-  on('session.compact', async () => {
-    await clock.sleep(60 * 60_000)
-
-    return { skip: 'too late' }
-  })
-  await start($)
-  const ui = await mountPanel($)
-  await ui.press({ key: 'fold-now' })
-  await clock.advance(1000)
-  expect(await ui.find({ type: 'Button', text: 'Folding…' })).toBeTruthy()
-  await clock.advance(3 * 60_000)
-  expect(await ui.find({ type: 'Button', text: 'Fold now' })).toBeTruthy()
-  expect(toasts).toContain("Claude Code didn't run Folio's fold. Press Fold now to try again.")
-  await ui.unmount()
-})
-
-test('a chunk that comes while Haiku works through a backlog is saved at once, and a stuck run is taken over', async ($, on) => {
-  const messages = talk(4, 60_000)
-  const files = new Map<string, string>()
-  // Haiku never answers while the test holds it.
-  const { clock, prompts } = stubEngine(on, { files, messages, model: () => new Promise<null>(() => {}) })
-  await start($)
-  await clock.advance(1000)
-  // The first sync waits on Haiku for its first chunk.
-  const asked = prompts.length
-  expect(asked).toBeGreaterThan(0)
-  // Two more turns end meanwhile: their chunks have records and originals at once.
-  messages.push(...talk(6, 60_000).slice(8))
-  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1' })
-  await clock.advance(1000)
+  const files = seed(messages, 'auto')
+  // One closed part not summarised yet; Haiku never answers.
   const index = saved(files)
-  expect(index.chunks.length).toBe(chunksOf(splitChunks(messages)).length)
-  for (const c of index.chunks) expect(files.has(`${DIR}/originals/${c.id}.json`)).toBe(true)
-  expect(prompts.length).toBe(asked)
-  // Twenty minutes on, the run still waits: the next sync takes over and asks Haiku again.
-  await clock.advance(20 * 60_000)
-  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1000, isAborted: false, turnId: 't2' })
-  await clock.advance(1000)
-  expect(prompts.length).toBeGreaterThan(asked)
-})
-
-// What restoring a folded chunk gives back: its size less its summary's.
-const back = (files: Map<string, string>, id: string) => (c => c.tokens - summaryTokens(c))(saved(files).chunks.find(c => c.id === id)!)
-
-test("Restore, then Undo all on the same fold, gives each chunk's saving back once, and Undo goes", async ($, on) => {
-  const { files, ui, entry, first, clock } = await foldedOnce($, on, 1_000_000)
-  const ids = entry.items!.map(i => i.chunkId)
-  expect(ids.length).toBeGreaterThan(1)
-  const all = ids.reduce((sum, id) => sum + back(files, id), 0)
-  const before = saved(files).savedTokens
-  await ui.press({ key: `restore-${entry.id}-${first}` })
-  await clock.advance(1000)
-  await ui.press({ key: `undo-${entry.id}` })
-  await clock.advance(1000)
-  expect(saved(files).savedTokens).toBe(before - all)
-  for (const id of ids) expect(saved(files).chunks.find(c => c.id === id)?.decision).toBe('keep')
-  // Nothing of the fold is out any more: its Undo is gone.
-  expect(await ui.find({ key: `undo-${entry.id}` })).toBeFalsy()
-  await ui.unmount()
-})
-
-test("a restored chunk's Fine to fold puts its summary back in the chat and saves its size again", async ($, on) => {
-  const { files, ui, entry, first, clock, requested } = await foldedOnce($, on, 1_000_000)
-  await ui.press({ key: `restore-${entry.id}-${first}` })
-  await clock.advance(1000)
-  const restored = saved(files).savedTokens
-  requested.length = 0
-  // Browse all, a page at a time to the oldest chunk, and open its card.
-  await ui.press({ key: 'open-chunks' })
-  while (!(await ui.find({ key: `chunk-${first}` }))) await ui.press({ key: 'chunks:next' })
-  await ui.press({ key: `chunk-${first}` })
-  await ui.press({ key: `fold-chunk-${first}` })
-  await clock.advance(1000)
-  expect(saved(files).chunks.find(c => c.id === first)?.decision).toBe('fold')
-  expect(saved(files).savedTokens).toBe(restored + back(files, first))
-  expect(requested.map(r => r.instructions)).toEqual([REBUILD_ASK])
-  const history = await historyNow($)
-  expect(history).toContain(saved(files).chunks.find(c => c.id === first)!.summary)
-  expect(history).not.toContain('restored word for word')
-  // Its fold's Restore is offered again.
-  expect(await ui.find({ key: `restore-${entry.id}-${first}` })).toBeTruthy()
-  await ui.unmount()
-})
-
-test("a fold inside the engine's own compaction brings its history in by a rebuild once the reply ends", async ($, on) => {
-  const messages = talk(40)
-  const files = seed(messages, 'auto')
-  const { clock, requested, toasts } = await openChat($, on, files, messages)
-  await reply.start($)
-  // The engine compacts at its threshold in the middle of a reply; in Automatic, Folio folds.
-  const folded = (await $.session.compact({ trigger: 'auto', messages } as never)) as { messages: SessionMessage[] }
-  expect(folded.messages[0]!.text).toBe(FOLD_LINE)
-  // The reply goes on with the context blocks it began with; the rebuild waits
-  // for its end, and says nothing: the person didn't ask for it.
-  await clock.advance(1000)
-  expect(requested).toEqual([])
-  expect(toasts).not.toContain('Folio updates the chat after this reply.')
-  await reply.end($)
-  await clock.advance(2000)
-  expect(requested.map(r => r.instructions)).toEqual([REBUILD_ASK])
-  expect(toasts).not.toContain('Folio updates the chat after this reply.')
-  expect(await historyNow($)).toContain(lineOf(saved(files).chunks.find(c => c.status === 'folded')!))
-})
-
-test('a reply that ends right after a fold inside it still gets exactly one rebuild', async ($, on) => {
-  const messages = talk(40)
-  const files = seed(messages, 'auto')
-  const { clock, requested, toasts } = await openChat($, on, files, messages)
-  await reply.start($)
-  await $.session.compact({ trigger: 'auto', messages } as never)
-  // The reply ends before any time has passed.
-  await reply.end($)
-  await clock.advance(2000)
-  expect(requested.map(r => r.instructions)).toEqual([REBUILD_ASK])
-  // Time going by brings no second one.
-  await clock.advance(5000)
-  expect(requested.map(r => r.instructions)).toEqual([REBUILD_ASK])
-  expect(toasts).not.toContain('Folio updates the chat after this reply.')
-})
-
-test("with no reply running, a fold inside the engine's own compaction rebuilds at once, and once", async ($, on) => {
-  const messages = talk(40)
-  const files = seed(messages, 'auto')
-  const { clock, requested, toasts } = await openChat($, on, files, messages)
-  await $.session.compact({ trigger: 'auto', messages } as never)
-  await clock.advance(100)
-  expect(requested.map(r => r.instructions)).toEqual([REBUILD_ASK])
-  await clock.advance(5000)
-  expect(requested.map(r => r.instructions)).toEqual([REBUILD_ASK])
-  expect(toasts).not.toContain('Folio updates the chat after this reply.')
-})
-
-test('right after a compaction, until the next reply, the meter counts the history the next request brings back', async ($, on) => {
-  const parts = Array.from({ length: 30 }, (_, i) => ({ id: `p${i}`, order: i, title: `Part ${i}`, topic: `topic ${i}`, summary: `${'s'.repeat(4000)} ${i}`, tokens: 20_000, isSummarised: true, status: 'folded' }))
-  const messages = talk(4)
-  // The engine's numbers: its estimate until a reply comes, then the reply's own size.
-  let tokens: number | undefined
-  on('session.usage', () => ({ value: { context: { tokens, window: 1_000_000, breakdown: { totalTokens: 200_000, categories: [{ name: 'System prompt', tokens: 10_000 }], mcpTools: [], isAutoCompactEnabled: false } } } as never }))
-  const { clock } = await openChat($, on, savedView({ chunks: parts }), messages)
-  const ui = await mountPanel($)
-  const shows = async (n: number) => Boolean(await ui.find({ type: 'Text', text: `${shortTokens(n)} of 1M` }))
-  expect(await shows(200_000)).toBe(true)
-  // Claude Code's own compaction: the chat holds no copy of the history until the next request.
-  await $.session.compact({ instructions: 'Keep the plan', messages } as never)
-  await clock.advance(1000)
-  const due = textTokens(await historyNow($))
-  expect(due).toBeGreaterThan(20_000)
-  expect(await shows(200_000 + due)).toBe(true)
-  // A reply: its own size stands, with the history in it.
-  tokens = 240_000
-  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1' })
-  await clock.advance(1000)
-  expect(await shows(240_000)).toBe(true)
-  await ui.unmount()
+  savedView({ ...index, chunks: index.chunks.map((c, i) => (i === 2 ? { ...c, isSummarised: false } : c)) }, files)
+  const { clock } = await openChat($, on, files, messages, new Promise<void>(() => {}))
+  let isFolded = false
+  const fold = $.session.compact({ instructions: FOLD_ASK, messages } as never).then(() => (isFolded = true))
+  await clock.advance(4 * 60_000)
+  expect(isFolded).toBe(false)
+  await clock.advance(60_000 + 1000)
+  await fold
+  const after = saved(files)
+  expect(after.folds).toBe(1)
+  expect(after.chunks[2]!.status).not.toBe('folded')
 })

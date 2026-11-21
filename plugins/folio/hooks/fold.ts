@@ -3,12 +3,13 @@
 
 import type { EngineInterface, SessionMessage } from 'claude-code'
 
-import type { ChunkRecord, Join, PickerView } from '../types'
-import { FOLD_MARK, TIDY_MARK, TRIM_MARK, chunksOf, estimateTokens, shortTokens, splitChunks, textTokens } from './chunks'
-import { briefLists, hasHistory, joinKey, openSides, openTasksOf, joinRuns, liveJoins, sidesSaving, summaryTokens } from './measure'
-import type { BriefLists } from './measure'
-import { readOriginal, settingsOf } from './store'
-import { joinSummaries } from './summarize'
+import type { ChunkRecord, PickerView } from '../types'
+import { FOLD_LINE, chunksOf, isInChat, splitChunks, withLine } from './chunks'
+import type { SavedPart } from './chunks'
+import { compactPoint, hasHistory, ratioOf, realOf, summaryTokens } from './measure'
+import { reveal } from './private'
+import { privateVault, readOriginal, settingsOf } from './store'
+import { bigResultsOf, hasInputNote, isStripNote, mapStrings, resultNote, stripInput, stripSaving } from './strip'
 
 // The tool this mod gives Claude, as the model sees it.
 export const RECALL_TOOL = 'mcp__folio__recall'
@@ -16,83 +17,139 @@ export const RECALL_TOOL = 'mcp__folio__recall'
 // How Claude names this mod, in what only Claude reads (tool descriptions and
 // the folded history), never in the panel or a reply.
 export const NAME_NOTE =
-  'Call this mod plain "Folio", with no "the", the same way every time ("Folio\'s panel", "open Folio", "Folio folded three chunks"). If the person says the compaction panel, the context panel, the side panel or the ring, they mean Folio: answer with "Folio" and don\'t remark on the wording.'
+  'Call this mod plain "Folio", with no "the", the same way every time ("Folio\'s panel", "open Folio", "Folio folded three parts"). If the person says the compaction panel, the context panel, the side panel or the ring, they mean Folio: answer with "Folio" and don\'t remark on the wording.'
 
-// A tool result longer than this is trimmed to a one-line note once its chunk
-// is past the newest work; a recall result always is.
-const TRIM_CHARS = 1500
+// How to ask for another chat's history, and how to answer another chat's
+// ask (section 7): Folio never reads another chat's store. Said in recall's
+// description and the map's recall lines.
+export const OTHER_CHATS =
+  "Another chat's history is not here: to get something from it, ask that chat with a message to its session (SendMessage). When another chat asks you for something from this chat's history, recall it here and send the answer back to that chat."
 
+// A part a strip would shrink by less than this share is stripped as it
+// stands: there is nothing for a strip to take, so it may fold at once.
+const STRIPPED_AS_IT_STANDS = 0.1
 
-// What a trimmed tool result still costs: the note left in its place.
-const TRIM_NOTE_TOKENS = 40
-
-type FoldPlan = {
+// What a fold does. `trimIds`: the parts it strips (the stripped stage took
+// the place of the old trims; a stripped part's status is still "trimmed").
+export type FoldPlan = {
   trimIds: string[]
   foldIds: string[]
-  // Side messages to tidy, by chunk: their numbers in the chunk.
-  tidy: Record<string, number[]>
-  // Tokens the plan takes out of the context, by trims, folds and tidies.
+  // Tokens the plan takes out of the context, by strips and folds, in Folio's
+  // estimate (freedOf gives the real total).
   trimSaves: number
   foldSaves: number
-  tidySaves: number
 }
 
 export function noPlan(): FoldPlan {
-  return { trimIds: [], foldIds: [], tidy: {}, trimSaves: 0, foldSaves: 0, tidySaves: 0 }
+  return { trimIds: [], foldIds: [], trimSaves: 0, foldSaves: 0 }
 }
 
 export function chunksIn(messages: readonly SessionMessage[], v: PickerView) {
-  return chunksOf(splitChunks(messages, v.chunks))
+  return chunksOf(splitChunks(messages, v.chunks, ratioOf(v)))
 }
 
-function bigResults(m: SessionMessage, tools: Map<string, string>) {
-  return (m.toolResults ?? []).filter(
-    r => !r.text.startsWith(TRIM_MARK) && (r.text.length > TRIM_CHARS || tools.get(r.tool_use_id) === RECALL_TOOL),
-  )
-}
+const isRecallTool = (tool: string) => tool === RECALL_TOOL
 
 function toolNames(messages: readonly SessionMessage[]): Map<string, string> {
   return new Map(messages.flatMap(m => m.toolUses.map(u => [u.tool_use_id, u.tool] as [string, string])))
 }
 
-// The chunks holding the newest work, which always stays word for word.
+// The chunks holding the newest work, which always stays word for word: the
+// newest chunk (the open turn is in it), then whole chunks before it while
+// they fit in about `keepRecent` real tokens. A big older chunk that reaches
+// past that can fold, and so can a stripped one: it is no longer word for
+// word, so the newest work ends there, however small it now is.
 export function protectedIds(messages: readonly SessionMessage[], v: PickerView): Set<string> {
-  const keepRecent = settingsOf(v).keepRecent
+  const keepRecent = settingsOf(v).keepRecent / ratioOf(v)
+  const records = new Map(v.chunks.map(c => [c.id, c]))
   let recent = 0
   const out = new Set<string>()
-  // Whole chunks that fit in the newest `keepRecent` tokens; the newest chunk
-  // always. A big older chunk that reaches past the window can fold.
   for (const slice of [...chunksIn(messages, v)].reverse()) {
-    if (out.size >= 1 && recent + slice.tokens > keepRecent) break
+    if (out.size >= 1 && (recent + slice.tokens > keepRecent || records.get(slice.id)?.status === 'trimmed')) break
+    if (out.size >= 1) recent += slice.tokens
     out.add(slice.id)
-    recent += slice.tokens
   }
 
   return out
 }
 
-// What to trim, tidy and fold to bring the work from `work` tokens down to the
-// strategy's target: old tool output first, then the oldest summarised chunks.
-// Chunks the person asked to summarise fold whatever the size. The newest work
-// stays word for word, and so does every chunk the person chose to keep.
-export function planFold(messages: readonly SessionMessage[], v: PickerView, work: number): FoldPlan {
-  const settings = settingsOf(v)
+// What a plan frees, in real tokens.
+export function freedOf(v: Pick<PickerView, 'real'>, plan: FoldPlan): number {
+  return realOf(v, plan.foldSaves + plan.trimSaves)
+}
+
+export function hasWork(plan: FoldPlan): boolean {
+  return plan.foldIds.length > 0 || plan.trimIds.length > 0
+}
+
+// The parts asked to summarise (Summarise it) that a fold may still take:
+// in the chat and not kept. One kept again, taken by Claude Code's own
+// compaction, folded already or gone is let go, so Automatic doesn't ask for
+// a fold after every turn for it. One in the newest work, or not summarised
+// yet, waits for a later fold.
+export function stillAsked(v: Pick<PickerView, 'chunks' | 'foldAsked'>): string[] {
+  return v.foldAsked.filter(id => {
+    const c = v.chunks.find(x => x.id === id)
+
+    return c !== undefined && isInChat(c) && c.decision !== 'keep'
+  })
+}
+
+// How a fold may plan: `isPersonFold`, the person's own Fold now, which may
+// take a part from word for word to folded at once (F8); `held`, parts held
+// back from this fold (Claude's fold note), neither stripped nor folded.
+type PlanOptions = { isPersonFold?: boolean; held?: ReadonlySet<string> }
+
+// What to fold and strip to bring the whole context, `context` real
+// tokens, down to `to` (the floor unless given), in the order of 3.2: side
+// turns first, with any fold (a whole turn off the work; it leaves no line in
+// the map); then the oldest live parts are stripped; then the oldest stripped
+// parts fold. When the map is over its budget, the oldest tasks' parts
+// collapse there (map.ts). A part is stripped before it folds (F8): one
+// stripped in this fold folds in a later one, unless a strip would take
+// almost nothing from it, the person marked it fine to fold or asked to
+// summarise it (those fold whatever the size), or this is the person's own
+// Fold now. The newest work stays word for word, and so does every part the
+// person chose to keep (F10); a side turn folds unless it is the newest
+// chunk, where the open turn is.
+export function planFold(messages: readonly SessionMessage[], v: PickerView, context: number, to = settingsOf(v).floor, o: PlanOptions = {}): FoldPlan {
   const slices = chunksIn(messages, v)
   const records = new Map(v.chunks.map(c => [c.id, c]))
   const tools = toolNames(messages)
   const plan = noPlan()
   const isProtected = protectedIds(messages, v)
-  let excess = work - settings.target
+  const held = o.held ?? new Set<string>()
+  // What has to go, on the scale of Folio's own estimates.
+  let excess = (context - to) / ratioOf(v)
   const trimSaves = new Map<string, number>()
+  // What a strip would take from each part, worked out once.
+  const could = new Map<string, number>()
+  const stripOf = (slice: (typeof slices)[number], record: ChunkRecord): number => {
+    if (!could.has(slice.id)) {
+      const part = partNo(record)
+      could.set(slice.id, messages.slice(slice.start, slice.end).reduce((sum, m) => sum + stripSaving(m, part, tools, isRecallTool), 0))
+    }
 
+    return could.get(slice.id)!
+  }
+
+  if (excess > 0 || v.foldAsked.length > 0) {
+    for (const slice of slices.slice(0, -1)) {
+      const record = records.get(slice.id)
+      if (record?.isSide !== true || !record.isSummarised || record.decision === 'keep' || held.has(slice.id)) continue
+      plan.foldIds.push(slice.id)
+      plan.foldSaves += slice.tokens
+      excess -= slice.tokens
+    }
+  }
+  // The oldest live parts are stripped first: their big tool inputs and
+  // results become one-line notes; a part stripped before, by an older trim
+  // that took only results, has its big inputs stripped too.
   for (const slice of slices) {
     const record = records.get(slice.id)
-    if (isProtected.has(slice.id) || record?.decision === 'keep') continue
+    if (record === undefined || isProtected.has(slice.id) || record.decision === 'keep' || held.has(slice.id) || plan.foldIds.includes(slice.id)) continue
     if (excess > 0) {
-      let saves = 0
-      for (const m of messages.slice(slice.start, slice.end)) {
-        for (const r of bigResults(m, tools)) saves += textTokens(r.text) - TRIM_NOTE_TOKENS
-      }
+      const saves = stripOf(slice, record)
       if (saves > 0) {
         trimSaves.set(slice.id, saves)
         plan.trimIds.push(slice.id)
@@ -100,20 +157,16 @@ export function planFold(messages: readonly SessionMessage[], v: PickerView, wor
         excess -= saves
       }
     }
-    // Side talk goes with any fold, from the chunks that stay in the chat.
-    const side = record ? openSides(record) : []
-    if (side.length > 0) {
-      plan.tidy[slice.id] = side.map(s => s.n)
-      plan.tidySaves += sidesSaving(side)
-    }
   }
   for (const slice of slices) {
     const record = records.get(slice.id)
     const isAsked = v.foldAsked.includes(slice.id)
     if (excess <= 0 && !isAsked) continue
-    // A chunk with exact details folds too: recall's exact mode returns them.
-    if (isProtected.has(slice.id) || !record?.isSummarised || record.decision === 'keep') continue
-    // A chunk already trimmed saves only what its trim left; its trim then
+    if (isProtected.has(slice.id) || !record?.isSummarised || record.decision === 'keep' || held.has(slice.id) || plan.foldIds.includes(slice.id)) continue
+    // Stripped before it folds (F8), unless the person said otherwise.
+    const isStripped = record.status === 'trimmed' || stripOf(slice, record) < slice.tokens * STRIPPED_AS_IT_STANDS
+    if (!isStripped && !isAsked && record.decision !== 'fold' && o.isPersonFold !== true) continue
+    // A chunk stripped now saves only what its strip left; its strip then
     // counts as part of the fold.
     const trimmed = trimSaves.get(slice.id) ?? 0
     const saves = slice.tokens - trimmed - summaryTokens(record)
@@ -121,31 +174,32 @@ export function planFold(messages: readonly SessionMessage[], v: PickerView, wor
     plan.foldSaves += saves + trimmed
     plan.trimSaves -= trimmed
     plan.trimIds = plan.trimIds.filter(id => id !== slice.id)
-    const tidied = plan.tidy[slice.id]
-    if (tidied) {
-      plan.tidySaves -= sidesSaving(record.side.filter(s => tidied.includes(s.n)))
-      delete plan.tidy[slice.id]
-    }
     excess -= saves
   }
 
   return plan
 }
 
-function joinBrief(lists: BriefLists, openTasks: string[]): string {
-  const sections: Array<[string, string[]]> = [
-    ['Rules', lists.rules],
-    ['Decisions', lists.decisions],
-    ['Terms', lists.terms],
-    ['Files', lists.files],
-  ]
-  const lines: string[] = []
-  for (const [label, items] of sections) {
-    if (items.length > 0) lines.push(`${label}:\n${items.map(i => `- ${i}`).join('\n')}`)
-  }
-  if (openTasks.length > 0) lines.push(`Open tasks:\n${openTasks.map(i => `- ${i}`).join('\n')}`)
+// A fold rewrites everything it keeps into the prompt cache, so a warm one
+// (the cache still holds the chat) must free at least this share of what it
+// keeps, and not come within FOLD_GAP requests of the last fold.
+const PAY_SHARE = 1 / 3
+export const FOLD_GAP = 30
+// This close to the point Claude Code compacts by itself, a fold runs anyway.
+const NEAR_LIMIT = 50_000
 
-  return lines.join('\n')
+// Why a warm fold at the ceiling should wait, or null when it pays. The
+// person's own Fold now, a cold fold and an answer to Claude Code's own
+// compaction never wait.
+export function waitReason(v: PickerView, plan: FoldPlan, context: number): { code: 'gap' | 'pay-back'; freed: number; kept: number; since: number | null } | null {
+  const freed = freedOf(v, plan)
+  const kept = Math.max(0, context - freed)
+  const since = v.real.lastFold === null ? null : v.real.requests - v.real.lastFold
+  if (context >= compactPoint(v.context) - NEAR_LIMIT) return null
+  if (since !== null && since < FOLD_GAP) return { code: 'gap', freed, kept, since }
+  if (freed < kept * PAY_SHARE) return { code: 'pay-back', freed, kept, since }
+
+  return null
 }
 
 // Each chunk's number: its place in the chat, 1 the oldest. It never changes,
@@ -188,6 +242,29 @@ export function outlineText(c: ChunkRecord): string {
   return [head, ...outlineLines(c.sections)].join('\n')
 }
 
+// Part numbers as runs: "19–26, 31". A run goes on over the numbers between
+// two of them only where `isBridged` says so for each; by default it breaks
+// at every gap.
+export function runs(nums: readonly number[], isBridged: (n: number) => boolean = () => false): string {
+  const sorted = [...new Set(nums)].sort((a, b) => a - b)
+  if (sorted.length === 0) return ''
+  const out: Array<[number, number]> = []
+  let [start, end] = [sorted[0]!, sorted[0]!]
+  for (const n of sorted.slice(1)) {
+    let isOn = true
+    for (let k = end + 1; k < n && isOn; k++) isOn = isBridged(k)
+    if (isOn) {
+      end = n
+      continue
+    }
+    out.push([start, end])
+    ;[start, end] = [n, n]
+  }
+  out.push([start, end])
+
+  return out.map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`)).join(', ')
+}
+
 // The part numbers of these chunks, lowest first; an id with no chunk is left out.
 export function partNos(chunks: readonly ChunkRecord[], ids: readonly string[]): number[] {
   return ids
@@ -197,129 +274,49 @@ export function partNos(chunks: readonly ChunkRecord[], ids: readonly string[]):
     .sort((a, b) => a - b)
 }
 
-// A join's numbers: the range of the parts it stands for, as "31–33".
-export function joinNo(j: Join, chunks: readonly ChunkRecord[]): string {
-  const nums = partNos(chunks, j.ids)
-  if (nums.length === 0) return '?'
-
-  return nums.length === 1 ? String(nums[0]) : `${Math.min(...nums)}–${Math.max(...nums)}`
-}
-
-// One summary standing for neighbouring folded chunks, as Claude reads it,
-// numbered by the range of parts it covers.
-function joinText(j: Join, chunks: readonly ChunkRecord[]): string {
-  const head = `${joinNo(j, chunks)}. ${j.title} [${j.ids.join(', ')}] (${j.topic}): ${j.summary}`
-  if (j.sections.length === 0) return head
-
-  return [head, ...outlineLines(j.sections)].join('\n')
-}
-
-// The joins the history block will use: each run of neighbouring folded
-// chunks on one topic keeps its join while its summaries are the same, and
-// gets a new one from Haiku otherwise. A join that wouldn't save anything, or
-// that Haiku doesn't answer, leaves the run as separate summaries.
-export async function joinFolded($: EngineInterface, v: PickerView): Promise<Join[]> {
-  const known = new Map(v.joins.map(j => [j.key, j]))
-  const made = await Promise.all(
-    joinRuns(v.chunks).map(async run => {
-      const key = joinKey(run)
-      const had = known.get(key)
-      if (had) return had
-      const joined = await joinSummaries($, run.map(c => ({ id: c.id, text: outlineText(c) })))
-      if (joined === null || joined.summary === '') return null
-      const saves = run.reduce((sum, c) => sum + summaryTokens(c), 0) - summaryTokens(joined)
-      if (saves <= 0) return null
-
-      return { ids: run.map(c => c.id), key, topic: run[0]!.topic, ...joined, saves }
-    }),
-  )
-
-  return made.filter((j): j is Join => j !== null)
-}
-
-// The context block that carries the folded history, beside the recall line's
-// own ('folio'): one context holds each name once. The engine sends every
-// plugin's blocks in one copy when the chat holds none, at its start and again
-// after each compaction, so the history reaches Claude without standing in the
-// chat as a message.
+// The context block that carries the folded history (the map, map.ts),
+// beside the recall line's own ('folio'): one context holds each name once.
+// The engine sends every plugin's blocks in one copy when the chat holds none,
+// at its start and again after each compaction, so the history reaches Claude
+// without standing in the chat as a message.
 export const HISTORY_BLOCK = 'folio-history'
 
-// The message a fold leaves in the chat: one line, starting with the mark the
-// next fold and the chunk names go by. The history itself is in the block.
-export const FOLD_LINE = `${FOLD_MARK} Earlier parts of this chat were folded by Folio; Claude has their history, and recall brings any of them back.`
-
-// The history that stands for every folded chunk, as Claude reads it in
-// HISTORY_BLOCK: the brief kept from all of them, what recall brought back,
-// then each chunk's summary in order (a restored chunk word for word), and how
-// to get the originals back.
-export async function historyBlock($: EngineInterface, v: PickerView): Promise<string | null> {
-  if (!hasHistory(v)) return null
-  const folded = v.chunks.filter(c => c.status === 'folded').sort((a, b) => a.order - b.order)
-  const parts = [
-    `${FOLD_MARK}`,
-    `Earlier parts of this chat were folded by Folio to keep the context small. Their originals are kept; call the recall tool (${RECALL_TOOL}) with what you need, and it searches them for you. Ask with exact: true for wording, code, numbers or paths. Parts are numbered in chat order (1 is the oldest, a higher number came later), their sections lettered and points numbered: a query of just "32.B" returns section B of part 32 word for word, "31–33" parts 31 to 33, and "32.B2" point 2 of that section with the section. Where parts disagree, the higher number is the current state. ${NAME_NOTE}`,
-  ]
-  const brief = joinBrief(briefLists(v, folded), openTasksOf(v))
-  if (brief !== '') parts.push(`The brief kept from the folded parts:\n${brief}`)
-  // Each fact names the parts it came from, so a higher part that disagrees still wins.
-  const facts = v.pinned.filter(p => p.kind === 'fact')
-  const from = (ids: string[]) => (n => (n.length === 0 ? '' : ` (part${n.length === 1 ? '' : 's'} ${n.join(', ')})`))(partNos(v.chunks, ids))
-  if (facts.length > 0) parts.push(`Pinned facts (looked up often):\n${facts.map(p => `- ${p.text}${from(p.chunkIds)}`).join('\n')}`)
-  const passages = v.pinned.filter(p => p.kind === 'passage')
-  if (passages.length > 0) {
-    const nums = (ids: string[]) => partNos(v.chunks, ids).map(n => `part ${n}`).join(', ')
-    parts.push(`Brought back word for word (recalled often):\n${passages.map(p => `[${nums(p.chunkIds) || p.chunkIds.join(', ')}]\n${p.text}`).join('\n\n')}`)
-  }
-  const lines: string[] = []
-  const joins = liveJoins(v)
-  for (const c of folded) {
-    const join = joins.find(j => j.ids.includes(c.id))
-    if (join) {
-      if (join.ids[0] === c.id) lines.push(joinText(join, v.chunks))
-      continue
-    }
-    if (c.decision === 'keep') {
-      const original = await readOriginal($, c.id)
-      lines.push(`${partNo(c)}. ${c.title} [${c.id}], restored word for word:\n${original?.text ?? c.summary}`)
-    } else {
-      lines.push(outlineText(c))
-    }
-  }
-  parts.push(`Folded parts, oldest first:\n${lines.join('\n')}`)
-
-  return parts.join('\n\n')
+// The fold's new chat, and the inputs and results it stripped, whole (for
+// Undo), by part.
+type Built = {
+  messages: SessionMessage[]
+  strippedInputs: Array<{ chunkId: string; id: string; input: Record<string, unknown> }>
+  strippedResults: Array<{ chunkId: string; id: string; text: string }>
 }
-
-function trimNote(tool: string, text: string): string {
-  const first = text.split('\n').find(l => l.trim() !== '') ?? ''
-
-  return `${TRIM_MARK} ${tool} result, about ${shortTokens(textTokens(text))} tokens. It began: "${first.slice(0, 160)}". Call ${RECALL_TOOL} with what you need from it.]`
-}
-
-function tidyNote(why: string): string {
-  return `${TIDY_MARK} (${why}). Its words are kept; ${RECALL_TOOL} returns them.]`
-}
-
-type Built = { messages: SessionMessage[]; tidiedRaw: Array<{ chunkId: string; n: number; text: string }> }
 
 // The conversation after a fold: the fold's one line (the history goes to
-// Claude in its context block), then every chunk not folded, with its old tool
-// output trimmed and its side talk tidied where the plan says. Messages the
-// fold leaves alone keep the engine's handle and stand exactly as they were; a
-// changed one is rebuilt with the same tool call ids, so every call keeps its
-// result. A restored chunk gets its tool output back, and a side message put
-// back gets its words back.
+// Claude in its context block), then every chunk not folded, stripped where
+// the plan says. A stripped part keeps every word the
+// person and Claude wrote; its big tool inputs keep their keys with their long
+// values replaced by a note, and its big results become a note, each naming
+// the part to recall. Messages the fold leaves alone keep the engine's handle
+// and stand exactly as they were; a changed one is rebuilt with the same tool
+// call ids, so every call keeps its result. A restored chunk gets its tool
+// inputs and output back. A side message an older Folio tidied stays as its note.
+// The chat is cut into parts as the plan was made, from `saved` (the parts
+// before this fold changed them), so a part folded now is the same stretch the
+// plan took.
 export async function buildFolded(
   $: EngineInterface,
   messages: readonly SessionMessage[],
   v: PickerView,
   plan: FoldPlan,
+  saved: readonly SavedPart[] = v.chunks,
 ): Promise<Built> {
-  const pieces = splitChunks(messages, v.chunks)
+  const pieces = splitChunks(messages, saved, ratioOf(v))
   const tools = toolNames(messages)
   const records = new Map(v.chunks.map(c => [c.id, c]))
   const out: SessionMessage[] = []
-  const tidiedRaw: Built['tidiedRaw'] = []
+  const strippedInputs: Built['strippedInputs'] = []
+  const strippedResults: Built['strippedResults'] = []
+  // Restored words go back as they were said: private values set apart in the
+  // original are put back, as recall does on this computer.
+  const vault = privateVault()
   if (hasHistory(v)) out.push({ role: 'user', text: FOLD_LINE, toolUses: [] })
 
   for (const piece of pieces) {
@@ -328,42 +325,50 @@ export async function buildFolded(
     if (piece.kind === 'folded') continue
     if (plan.foldIds.includes(piece.id)) continue
     const record = records.get(piece.id)
-    const isTrim = plan.trimIds.includes(piece.id)
-    const tidy = new Set([...(record?.tidied ?? []), ...(plan.tidy[piece.id] ?? [])])
+    const isStrip = plan.trimIds.includes(piece.id) && record !== undefined
+    const part = record === undefined ? 0 : partNo(record)
     const original = record ? await readOriginal($, piece.id) : null
     const isRestore = record?.decision === 'keep' && record.status === 'live'
-    messages.slice(piece.start, piece.end).forEach((m, n) => {
+    for (const m of messages.slice(piece.start, piece.end)) {
       const results = m.toolResults ?? []
-      const big = isTrim ? bigResults(m, tools) : []
-      const toRestore = isRestore && original ? results.filter(r => r.text.startsWith(TRIM_MARK) && original.toolResults[r.tool_use_id]) : []
-      const isTidied = m.text.startsWith(TIDY_MARK)
-      const side = record?.side.find(s => s.n === n)
-      let text = m.text
-      if (tidy.has(n) && !isTidied && side !== undefined) {
-        tidiedRaw.push({ chunkId: piece.id, n, text: m.text })
-        text = tidyNote(side.why)
-      } else if (isTidied && !tidy.has(n) && original?.tidiedRaw?.[String(n)] !== undefined) {
-        text = original.tidiedRaw[String(n)]!
-      }
-      if (big.length === 0 && toRestore.length === 0 && text === m.text) {
-        out.push(m)
-        return
+      const big = isStrip ? bigResultsOf(m, tools, isRecallTool) : []
+      for (const r of big) strippedResults.push({ chunkId: piece.id, id: r.tool_use_id, text: r.text })
+      const toRestore = isRestore && original ? results.filter(r => isStripNote(r.text) && original.toolResults[r.tool_use_id]) : []
+      // Each call's input: stripped, given back whole, or as it is.
+      const inputs = m.toolUses.map((u): Record<string, unknown> => {
+        const input = (u.input ?? {}) as Record<string, unknown>
+        const whole = original?.toolInputs?.[u.tool_use_id]
+        if (isRestore && whole !== undefined && hasInputNote(input)) return mapStrings(whole, s => reveal(s, vault))
+        if (!isStrip) return u.input
+        const stripped = stripInput(input, part).input
+        if (stripped !== input) strippedInputs.push({ chunkId: piece.id, id: u.tool_use_id, input })
+
+        return stripped
+      })
+      const isInputChanged = inputs.some((x, i) => x !== m.toolUses[i]!.input)
+      if (big.length === 0 && toRestore.length === 0 && !isInputChanged) {
+        // A prompt that came in one message with the history line goes back
+        // as that message, the line in it, as the engine has it.
+        out.push(withLine(m) ?? m)
+        continue
       }
       out.push({
         role: m.role,
-        text,
-        toolUses: m.toolUses.map(u => ({ tool_use_id: u.tool_use_id, tool: u.tool, input: u.input })),
+        text: m.text,
+        toolUses: m.toolUses.map((u, i) => ({ tool_use_id: u.tool_use_id, tool: u.tool, input: inputs[i]! })),
         toolResults: results.map(r => {
-          if (big.includes(r)) return { tool_use_id: r.tool_use_id, text: trimNote(tools.get(r.tool_use_id) ?? 'tool', r.text), isError: r.isError }
-          if (toRestore.includes(r)) return { tool_use_id: r.tool_use_id, text: original!.toolResults[r.tool_use_id]!, isError: r.isError }
+          if (big.includes(r)) return { tool_use_id: r.tool_use_id, text: resultNote(tools.get(r.tool_use_id) ?? 'tool', r.text, part), isError: r.isError }
+          if (toRestore.includes(r)) return { tool_use_id: r.tool_use_id, text: reveal(original!.toolResults[r.tool_use_id]!, vault), isError: r.isError }
 
           return { tool_use_id: r.tool_use_id, text: r.text, isError: r.isError }
         }),
       })
-    })
+    }
   }
+  // The line came back inside the first kept message: it needs no second one.
+  if (out[0]?.text === FOLD_LINE && out[1]?.text.startsWith(FOLD_LINE)) out.shift()
 
-  return { messages: out, tidiedRaw }
+  return { messages: out, strippedInputs, strippedResults }
 }
 
 // Every tool call in `messages` has its result after it, as the API requires.
@@ -375,8 +380,4 @@ export function isPaired(messages: readonly SessionMessage[]): boolean {
   }
 
   return open.size === 0 || (messages.at(-1)?.role === 'assistant' && [...open].every(id => messages.at(-1)!.toolUses.some(u => u.tool_use_id === id)))
-}
-
-export function estimateAll(messages: readonly SessionMessage[]): number {
-  return messages.reduce((sum, m) => sum + estimateTokens(m), 0)
 }

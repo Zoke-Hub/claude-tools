@@ -4,16 +4,22 @@
 import type { EngineInterface, SessionMessage } from 'claude-code'
 
 import { textTokens } from './chunks'
+import { logEvent } from './debug'
 import { RECALL_TOOL } from './fold'
+import { realOf } from './measure'
 import { redact } from './private'
+import { isFileRead } from './shell'
 import { change, privateVault, readOutput, savePrivate, writeOutput } from './store'
 
 // A shell command's output this long reaches Claude as its start, its end and a
 // note; the whole is saved, and recall gives back any of it word for word.
 // Claude Code itself moves an output past about 30,000 characters into a file,
 // so this covers the stretch below that. Only the shell's: a file Claude reads
-// is read to be edited, and a page or a skill's notes to be read whole.
-export const SHORTEN_FROM = 8000
+// is read to be edited, and a page or a skill's notes to be read whole. For the
+// same reason a shell command that only prints files (cat, sed -n, grep over
+// named files) stays whole, and so does every output inside a subagent, which
+// reads it once and hands back what it found.
+export const SHORTEN_FROM = 20_000
 const HEAD_CHARS = 3000
 const TAIL_CHARS = 1500
 const SHORTENED_TOOLS = new Set(['Bash'])
@@ -58,6 +64,17 @@ export function shorten(text: string, id: string): string | null {
   return [...lines.slice(0, head), `${NOTE_START}${id}): ${left} are saved word for word. To read them, ${ask(id, `lines ${head + 1}-${tail}`)}]`, ...lines.slice(tail)].join('\n')
 }
 
+// The shell commands Claude ran, by call id, so an output can be matched to
+// what printed it. The newest few hundred are kept.
+const commands = new Map<string, string>()
+const COMMANDS_KEPT = 300
+
+export function noteCommand(id: string | undefined, command: unknown) {
+  if (id === undefined || typeof command !== 'string') return
+  commands.set(id, command)
+  if (commands.size > COMMANDS_KEPT) commands.delete(commands.keys().next().value!)
+}
+
 type Block = { type: string; tool_use_id?: string; content?: unknown; text?: string }
 
 // A tool_result's text, or null when it holds anything but text (an image).
@@ -70,8 +87,8 @@ function resultText(block: Block): string | null {
 }
 
 // A shell output on its way into the chat, shortened once it is saved whole.
-export async function shortenRow<E extends { origin: { kind: string; tool?: string }; message: { content: unknown[] } }>($: EngineInterface, e: E): Promise<E> {
-  if (e.origin.kind !== 'tool' || !SHORTENED_TOOLS.has(e.origin.tool ?? '')) return e
+export async function shortenRow<E extends { origin: { kind: string; tool?: string }; message: { content: unknown[] }; agentId?: string }>($: EngineInterface, e: E): Promise<E> {
+  if (e.origin.kind !== 'tool' || !SHORTENED_TOOLS.has(e.origin.tool ?? '') || e.agentId !== undefined) return e
   let saved = 0
   let isShortened = false
   const content: unknown[] = []
@@ -79,8 +96,10 @@ export async function shortenRow<E extends { origin: { kind: string; tool?: stri
     const block = raw as Block
     const text = block.type === 'tool_result' && block.tool_use_id !== undefined ? resultText(block) : null
     const id = outputId(block.tool_use_id ?? '')
+    const command = commands.get(block.tool_use_id ?? '')
     // Claude Code's own stand-in for an output it moved into a file stays as it is.
-    const short = text === null || text.includes('<persisted-output>') || text.includes(NOTE_START) ? null : shorten(text, id)
+    const isWhole = text === null || text.includes('<persisted-output>') || text.includes(NOTE_START) || (command !== undefined && isFileRead(command))
+    const short = isWhole ? null : shorten(text, id)
     if (short === null) {
       content.push(raw)
       continue
@@ -91,10 +110,11 @@ export async function shortenRow<E extends { origin: { kind: string; tool?: stri
     if (Object.keys(vault).length !== size) await savePrivate($)
     saved += Math.max(0, textTokens(text!) - textTokens(short))
     isShortened = true
+    void logEvent($, 'shorten', { id, chars: text!.length, shown: short.length })
     content.push({ ...block, content: typeof block.content === 'string' ? short : [{ type: 'text', text: short }] })
   }
   if (!isShortened) return e
-  await change($, v => ({ ...v, savedTokens: v.savedTokens + saved }))
+  await change($, v => ({ ...v, savedTokens: v.savedTokens + realOf(v, saved) }))
 
   return { ...e, message: { ...e.message, content } }
 }
@@ -124,6 +144,21 @@ export async function wholeOutputs($: EngineInterface, messages: SessionMessage[
 }
 
 const OUTPUT_QUERY = /^\s*output\s+([0-9a-f]{8})(?:\s+(lines?|characters?)\s+(\d+)\s*[–-]\s*(\d+))?(?:\s*:\s*(.+?))?\s*$/i
+
+// Whether a recall asks for a shortened output.
+export function isOutputQuery(query: string): boolean {
+  return OUTPUT_QUERY.test(query)
+}
+
+// An output recall as Recent activity names it: "output 5b7de274, lines 67–157".
+export function outputLabel(query: string): string {
+  const m = OUTPUT_QUERY.exec(query)
+  if (m === null) return query.trim()
+  const stretch = m[2] === undefined ? '' : `, ${m[2].toLowerCase().startsWith('char') ? 'characters' : 'lines'} ${m[3]}–${m[4]}`
+
+  return `output ${m[1]!.toLowerCase()}${stretch}${m[5] === undefined ? '' : `: ${m[5]}`}`
+}
+
 // The most one answer gives back, as a part by number does.
 const OUTPUT_CHARS = 16_000
 const MATCH_LINES = 60
@@ -135,6 +170,9 @@ export async function byOutput($: EngineInterface, query: string): Promise<strin
   if (m === null) return null
   const id = m[1]!.toLowerCase()
   const text = await readOutput($, id)
+  // Each read-back is logged by the output's id, so the log shows which shortened outputs were wanted again.
+  const how = m[5] !== undefined ? 'words' : m[2] !== undefined ? (m[2].toLowerCase().startsWith('char') ? 'characters' : 'lines') : 'all'
+  void logEvent($, 'output-read', { id, how, found: text !== null, chars: text?.length ?? 0 })
   if (text === null) return `No shortened output ${id} is saved for this chat.`
   const lines = text.split('\n')
   const numbered = (from: number, to: number) => lines.slice(from - 1, to).map((l, i) => `${from + i}: ${l}`).join('\n')

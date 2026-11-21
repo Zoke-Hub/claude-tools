@@ -22,8 +22,8 @@ export type BarPart = {
   tip: string | null
 }
 
-// A thin upright mark across the bar: the ceiling, or where a fold brings the
-// work back to.
+// A thin upright mark across the bar: the ceiling, or the floor, where a fold
+// brings the whole context back to.
 export type BarMark = { key: string; mark: true; wide?: boolean }
 
 
@@ -55,9 +55,11 @@ function capSvg(color: string, side: 'left' | 'right'): string {
 const LINE_BACK = '#191919'
 
 // One bar with its hover line. Parts and marks are drawn in the order given;
-// `right` sits at the line's right end (a button).
+// `right` sits at the line's right end (a button). `hasPictures`: the surface
+// draws pictures, so each part gets its rounded ends.
 export function drawBar(
   elements: ReturnType<EngineInterface['ui']['resolve']>,
+  hasPictures: boolean,
   name: string,
   parts: Array<BarPart | BarMark>,
   idle: RenderChildren,
@@ -65,6 +67,8 @@ export function drawBar(
   right?: RenderChildren,
 ): RenderChildren {
   const { Box, Text } = elements
+  // The caps' picture element (the `in` only tells the type checker it is there).
+  const Svg = hasPictures && 'Svg' in elements ? elements.Svg : null
   const shown = parts.filter((p): p is BarPart => !('mark' in p) && p.size > 0)
   // Each part's width as a whole percent of the bar (the panel takes no
   // fractions), the leftover given to the largest parts, so the widths add up
@@ -115,9 +119,9 @@ export function drawBar(
       // height has something to be a share of.
       <Box position={m || isLast ? 'relative' : undefined} alignItems="center" width={`${widthOf.get(p.key)}%`} flexShrink={0} height="100%" paddingLeft={m ? 'xs' : undefined} paddingRight={isLast ? undefined : 'xs'}>
         <Box flexDirection="row" flexGrow={1} minWidth={0} height={PART_HEIGHT}>
-          {'Svg' in elements ? <elements.Svg source={capSvg(p.color, 'left')} alt={(p.tip ?? p.key).split(' · ')[0]!} width={CAP_PX} height={PART_PX} /> : null}
+          {Svg !== null ? <Svg source={capSvg(p.color, 'left')} alt={(p.tip ?? p.key).split(' · ')[0]!} width={CAP_PX} height={PART_PX} /> : null}
           <Box flexGrow={1} minWidth={0} height="100%" backgroundColor={p.color} />
-          {'Svg' in elements ? <elements.Svg source={capSvg(p.color, 'right')} alt="end" width={CAP_PX} height={PART_PX} /> : null}
+          {Svg !== null ? <Svg source={capSvg(p.color, 'right')} alt="end" width={CAP_PX} height={PART_PX} /> : null}
         </Box>
         {m && mark(m, 'left')}
         {/* A mark after the last part sits at the bar's end. */}

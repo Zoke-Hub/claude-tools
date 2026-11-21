@@ -6,11 +6,11 @@ import { expect, test } from 'claude-code/testing'
 import type { FsEntry } from 'claude-code'
 
 import { packFolder, projectFolder } from '../hooks/pack'
-import { HOME, mountPanel, stubEngine, start } from './engine'
+import { HOME, openPanel, savedView, stubEngine, start } from './engine'
 import type { Engine, On } from './engine'
 
-// The panel wide enough for FolioPack's rows.
-const panel = ($: Engine) => mountPanel($, { columns: 110, rows: 60 })
+// The panel as the app opens it, wide enough for FolioPack's rows.
+const panel = ($: Engine) => openPanel($, { columns: 110, rows: 60 })
 
 // A project of three folders, each holding two folders of files.
 const entry = (name: string, kind: FsEntry['kind'], size = 0): FsEntry => ({ name, kind, size, mtimeMs: 0, isLink: false })
@@ -25,10 +25,12 @@ test('FolioPack hides the boxes below the top two, and opens one row at a time',
   stubEngine(on, { tree, exists: () => false })
   await start($)
   const ui = await panel($)
-  expect(await ui.find({ type: 'Text', text: /Worth a look/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Recent activity/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'Tasks · newest first' })).toBeTruthy()
   await ui.press({ key: 'folio-pack' })
-  // While packing, only the two top boxes stay above FolioPack.
-  expect(await ui.find({ type: 'Text', text: /Worth a look/ })).toBeFalsy()
+  // While packing, only the two top boxes stay above FolioPack, the tasks left out.
+  expect(await ui.find({ type: 'Text', text: /Recent activity/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: 'Tasks · newest first' })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: 'Chat, oldest → newest' })).toBeTruthy()
   await ui.press({ key: 'scope-project' })
   await ui.press({ key: 'name-folder:a' })
@@ -44,7 +46,7 @@ test('FolioPack hides the boxes below the top two, and opens one row at a time',
   expect(await ui.find({ type: 'Button', text: /^x · 1 +▸$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /^b · 2 +▸$/ })).toBeTruthy()
   await ui.press({ key: 'pack-close' })
-  expect(await ui.find({ type: 'Text', text: /Worth a look/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Recent activity/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -189,52 +191,112 @@ test('an emptied Name packs under the project folder\'s name', async ($, on) => 
   await ui.unmount()
 })
 
-test('a packing prompt sent together with another one still finishes the pack', async ($, on) => {
-  let isZipped = false
-  stubEngine(on, { tree, exists: path => path === HOME || (isZipped && path.endsWith('.zip')) })
-  const asks: string[] = []
-  on('prompt.submit', (_, e) => {
-    asks.push(e.text)
-    return { text: e.text }
-  })
+test("renders group under their animation, past a working folder like anim", async ($, on) => {
+  // Two animations keep renders in A##/anim/renders; one also has its own renders folder.
+  const video = (name: string) => entry(name, 'file', 100)
+  const renders: Record<string, FsEntry[]> = {
+    '/w': [entry('work', 'dir')],
+    '/w/work': [entry('segments', 'dir')],
+    '/w/work/segments': ['A16', 'A19', 'A21'].map(a => entry(a, 'dir')),
+    '/w/work/segments/A16': [entry('renders', 'dir'), entry('anim', 'dir')],
+    '/w/work/segments/A16/renders': [video('r01_preview.mp4')],
+    '/w/work/segments/A16/anim': [entry('renders', 'dir')],
+    '/w/work/segments/A16/anim/renders': [video('r02_preview.mp4')],
+    '/w/work/segments/A19': [entry('anim', 'dir'), video('A19.mp4')],
+    '/w/work/segments/A19/anim': [entry('renders', 'dir')],
+    '/w/work/segments/A19/anim/renders': [video('r01_preview.mp4'), video('r02_preview.mp4')],
+    '/w/work/segments/A21': [entry('anim', 'dir')],
+    '/w/work/segments/A21/anim': [entry('renders', 'dir')],
+    '/w/work/segments/A21/anim/renders': [video('r01_preview.mp4')],
+  }
+  stubEngine(on, { tree: renders, exists: () => false })
   await start($)
   const ui = await panel($)
   await ui.press({ key: 'folio-pack' })
-  await ui.press({ key: 'pack-up' })
-  // The app sends prompts queued while Claude replied as one.
-  await $.turn.start({ text: `and check the colours\n\n${asks[0]!}`, turnId: 'both' })
-  isZipped = true
-  await $.turn.complete({ reason: 'answer', answer: 'zipped', durationMs: 1000, isAborted: false, turnId: 'both' })
-  expect(await ui.find({ type: 'Button', text: 'Packed ✓' })).toBeTruthy()
+  await ui.press({ key: 'scope-project' })
+  expect(await ui.find({ type: 'Button', text: /^A16 · 2 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^A19 · 3 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^A21 · 1 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^anim · / })).toBeFalsy()
+  // A16's two places are rows of their own.
+  await ui.press({ key: 'name-renders:A16' })
+  expect(await ui.find({ type: 'Button', text: /^renders · 1 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^anim\/renders · 1 / })).toBeTruthy()
+  // A video directly in an animation's folder is a row of that animation.
+  await ui.press({ key: 'name-renders:A19' })
+  expect(await ui.find({ type: 'Button', text: /^Files directly in A19 · 1 / })).toBeTruthy()
   await ui.unmount()
 })
 
-test("a packing prompt that never runs lets Pack up come back by itself", async ($, on) => {
-  const { clock, toasts } = stubEngine(on, { tree, exists: path => path === HOME })
-  on('prompt.submit', (_, e) => ({ text: e.text }))
+test('a new session opens on a panel with nothing of the old chat left open', async ($, on) => {
+  const chunks = [0, 1].map(i => ({ id: `c${i}`, order: i, title: `Part ${i}`, topic: 'topic', summary: 'summary', tokens: 5000, isSummarised: true, status: 'live' }))
+  stubEngine(on, { tree, exists: () => false, files: savedView({ chunks }) })
+  on('session.end', () => ({ sessionId: 'test-session' }) as never)
   await start($)
-  const ui = await panel($)
+  let ui = await panel($)
+  await ui.press({ key: 'open-chunks' })
+  await ui.press({ key: 'task-T1' })
+  expect(await ui.find({ key: 'chunk-c1' })).toBeTruthy()
   await ui.press({ key: 'folio-pack' })
-  await ui.press({ key: 'pack-up' })
-  expect(await ui.find({ type: 'Button', text: 'Packing…' })).toBeTruthy()
-  // The prompt was dropped (Esc): no turn runs it.
-  await clock.advance(5 * 60_000)
   expect(await ui.find({ type: 'Button', text: 'Pack up' })).toBeTruthy()
-  expect(toasts).toContain("Claude didn't get to zipping the FolioPack. Press Pack up to try again.")
+  await ui.unmount()
+  // A /clear: the chat goes on as a new session, whose task ids start again.
+  await $.session.end({ reason: 'clear' } as never)
+  await start($)
+  ui = await panel($)
+  expect(await ui.find({ type: 'Button', text: 'Pack up' })).toBeFalsy()
+  expect(await ui.find({ key: 'folio-pack' })).toBeTruthy()
+  expect(await ui.find({ key: 'chunk-c1' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /^Browse all 1 task ▸$/ })).toBeTruthy()
   await ui.unmount()
 })
 
-test('two presses of Pack up before the panel redraws make one pack', async ($, on) => {
-  let packs = 0
-  stubEngine(on, { tree, exists: path => path === HOME })
-  on('prompt.submit', (_, e) => {
-    packs++
-    return { text: e.text }
-  })
+test('a session that ends while FolioPack looks through the project leaves the new one to look again', async ($, on) => {
+  // The scan asks the light model for categories; the answer waits for the gate.
+  let release = () => {}
+  const gate = new Promise<void>(done => (release = done))
+  const { clock } = stubEngine(on, { tree, exists: () => false, model: () => gate.then(() => null) })
+  on('session.end', () => ({ sessionId: 'test-session' }) as never)
   await start($)
-  const ui = await panel($)
+  let ui = await panel($)
   await ui.press({ key: 'folio-pack' })
-  await Promise.all([ui.press({ key: 'pack-up' }), ui.press({ key: 'pack-up' })])
-  expect(packs).toBe(1)
+  expect(await ui.find({ type: 'Text', text: 'Looking through the project…' })).toBeTruthy()
   await ui.unmount()
+  await $.session.end({ reason: 'clear' } as never)
+  await start($)
+  ui = await panel($)
+  // Opened in the new session while the old scan still runs, it waits on it.
+  await ui.press({ key: 'folio-pack' })
+  expect(await ui.find({ type: 'Text', text: 'Looking through the project…' })).toBeTruthy()
+  // The old scan ends and is dropped; FolioPack looks again, for this session.
+  release()
+  await clock.advance(1000)
+  expect(await ui.find({ type: 'Button', text: 'Pack up' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'Looking through the project…' })).toBeFalsy()
+  await ui.unmount()
+})
+
+test("FolioPack's ticks and zip lines: pictures where the surface draws them, text on the terminal", async ($, on) => {
+  stubEngine(on, { tree, exists: () => false })
+  await start($)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await openPanel($, { surface, columns: 110, rows: 60 })
+    await ui.press({ key: 'folio-pack' })
+    await ui.press({ key: 'scope-project' })
+    await ui.press({ key: 'name-folder:a' })
+    const pictures = (await ui.findAll({ type: 'Svg' })).map(p => String(p.props?.alt))
+    const ticks = (await ui.findAll({ type: 'Text', text: /^[☑⊟☐]$/ })).length
+    const zip = await ui.find({ type: 'Text', text: /^FolioPack - w - .*\.zip$/ })
+    expect(zip).toBeTruthy()
+    if (surface === 'terminal') {
+      expect(pictures).toEqual([])
+      expect(ticks).toBeGreaterThan(0)
+    } else {
+      expect(pictures.some(alt => /^(not ticked|ticked|partly ticked): a$/.test(alt))).toBe(true)
+      expect(pictures).toContain('zip')
+      expect(ticks).toBe(0)
+    }
+    await ui.press({ key: 'pack-close' })
+    await ui.unmount()
+  }
 })

@@ -4,7 +4,7 @@
 import type { ChunkRecord, PickerView } from '../types'
 import type { BarMark, BarPart } from './bars'
 import { isInChat, shortTokens } from './chunks'
-import { keptParts, tokensOf, workChunks, workTokens } from './measure'
+import { keptParts, realOf, tokensOf, workChunks, workTokens } from './measure'
 import { settingsOf } from './store'
 import { DIM, GREY, TICK } from './colors'
 
@@ -12,13 +12,60 @@ import { DIM, GREY, TICK } from './colors'
 // dark themes alike.
 export const WARN = '#c98a2b'
 export const FULL = '#6e8fc7'
-// The Custom slider's fill from 550k up: a lighter amber than the meter's WARN.
+// The meter's figure once the context is past the ceiling.
+export const OVER = '#e5534b'
+// The Custom slider's fill from 650k up (CUSTOM_HIGH in panel.tsx): a lighter amber than the meter's WARN.
 export const HIGH = '#e3b063'
 export const TRIMMED = '#a9bfe0'
 // Lighter than word for word's blue, so the two stay apart for colour-blind eyes too.
 export const KEPT = '#c09cf0'
 export const FIXED = GREY
 const FOLDED = '#b0b0b0'
+
+// What a surface draws. The engine hands every surface every element and
+// draws one the surface lacks as nothing, so `'Svg' in elements` is always
+// true: the surface decides. Pictures everywhere but the terminal (there the
+// panel's text stands in); the Custom slider on the desktop alone, where its
+// region and the pictures for its ends are drawn and were measured (− and +
+// everywhere else); typed fields on the four surfaces Folio knows. `inset`:
+// how far in from its edge the surface draws a plain button's words, in
+// pixels, so plain text can start on the same edge (6 on the desktop,
+// measured in the app; 0 where it is not known).
+const SURFACES = new Set(['terminal', 'desktop', 'mobile', 'vscode'])
+const BUTTON_INSET_PX = 6
+export function drawsOf(surface: string): { pictures: boolean; slider: boolean; input: boolean; inset: number } {
+  const isKnown = SURFACES.has(surface)
+
+  return { pictures: isKnown && surface !== 'terminal', slider: surface === 'desktop', input: isKnown, inset: surface === 'desktop' ? BUTTON_INSET_PX : 0 }
+}
+
+// An empty picture as wide as a plain button's inset, set before plain text
+// so its words start where a button's do.
+export function insetSvg(px: number): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${px}" height="1" viewBox="0 0 ${px} 1"><rect width="${px}" height="1" fill="#000" fill-opacity="0"/></svg>`
+}
+
+// The marks of Recent activity, drawn as small line icons where the surface
+// draws pictures, in the bars' grey so they read on either theme. The
+// terminal keeps the text marks. Each is 14 px, the size of the text beside it.
+const icon = (body: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="${GREY}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
+export const ACTIVITY_ICONS = {
+  // A fold: an arrow down into a corner.
+  fold: icon('<path d="M3.5 3.5l7.5 7.5"/><path d="M11 6v5H6"/><path d="M13.5 2.5v11h-11"/>'),
+  // Stripped tool calls: scissors.
+  trim: icon('<circle cx="4.5" cy="4.5" r="2"/><circle cx="4.5" cy="11.5" r="2"/><path d="M6.2 5.6L13.5 12M6.2 10.4L13.5 4"/>'),
+  // A recall: a magnifier.
+  recall: icon('<circle cx="7" cy="7" r="4.5"/><path d="M10.4 10.4L14 14"/>'),
+  // An undo: a turning arrow.
+  undo: icon('<path d="M3.5 6.5h6.5a3.5 3.5 0 0 1 0 7H6"/><path d="M6 3.5l-2.5 3 2.5 3"/>'),
+  // A choice: a tick.
+  choice: icon('<path d="M3 8.5l3.2 3.2L13 4.5"/>'),
+  // Put off for later: a clock.
+  snooze: icon('<circle cx="8" cy="8" r="5.75"/><path d="M8 5v3.2l2.2 1.4"/>'),
+  // A FolioPack packed or opened: a box.
+  pack: icon('<path d="M2.5 5L8 2.5 13.5 5v6.5L8 14l-5.5-2.5z"/><path d="M2.5 5L8 7.5 13.5 5M8 7.5V14"/>'),
+} as const
 const COMPACTED = DIM
 export function miniSvg(share: number, color: string): string {
   const width = 90
@@ -36,39 +83,42 @@ export function miniSvg(share: number, color: string): string {
 const FINE = '#8d9bb0'
 const ROOM = 'rgba(138,138,138,0.22)'
 
-// The context bar.
-// The work runs from the left: word for word, trimmed, then what is fine to
-// fold, then the room left before the ceiling (only while the work is under
-// it). Two marks cut across it: where a fold brings the work back to, and the
-// ceiling. Past the ceiling, what is fine to fold shows first, then the rest
-// in amber, and the bar grows, so how far over it is shows at a glance. Then
-// what Folio keeps and Claude Code's own part, which the ceiling leaves out.
+// The context bar, in real tokens.
+// The work runs from the left: word for word, stripped, then what is fine to
+// fold, then the room left before the ceiling (only while the context is under
+// it). Two marks cut across it: where a fold brings the context back to (the
+// floor), and the ceiling. Both measure the whole context, so each mark sits
+// where the work reaches it, after what Folio keeps and Claude Code's own part,
+// which follow at the end. Past the ceiling, what is fine to fold shows first,
+// then the rest in amber, and the bar grows, so how far over it is shows at a
+// glance.
 export function contextParts(v: PickerView): Array<BarPart | BarMark> {
   const settings = settingsOf(v)
   const work = workTokens(v)
-  const kept = keptParts(v).total
+  const kept = realOf(v, keptParts(v).total)
   const fixed = v.context?.fixed ?? 0
+  const below = kept + fixed
   // What is fine to fold shows as that, trimmed or not, as the strip does.
   const parts = workChunks(v)
   const all = tokensOf(parts.all) || 1
   const fine = (work * tokensOf(parts.fine)) / all
   const trimmed = (work * tokensOf(parts.trimmed.filter(c => c.decision !== 'fold'))) / all
   const plain = work - fine - trimmed
-  const target = settings.target
-  const ceiling = settings.ceiling
+  const target = Math.max(0, settings.floor - below)
+  const ceiling = Math.max(target, settings.ceiling - below)
   // How much of [from, to) falls in [lo, hi).
   const within = (from: number, to: number, lo: number, hi: number) => Math.max(0, Math.min(to, hi) - Math.max(from, lo))
   // A work span's figure: its piece before the fold-back mark gives how much of that kind sits below the fold-back
   // line; its piece after the mark gives how much sits above the line in all, past the ceiling included, so the two
   // add up to the span's whole size.
-  const backLine = `the fold-back line (${shortTokens(target)})`
-  const below = (n: number) => `${shortTokens(Math.round(n))} below ${backLine}`
+  const backLine = `the fold-back line (${shortTokens(settings.floor)})`
+  const under = (n: number) => `${shortTokens(Math.round(n))} below ${backLine}`
   const above = (from: number, to: number) => `${shortTokens(Math.round(within(from, to, target, Infinity)))} above ${backLine}`
-  const amount = (from: number, to: number, n: number, region: 0 | 1) => (region === 0 ? below(n) : above(from, to))
-  const roomLeft = `${shortTokens(Math.max(0, ceiling - work))} left before the fold at ${shortTokens(ceiling)}`
+  const amount = (from: number, to: number, n: number, region: 0 | 1) => (region === 0 ? under(n) : above(from, to))
+  const roomLeft = `${shortTokens(Math.max(0, ceiling - work))} left before the fold at ${shortTokens(settings.ceiling)}`
   const spans: Array<{ key: string; from: number; to: number; color: string; tip: (n: number, region: 0 | 1) => string }> = [
     { key: 'work', from: 0, to: plain, color: FULL, tip: (n, region) => `Work, word for word · ${amount(0, plain, n, region)} · counts toward the fold` },
-    { key: 'trim', from: plain, to: plain + trimmed, color: TRIMMED, tip: (n, region) => `Old tool output, trimmed · ${amount(plain, plain + trimmed, n, region)} · counts toward the fold` },
+    { key: 'trim', from: plain, to: plain + trimmed, color: TRIMMED, tip: (n, region) => `Tool calls, stripped · ${amount(plain, plain + trimmed, n, region)} · counts toward the fold` },
     { key: 'fine', from: plain + trimmed, to: work, color: FINE, tip: (n, region) => `Fine to fold · ${amount(plain + trimmed, work, n, region)} · goes with the next fold` },
     // The room, from the end of the work to the fold: both of its pieces lead with the whole room left (the ceiling
     // minus the work); the piece before the fold-back mark adds how much of it lies before the fold-back line.
@@ -99,23 +149,24 @@ export function contextParts(v: PickerView): Array<BarPart | BarMark> {
     { key: 'ceiling', mark: true, wide: true },
     { key: 'fine:2', size: finePast, color: FINE, tip: `Fine to fold · ${shortTokens(Math.round(finePast))} · past the ceiling, goes with the next fold` },
     { key: 'over', size: past - finePast, color: WARN, tip: `Past the ceiling by ${shortTokens(past)}` },
-    { key: 'kept', size: kept, color: KEPT, tip: `Summaries and kept parts · ${shortTokens(kept)} · not counted` },
-    { key: 'fixed', size: fixed, color: FIXED, tip: `Claude Code's own: tools, prompt, skills, memory · ${shortTokens(fixed)} · not counted` },
+    { key: 'kept', size: kept, color: KEPT, tip: `Summaries and kept parts · ${shortTokens(kept)}` },
+    { key: 'fixed', size: fixed, color: FIXED, tip: `Claude Code's own: tools, prompt, skills, memory · ${shortTokens(fixed)}` },
   ]
 }
 
 // A chunk's name: its title, or, before Haiku has named it, what it's waiting for.
 export function chunkTitle(c: ChunkRecord, isNewest: boolean): string {
-  return c.title || (isNewest ? 'Newest chunk, still growing' : 'Waiting for its summary')
+  return c.title || (isNewest ? 'Newest part, still growing' : 'Waiting for its summary')
 }
 
 export function chunkState(c: ChunkRecord): string {
   if (c.status === 'compacted') return 'compacted by Claude Code'
   if (c.status === 'folded') return c.decision === 'keep' ? 'restored word for word' : c.sections.length > 0 ? 'folded · outline' : 'folded'
-  if (c.status === 'trimmed') return 'trimmed'
+  // A stripped part marked Keep stays stripped in the chat until the next
+  // fold or rebuild puts its tool calls back, and is word for word from then.
+  if (c.status === 'trimmed') return c.decision === 'keep' ? 'kept · stripped until the next fold' : 'stripped'
   if (c.decision === 'keep') return 'kept word for word'
   if (c.decision === 'fold') return 'fine to fold'
-  if (c.tidied.length > 0) return `word for word · ${c.tidied.length} side message${c.tidied.length === 1 ? '' : 's'} tidied`
 
   return 'word for word'
 }
@@ -127,16 +178,26 @@ const STRIP_PARTS = 24
 // The share of the strip's parts kept for the newest chunks, one part each.
 const STRIP_NEWEST_SHARE = 2 / 3
 
-function mergeOlder(parts: BarPart[], most: number): BarPart[] {
+// A part of the strip while it is built: its first chunk's name and how many
+// chunks it holds go beside it, so a join names and counts chunks, not parts.
+type StripPart = BarPart & { title: string; count: number }
+
+function mergeOlder(parts: StripPart[], most: number): StripPart[] {
   if (parts.length <= most) return parts
   const newest = Math.round(most * STRIP_NEWEST_SHARE)
   const older = parts.slice(0, -newest)
-  const out: BarPart[] = []
-  let group: BarPart[] = []
+  const join = (group: StripPart[]): StripPart => {
+    const size = group.reduce((sum, p) => sum + p.size, 0)
+    const count = group.reduce((sum, p) => sum + p.count, 0)
+    const first = group[0]!
+
+    return { key: `join-${first.key}`, size, color: first.color, tip: `${count} older parts · ${shortTokens(size)} · from “${first.title}”`, title: first.title, count }
+  }
+  const out: StripPart[] = []
+  let group: StripPart[] = []
   const flush = () => {
     if (group.length === 0) return
-    const size = group.reduce((sum, p) => sum + p.size, 0)
-    out.push(group.length === 1 ? group[0]! : { key: `join-${group[0]!.key}`, size, color: group[0]!.color, tip: `${group.length} older chunks · ${shortTokens(size)} · from “${(group[0]!.tip ?? '').split(' · ')[0]}”` })
+    out.push(group.length === 1 ? group[0]! : join(group))
     group = []
   }
   for (const p of older) {
@@ -146,35 +207,29 @@ function mergeOlder(parts: BarPart[], most: number): BarPart[] {
   flush()
   // Still too many for the width: the oldest neighbours join, whatever their colour.
   while (out.length > most - newest && out.length > 1) {
-    const [first, second, ...rest] = out as [BarPart, BarPart, ...BarPart[]]
-    const size = first.size + second.size
-    out.splice(0, out.length, { key: `join-${first.key}`, size, color: first.color, tip: `Older chunks · ${shortTokens(size)} · from “${(first.tip ?? '').split(' · ')[0]}”` }, ...rest)
+    const [first, second, ...rest] = out as [StripPart, StripPart, ...StripPart[]]
+    out.splice(0, out.length, join([first, second]), ...rest)
   }
 
   return [...out, ...parts.slice(-newest)]
 }
 
-// The whole chat, oldest to newest, one part per chunk sized by its tokens.
 // A chunk's colour in the strip, and the state that colour names in its key.
 const WAITING = '#56709c'
-// Folds next unless the person has chosen for it.
-const isFoldNext = (v: PickerView, c: ChunkRecord) => v.foldNext.includes(c.id) && c.decision === null
-function chunkColor(v: PickerView, c: ChunkRecord): string {
+function chunkColor(c: ChunkRecord): string {
   if (c.status === 'compacted') return COMPACTED
   if (c.decision === 'keep') return KEPT
   if (c.status === 'folded') return FOLDED
   if (c.decision === 'fold' && isInChat(c)) return FINE
-  if (isFoldNext(v, c)) return WARN
   if (c.status === 'trimmed') return TRIMMED
 
   return c.isSummarised ? FULL : WAITING
 }
 const KEY_ORDER: Array<[string, string]> = [
-  [WARN, 'folds next'],
   [KEPT, 'kept'],
   [FINE, 'fine to fold'],
   [FULL, 'word for word'],
-  [TRIMMED, 'trimmed'],
+  [TRIMMED, 'stripped'],
   [WAITING, 'no summary yet'],
   [FOLDED, 'folded'],
   [COMPACTED, 'compacted'],
@@ -182,37 +237,41 @@ const KEY_ORDER: Array<[string, string]> = [
 
 // The strip's colour key: the states the chat has now, in a fixed order.
 export function stripKey(v: PickerView): Array<{ color: string; label: string }> {
-  const present = new Set(v.chunks.map(c => chunkColor(v, c)))
+  const present = new Set(v.chunks.map(chunkColor))
 
   return KEY_ORDER.filter(([color]) => present.has(color)).map(([color, label]) => ({ color, label }))
 }
 
+// The whole chat, oldest to newest, one part per chunk sized by its tokens.
 export function stripParts(v: PickerView, most: number): BarPart[] {
   const sorted = [...v.chunks].sort((a, b) => a.order - b.order)
-  const passages = new Set(v.pinned.flatMap(p => (p.kind === 'passage' ? p.chunkIds : [])))
 
   // Chunks that are out of the chat (compacted by Claude Code, or folded) sit
   // in one part per unbroken run: the strip stays light however long the chat
   // grows, and the work still in the chat keeps a part per chunk.
   const runOf = (c: ChunkRecord) => (c.status === 'compacted' ? 'compacted' : c.status === 'folded' && c.decision !== 'keep' ? 'folded' : null)
-  const merged: BarPart[] = []
+  const merged: StripPart[] = []
   let run: { kind: string; chunks: ChunkRecord[] } | null = null
   const flush = () => {
     if (run === null) return
-    const tokens = run.chunks.reduce((sum, c) => sum + c.tokens, 0)
+    const tokens = realOf(v, run.chunks.reduce((sum, c) => sum + c.tokens, 0))
     const first = run.chunks[0]!
+    const title = chunkTitle(first, false)
+    const count = run.chunks.length
     const label = run.kind === 'compacted' ? 'compacted by Claude Code' : 'folded into summaries'
     merged.push({
       key: `run-${first.id}`,
       size: tokens,
       color: run.kind === 'compacted' ? COMPACTED : FOLDED,
-      tip: run.chunks.length === 1 ? `${chunkTitle(first, false)} · ${shortTokens(tokens)} · ${label}` : `${run.chunks.length} chunks ${label} · ${shortTokens(tokens)} · from “${first.title}”`,
+      tip: count === 1 ? `${title} · ${shortTokens(tokens)} · ${label}` : `${count} parts ${label} · ${shortTokens(tokens)} · from “${title}”`,
+      title,
+      count,
     })
     run = null
   }
   for (const c of sorted) {
     const kind = runOf(c)
-    if (kind !== null && !v.foldNext.includes(c.id)) {
+    if (kind !== null) {
       if (run !== null && run.kind !== kind) flush()
       run = run ?? { kind, chunks: [] }
       run.chunks.push(c)
@@ -223,16 +282,20 @@ export function stripParts(v: PickerView, most: number): BarPart[] {
   }
   flush()
 
-  return mergeOlder(merged, Math.min(most, STRIP_PARTS))
+  // Drawn as plain bar parts: the name and count were only for the joins.
+  return mergeOlder(merged, Math.min(most, STRIP_PARTS)).map(({ key, size, color, tip }) => ({ key, size, color, tip }))
 
-  function chunkPart(c: ChunkRecord): BarPart {
+  function chunkPart(c: ChunkRecord): StripPart {
+    const title = chunkTitle(c, c === sorted.at(-1))
+
     return {
-    key: c.id,
-    size: c.tokens,
-    // The person's choice shows first (kept, or fine to fold); a chunk with
-    // exact details the next fold takes, still undecided, shows in amber.
-    color: chunkColor(v, c),
-    tip: `${chunkTitle(c, c === sorted.at(-1))} · ${shortTokens(c.tokens)} · ${c.decision === 'fold' && isInChat(c) ? 'fine to fold, goes with the next fold' : chunkState(c)}${passages.has(c.id) ? ' · a passage brought back' : ''}${isFoldNext(v, c) ? ' · folds next' : ''}`,
+      key: c.id,
+      size: realOf(v, c.tokens),
+      // The person's choice shows first: kept, or fine to fold.
+      color: chunkColor(c),
+      tip: `${title} · ${shortTokens(realOf(v, c.tokens))} · ${c.decision === 'fold' && isInChat(c) ? 'fine to fold, goes with the next fold' : chunkState(c)}`,
+      title,
+      count: 1,
     }
   }
 }
@@ -245,21 +308,25 @@ export const ZIP_ICON =
 
 // Heavy display text the panel's own text can't draw (its heaviest weight is
 // bold): the title and the work figure. The colour follows the light or dark
-// theme; `after` follows in a smaller, lighter face.
+// theme unless `color` is given; `after` follows in a smaller, lighter face.
 // `perLetter` is the width of a letter as a share of the size: a word of wide
 // letters needs more, a short word of narrow ones less.
-export function heavyTextSvg(text: string, size: number, after: { text: string; size: number; gap: number } | undefined, perLetter: number): { source: string; width: number; height: number } {
+export function heavyTextSvg(text: string, size: number, after: { text: string; size: number; gap: number } | undefined, perLetter: number, color?: string): { source: string; width: number; height: number } {
   // Close to the drawn width, so whatever sits beside it sits close.
   // Figures run wider than letters, so the trailing words are measured as
   // figures; a little room to spare is better than a cut-off last digit.
   const width = Math.ceil(text.length * size * perLetter + (after ? after.gap + after.text.length * after.size * 0.62 : 0)) + 4
-  const height = Math.ceil(size * 1.25)
+  // The text has no letters below the line, so the picture ends 4 px under it,
+  // where a footnote line ends under its own: text beside it, set to the
+  // bottom, sits on the same baseline.
+  const baseline = Math.round(size * 0.98)
+  const height = baseline + 4
   const font = "-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',system-ui,sans-serif"
   const style = `<style>.h{fill:#1b1b1b}@media (prefers-color-scheme: dark){.h{fill:#f4f4f4}}</style>`
   const tail = after ? `<tspan dx="${after.gap}" font-size="${after.size}" font-weight="400" fill="${GREY}">${after.text}</tspan>` : ''
   const source =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${style}` +
-    `<text class="h" x="0" y="${Math.round(size * 0.98)}" font-family="${font}" font-size="${size}" font-weight="800">${text}${tail}</text></svg>`
+    `<text ${color === undefined ? 'class="h"' : `fill="${color}"`} x="0" y="${baseline}" font-family="${font}" font-size="${size}" font-weight="800">${text}${tail}</text></svg>`
 
   return { source, width, height }
 }

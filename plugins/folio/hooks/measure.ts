@@ -1,13 +1,15 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { atom, update } from 'claude-code'
-import type { EngineInterface } from 'claude-code'
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, ModelUsage, SessionContextBreakdown, SessionMessage } from 'claude-code'
 
-import type { Brief, ChunkRecord, ContextFill, Join, PickerView, SideMessage } from '../types'
-import { hash, isInChat, textTokens } from './chunks'
-import { slash } from './paths'
-import { CUSTOM_MAX, CUSTOM_STEP, EMPTY_VIEW, settingsOf } from './store'
+import type { ChunkRecord, ContextFill, PickerView } from '../types'
+import { briefLines } from './brief'
+import type { BriefLines } from './brief'
+import { estimateTokens, isInChat, textTokens } from './chunks'
+import { logEvent } from './debug'
+import { change, CUSTOM_MAX, CUSTOM_STEP, customStop, EMPTY_VIEW, settingsOf } from './store'
 
 const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
 
@@ -41,19 +43,50 @@ export async function refreshContext($: EngineInterface) {
   for (const tool of breakdown?.mcpTools ?? []) {
     if (tool.isLoaded) servers.set(tool.serverName, (servers.get(tool.serverName) ?? 0) + tool.tokens)
   }
+  const compactAt = breakdown?.isAutoCompactEnabled ? (breakdown.autoCompactThreshold ?? null) : null
   const fill: ContextFill | null =
     tokens === undefined
       ? null
       : {
           tokens,
           window,
-          compactAt: breakdown?.isAutoCompactEnabled ? (breakdown.autoCompactThreshold ?? null) : null,
+          compactAt,
+          ...ownPointOf(breakdown, window, compactAt),
           fixed: fixedParts.reduce((sum, c) => sum + c.tokens, 0),
           fixedParts,
           mcpServers: [...servers].map(([name, t]) => ({ name, tokens: t })).sort((a, b) => b.tokens - a.tokens),
         }
   // Kept in memory only: the saved file leaves the context out, so writing it would change nothing.
-  await update($, view, v => ({ ...v, context: fill === null ? null : { ...fill, customTop: customTopOf(fill, keptParts(v).total) } }))
+  await update($, view, v => ({ ...v, context: fill === null ? null : { ...fill, customTop: customTopOf(fill) } }))
+  if (fill !== null) await convertCustom($, fill)
+}
+
+// Whether the person lowered Claude Code's compaction window below the
+// model's own limit (CLAUDE_CODE_AUTO_COMPACT_WINDOW, or the settings), and
+// the model's own compaction point: the model's window less the same room
+// Claude Code leaves under the lowered one. A window the account, an
+// experiment or the model's default sets is Claude Code's own, not lowered.
+function ownPointOf(breakdown: SessionContextBreakdown | undefined, window: number, compactAt: number | null): Pick<ContextFill, 'isLowered' | 'ownCompactAt'> {
+  const raw = breakdown?.rawMaxTokens
+  const isLowered = (breakdown?.autocompactSource === 'env' || breakdown?.autocompactSource === 'settings') && raw !== undefined && raw < window
+  if (compactAt === null) return { isLowered, ownCompactAt: null }
+
+  return { isLowered, ownCompactAt: isLowered ? window - Math.max(0, raw! - compactAt) : compactAt }
+}
+
+// Where Claude Code would compact this chat by itself had its window not been
+// lowered, in real tokens of the whole context.
+export function ownCompactPoint(fill: Pick<ContextFill, 'compactAt' | 'window' | 'isLowered' | 'ownCompactAt'> | null): number {
+  return fill?.isLowered === true && fill.ownCompactAt !== null && fill.ownCompactAt !== undefined ? fill.ownCompactAt : compactPoint(fill)
+}
+
+// The context as a compaction finds it: the last request's, or more when the
+// chat has grown since (a long result come in the middle of a reply), by
+// Folio's own count of the messages and Claude Code's part.
+export function contextAt(v: PickerView, messages: readonly SessionMessage[]): number {
+  const counted = (v.context?.fixed ?? 0) + realOf(v, messages.reduce((sum, m) => sum + estimateTokens(m), 0))
+
+  return Math.max(realContext(v), counted)
 }
 
 // Claude's own compaction, where it is turned off, would run about here.
@@ -61,35 +94,106 @@ const COMPACT_SHARE = 0.965
 // Room left for one long reply to run past the ceiling before a fold.
 const CUSTOM_MARGIN = 50_000
 
-// The highest ceiling this chat can take: below the point Claude compacts by
-// itself, after what sits on top of the work and room for one long reply.
-export function customTopOf(fill: Pick<ContextFill, 'compactAt' | 'window' | 'fixed'>, kept: number): number {
-  const room = (fill.compactAt ?? fill.window * COMPACT_SHARE) - fill.fixed - kept - CUSTOM_MARGIN
-
-  return Math.min(CUSTOM_MAX, Math.floor(room / CUSTOM_STEP) * CUSTOM_STEP)
+// Where Claude Code compacts this chat by itself, in real tokens of the whole
+// context; Infinity while the context hasn't been measured.
+export function compactPoint(fill: Pick<ContextFill, 'compactAt' | 'window'> | null): number {
+  return fill === null ? Infinity : (fill.compactAt ?? fill.window * COMPACT_SHARE)
 }
 
+// The highest ceiling this chat can take: below the point Claude compacts by
+// itself, with room for one long reply.
+export function customTopOf(fill: Pick<ContextFill, 'compactAt' | 'window'>): number {
+  return Math.min(CUSTOM_MAX, Math.floor((compactPoint(fill) - CUSTOM_MARGIN) / CUSTOM_STEP) * CUSTOM_STEP)
+}
+
+// An older Custom ceiling was compared with the work alone: the context less
+// Claude Code's own part and Folio's kept parts (in Folio's estimate). So it
+// folded once the whole context reached the ceiling plus those two. Once this
+// chat's own part is measured, the ceiling is set on that scale, to the
+// nearest stop, and kept; the old value stays as it was.
+export async function convertCustom($: EngineInterface, fill: Pick<ContextFill, 'fixed'>) {
+  const v = await read($, view)
+  const old = v.settings.customCeiling
+  if (old === undefined || v.settings.customReal !== undefined || fill.fixed <= 0) return
+  const customReal = customStop(old + fill.fixed + keptParts(v).total)
+  await change($, x => ({ ...x, settings: { ...x.settings, customReal } }))
+  void logEvent($, 'custom-converted', { old, fixed: fill.fixed, kept: keptParts(v).total, ceiling: customReal })
+}
+
+// Real tokens per token Folio estimates, 1 until this chat has been measured.
+export function ratioOf(v: Pick<PickerView, 'real'>): number {
+  return v.real.ratio ?? 1
+}
+
+// Folio's estimate of a size, in real tokens.
+export function realOf(v: Pick<PickerView, 'real'>, estimate: number): number {
+  return Math.round(estimate * ratioOf(v))
+}
+
+// The whole context in real tokens: as the last request reported it, else as
+// the engine measured it, else from Folio's own sizes.
+export function realContext(v: PickerView): number {
+  if (v.real.tokens !== null) return v.real.tokens
+  if (v.context !== null) return v.context.tokens
+
+  return realOf(v, tokensOf(workChunks(v).all) + keptParts(v).total)
+}
+
+// The prompt cache lives an hour after its last use; a request after this
+// long finds it cold.
+export const IDLE_MS = 61 * 60_000
+
+// One request of the main chat, as its response reported it: the real context
+// it carried (uncached, cache-written and cache-read together), when, and the
+// count. The first request after a fold gives the fold's real result: the
+// drop from the request before it is what it saved.
+export async function noteRequest($: EngineInterface, usage: ModelUsage): Promise<void> {
+  const tokens = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+  const now = await $.clock.now()
+  const v = await read($, view)
+  const cache = { cacheRead: usage.cache_read_input_tokens, cacheWrite: usage.cache_creation_input_tokens, uncached: usage.input_tokens }
+  const pending = v.real.pending
+  const seen = (x: PickerView): PickerView => ({ ...x, real: { ...x.real, requests: x.real.requests + 1, lastAt: now, tokens, pending: null } })
+  if (pending !== null) {
+    const drop = Math.max(0, pending.before - tokens)
+    await change($, x => ({ ...seen(x), savedTokens: x.savedTokens + drop }))
+    void logEvent($, 'fold-result', { fold: pending.fold, why: pending.why, cold: pending.isCold, before: pending.before, after: tokens, freed: pending.before - tokens, planned: pending.planned, ...cache })
+
+    return
+  }
+  if (v.real.lastAt !== null && now - v.real.lastAt >= IDLE_MS) {
+    void logEvent($, 'idle-return', { minutes: Math.round((now - v.real.lastAt) / 60_000), context: tokens, ...cache })
+  }
+  // Kept in memory; the next change of the chat saves it.
+  await update($, view, seen)
+}
+
+// A chat too small to measure the ratio by: the fixed part would swamp it.
+const MEASURE_FROM = 20_000
+// How far one measurement moves the ratio, so one odd request can't swing it.
+const RATIO_STEP = 0.3
+const RATIO_RANGE = [0.5, 5] as const
+
+// Measures the ratio once a turn ends: the last request's real context, less
+// Claude Code's own part, against Folio's estimate of what it carried (the
+// chat up to the last reply, and the context blocks Folio adds).
+export async function measureRatio($: EngineInterface, messages: readonly SessionMessage[], blocks: string): Promise<void> {
+  const v = await read($, view)
+  const real = v.real.tokens
+  const fixed = v.context?.fixed ?? 0
+  if (real === null || fixed <= 0) return
+  const sent = messages.at(-1)?.role === 'assistant' ? messages.slice(0, -1) : messages
+  const estimate = sent.reduce((sum, m) => sum + estimateTokens(m), 0) + textTokens(blocks)
+  if (estimate < MEASURE_FROM) return
+  const sample = Math.min(RATIO_RANGE[1], Math.max(RATIO_RANGE[0], (real - fixed) / estimate))
+  const was = v.real.ratio
+  const ratio = Math.round((was === null ? sample : was + (sample - was) * RATIO_STEP) * 1000) / 1000
+  await change($, x => ({ ...x, real: { ...x.real, ratio } }))
+  void logEvent($, 'measure', { context: real, fixed, estimate, sample: Math.round(sample * 1000) / 1000, ratio, requests: v.real.requests })
+}
 
 export function summaryTokens(c: Pick<ChunkRecord, 'title' | 'summary' | 'sections'>): number {
   return textTokens(c.title) + textTokens(c.summary) + c.sections.reduce((sum, s) => sum + textTokens(s.heading) + textTokens(s.body) + textTokens(s.points.join(' ')) + 4, 0) + 20
-}
-
-// What a tidied side message still costs: the one-line note in its place.
-const TIDY_NOTE_TOKENS = 15
-
-// What tidying a side message saves.
-export function sideSaving(s: { tokens: number } | undefined): number {
-  return Math.max(0, (s?.tokens ?? 0) - TIDY_NOTE_TOKENS)
-}
-
-// What tidying these side messages saves.
-export function sidesSaving(sides: ReadonlyArray<{ tokens: number }>): number {
-  return sides.reduce((sum, s) => sum + sideSaving(s), 0)
-}
-
-// A chunk's side messages still in the chat: not tidied, not put back.
-export function openSides(c: Pick<ChunkRecord, 'side' | 'tidied' | 'keepSide'>): SideMessage[] {
-  return c.side.filter(s => !c.tidied.includes(s.n) && !c.keepSide.includes(s.n))
 }
 
 // The chunks in the chat that count as work: all of them, word for word or
@@ -105,14 +209,15 @@ export function tokensOf(chunks: readonly ChunkRecord[]): number {
   return chunks.reduce((sum, c) => sum + c.tokens, 0)
 }
 
-// The chunks Folio holds outside the work: kept word for word, and folded to summaries.
+// The chunks Folio holds outside the work: kept word for word, and folded to
+// summaries. A copy of another part stays out of the history.
 export function keptAndFolded(v: PickerView): { kept: ChunkRecord[]; folded: ChunkRecord[] } {
-  return { kept: v.chunks.filter(c => c.decision === 'keep' && c.status !== 'compacted'), folded: v.chunks.filter(c => c.status === 'folded' && c.decision !== 'keep') }
+  return { kept: v.chunks.filter(c => c.decision === 'keep' && c.status !== 'compacted'), folded: v.chunks.filter(c => isInHistory(c) && c.decision !== 'keep') }
 }
 
-// The ids of the two newest chunks in the chat, which no fold takes.
-export function newestInChat(chunks: readonly ChunkRecord[]): Set<string> {
-  return new Set(chunks.filter(isInChat).sort((a, b) => a.order - b.order).slice(-2).map(c => c.id))
+// A folded part the history shows: one that is no copy of another.
+export function isInHistory(c: Pick<ChunkRecord, 'status' | 'copyOf'>): boolean {
+  return c.status === 'folded' && c.copyOf === undefined
 }
 
 // The newest summarised chunk, or the newest before the order `before`.
@@ -120,112 +225,53 @@ export function newestSummarised(chunks: readonly ChunkRecord[], before = Infini
   return chunks.filter(c => c.isSummarised && c.order < before).sort((a, b) => b.order - a.order)[0]
 }
 
-export type BriefLists = Pick<Brief, 'rules' | 'decisions' | 'terms' | 'files'>
+export type BriefLists = Pick<BriefLines, 'rules' | 'decisions' | 'terms' | 'files'>
 
-// The open tasks Claude reads: the merged brief's trimmed list once it covers
-// the newest summary, else that summary's own list.
-export function openTasksOf(v: PickerView): string[] {
-  const newest = newestSummarised(v.chunks)
-  const d = v.briefDigest
-  if (d?.openTasks !== undefined && newest !== undefined && d.ids.includes(newest.id)) return d.openTasks
+// The brief's four lists, as the ledger gives them by rule: each kind's open
+// items, newest first, up to its cap; files tied to one chat left out.
+export function briefLists(v: Pick<PickerView, 'ledger' | 'tasks'>): BriefLists {
+  const { openTasks: _, ...lists } = briefLines(v.ledger, v.tasks)
 
-  return newest?.brief.openTasks ?? []
+  return lists
 }
 
-// Paths no other chat or computer has: temporary folders, a chat's own
-// scratchpad, mods in development and Claude Code's per-chat folders.
-const ONE_CHAT_PATH = /^(?:\/private)?\/(?:tmp|var\/folders)\/|\/appdata\/local\/temp\/|(?:^|\/)scratchpad\/|\/\.claude\/(?:dev-mods|projects)\/|<[^>]+>/i
-
-export function isOneChatPath(item: string): boolean {
-  return ONE_CHAT_PATH.test(slash(item))
-}
-
-// The brief's four lists: Haiku's merged brief once written, else every
-// chunk's items with exact repeats taken out, oldest first, or newest first
-// with the latest chunk's items leading. Files tied to one chat are left out.
-export function briefLists(v: PickerView, chunks: readonly ChunkRecord[], isNewestFirst = false): BriefLists {
-  const d = v.briefDigest
-  if (d !== null) return { rules: d.rules, decisions: d.decisions, terms: d.terms, files: d.files.filter(f => !isOneChatPath(f)) }
-  const ordered = isNewestFirst ? [...chunks].sort((a, b) => b.order - a.order) : chunks
-  const all = (key: keyof BriefLists) => [...new Set(ordered.flatMap(c => (isNewestFirst ? [...c.brief[key]].reverse() : c.brief[key])))]
-
-  return { rules: all('rules'), decisions: all('decisions'), terms: all('terms'), files: all('files').filter(f => !isOneChatPath(f)) }
-}
-
-// Runs of neighbouring folded chunks on one topic, oldest first: what a fold
-// joins into one summary each. A chunk kept word for word, or one on another
-// topic, ends a run.
-// A run is cut at JOIN_MAX chunks, so one summary never stands for so much
-// that its detail thins out.
-const JOIN_MAX = 6
-
-export function joinRuns(chunks: readonly ChunkRecord[]): ChunkRecord[][] {
-  const runs: ChunkRecord[][] = []
-  let run: ChunkRecord[] = []
-  for (const c of [...chunks].sort((a, b) => a.order - b.order)) {
-    const isJoinable = c.status === 'folded' && c.decision !== 'keep' && c.isSummarised && c.topic !== ''
-    if (isJoinable && run.length > 0 && run.length < JOIN_MAX && run[0]!.topic === c.topic) {
-      run.push(c)
-      continue
-    }
-    if (run.length > 1) runs.push(run)
-    run = isJoinable ? [c] : []
-  }
-  if (run.length > 1) runs.push(run)
-
-  return runs
-}
-
-export function joinKey(run: readonly ChunkRecord[]): string {
-  return hash(run.map(c => `${c.id}\n${c.summary}`).join('\n'))
-}
-
-// The joins that still match their chunks, as the next history block uses them.
-export function liveJoins(v: PickerView): Join[] {
-  const keys = new Set(joinRuns(v.chunks).map(joinKey))
-
-  return v.joins.filter(j => keys.has(j.key))
+// The open tasks Claude reads: the ledger's open ones, newest first, up to its cap.
+export function openTasksOf(v: Pick<PickerView, 'ledger' | 'tasks'>): string[] {
+  return briefLines(v.ledger, v.tasks).openTasks
 }
 
 function briefTokens(v: PickerView): number {
-  const lists = briefLists(v, v.chunks.filter(c => c.status === 'folded'))
-
-  return textTokens(Object.values(lists).flat().join('\n')) + textTokens(openTasksOf(v).join('\n'))
-}
-
-// The open tasks as of the newest summary: each summary carries the list on,
-// dropping what got done, so older lists are out of date.
-export function currentOpenTasks(chunks: readonly ChunkRecord[]): string[] {
-  return newestSummarised(chunks)?.brief.openTasks ?? []
+  return textTokens(Object.values(briefLines(v.ledger, v.tasks)).flat().join('\n'))
 }
 
 // Whether the chat has folded parts, so a history to send.
-export function hasHistory(v: PickerView): boolean {
-  return v.chunks.some(c => c.status === 'folded')
+export function hasHistory(v: Pick<PickerView, 'chunks'>): boolean {
+  return v.chunks.some(isInHistory)
 }
 
-// What Folio keeps in view for good: chunks kept word for word, the folded
-// chunks' summaries, the brief, and what recall brought back. None of it
-// counts toward the ceiling; it aims to stay under the strategy's keptAim.
-export function keptParts(v: PickerView): { keptChunks: number; summaries: number; brief: number; pinned: number; total: number } {
+// What Folio keeps in view for good: parts kept word for word, and the map
+// of the folded parts (map.ts), which holds the brief. Until the chat's first
+// map, the folded parts' summaries stand for it.
+export function keptParts(v: PickerView): { keptChunks: number; summaries: number; brief: number; total: number } {
   const { kept, folded } = keptAndFolded(v)
   const keptChunks = tokensOf(kept)
-  const joined = liveJoins(v).reduce((sum, j) => sum + j.saves, 0)
-  const summaries = folded.reduce((sum, c) => sum + summaryTokens(c), 0) - joined
   const brief = hasHistory(v) ? briefTokens(v) : 0
-  const pinned = v.pinned.reduce((sum, p) => sum + textTokens(p.text) + 10, 0)
+  // The map as last built, less the brief it holds.
+  const summaries = v.map !== null && hasHistory(v) ? Math.max(0, textTokens(v.map.text) - brief) : folded.reduce((sum, c) => sum + summaryTokens(c), 0)
 
-  return { keptChunks, summaries, brief, pinned, total: keptChunks + summaries + brief + pinned }
+  return { keptChunks, summaries, brief, total: keptChunks + summaries + brief }
 }
 
-// The work in the chat: what counts toward the ceiling. From the real context
-// size when known, else from the chunks' own sizes.
+// The work in the chat, in real tokens: what a fold can take. The whole
+// context less Claude Code's own part and Folio's kept parts when known, else
+// from the chunks' own sizes.
 export function workTokens(v: PickerView): number {
-  if (v.context !== null && v.context.fixed > 0) return Math.max(0, v.context.tokens - v.context.fixed - keptParts(v).total)
+  if (v.context !== null && v.context.fixed > 0) return Math.max(0, realContext(v) - v.context.fixed - realOf(v, keptParts(v).total))
 
-  return tokensOf(workChunks(v).all)
+  return realOf(v, tokensOf(workChunks(v).all))
 }
 
+// The whole context counts toward the ceiling.
 export function needsFold(v: PickerView): boolean {
-  return workTokens(v) >= settingsOf(v).ceiling || v.foldAsked.length > 0
+  return realContext(v) >= settingsOf(v).ceiling || v.foldAsked.length > 0
 }

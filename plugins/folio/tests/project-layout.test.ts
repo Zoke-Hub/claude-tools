@@ -91,6 +91,7 @@ function treeOf(root: string, paths: string[]): Record<string, FsEntry[]> {
 }
 
 test("the chat's first message carries the note as a block of its own, and the note is saved for the next chat in the folder", async ($, on) => {
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   const { files } = stubEngine(on, { tree: treeOf('/w', SEGMENTS) })
   await start($, '/w')
   const { blocks } = await $.prompt.context({ blocks: [{ name: 'currentDate', text: 'today' }] })
@@ -101,6 +102,7 @@ test("the chat's first message carries the note as a block of its own, and the n
 })
 
 test('a chat in the home folder gets no note, and the folder is not read', async ($, on) => {
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   const listed: string[] = []
   const tree = treeOf(HOME, SEGMENTS)
   stubEngine(on, {
@@ -119,6 +121,7 @@ test('a chat in the home folder gets no note, and the folder is not read', async
 })
 
 test('with the setting off, no note and no read', { options: { projectLayout: false } }, async ($, on) => {
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   stubEngine(on, { tree: treeOf('/w', SEGMENTS) })
   await start($, '/w')
   const { blocks } = await $.prompt.context({ blocks: [] })
@@ -138,6 +141,7 @@ test('in a folder of several projects, a place open at the top counts only when 
 })
 
 test('auto-save, backup and scratch folders are not read', async ($, on) => {
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   const listed: string[] = []
   const paths = [
     'Adobe Premiere Pro Auto-Save/cut-1.prproj',

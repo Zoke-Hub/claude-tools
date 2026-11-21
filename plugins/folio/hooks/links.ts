@@ -2,6 +2,7 @@
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
 import type { ChunkRecord, PickerView } from '../types'
+import { hasWord } from './chunks'
 import { partNo } from './fold'
 
 // What links two parts of a chat: a file both touched or named, or a term both
@@ -86,20 +87,16 @@ function relatedParts(v: PickerView, index: Map<string, Entry>, ids: readonly st
     })
 }
 
-const escaped = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-// A name as a whole word of the text: "pack.ts" in "hooks/pack.ts", not in "foliopack.ts".
-const mentions = (text: string, name: string) => new RegExp(`(^|[^\\p{L}\\p{N}_])${escaped(name)}($|[^\\p{L}\\p{N}_])`, 'u').test(text)
-
 // The files and terms a query names, each with every part that holds it, the
 // most specific first.
 function partsNaming(v: PickerView, index: Map<string, Entry>, query: string): Array<{ label: string; chunks: ChunkRecord[] }> {
   const entries = [...index.entries()]
   const nameOf = (key: string) => key.slice(key.indexOf(':') + 1)
   const q = query.toLowerCase()
-  const files = entries.filter(([key]) => key.startsWith('file:') && mentions(q, nameOf(key)))
+  const files = entries.filter(([key]) => key.startsWith('file:') && hasWord(q, nameOf(key)))
   // A term inside a file name the query names ("pack" in "pack.ts") isn't named.
   const rest = files.reduce((left, [key]) => left.split(nameOf(key)).join(' '), q)
-  const terms = entries.filter(([key]) => key.startsWith('term:') && mentions(rest, nameOf(key)))
+  const terms = entries.filter(([key]) => key.startsWith('term:') && hasWord(rest, nameOf(key)))
   const named = [...files, ...terms]
   named.sort((a, b) => b[0].length - a[0].length)
   const out: Array<{ label: string; chunks: ChunkRecord[] }> = []
@@ -125,4 +122,19 @@ export function linksNote(v: PickerView, ids: readonly string[], query: string):
   }
 
   return lines.join('\n')
+}
+
+// Linked parts kept on a part's card when it is written (S3): the parts that
+// share its most telling files and terms, then the newest parts before it in
+// its task.
+const TASK_LINKS = 4
+
+export function cardLinks(v: PickerView, id: string): Array<{ id: string; shared: string[] }> {
+  const c = v.chunks.find(x => x.id === id)
+  if (c === undefined) return []
+  const related = relatedParts(v, keyIndex(v.chunks), [id]).map(r => ({ id: r.chunk.id, shared: r.shared.slice(0, 3) }))
+  const listed = new Set([id, ...related.map(r => r.id)])
+  const mates = c.task === undefined ? [] : v.chunks.filter(x => x.task === c.task && x.order < c.order && !listed.has(x.id)).sort((a, b) => b.order - a.order).slice(0, TASK_LINKS)
+
+  return [...related, ...mates.map(x => ({ id: x.id, shared: [`task ${c.task}`] }))]
 }
