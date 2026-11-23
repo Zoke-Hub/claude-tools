@@ -156,8 +156,11 @@ export function stubEngine(on: On, o: StubOptions = {}) {
       return { value: { startedAt: 0, context: { tokens: u.tokens, window: u.window ?? 1_000_000, breakdown }, rateLimits: [] } as never }
     })
   }
+  // Each light-model call as sent: its prompt, effort and answer cap.
+  const calls: Array<{ prompt: string; effort?: string; maxTokens?: number }> = []
   on('model.complete', async (_, e) => {
     prompts.push(e.prompt)
+    calls.push({ prompt: typeof e.prompt === 'string' ? e.prompt : JSON.stringify(e.prompt), effort: e.effort, maxTokens: e.maxTokens })
     systems.push(typeof e.system === 'string' ? e.system : JSON.stringify(e.system ?? ''))
     const text = (await o.model?.(e.prompt)) ?? null
 
@@ -177,7 +180,7 @@ export function stubEngine(on: On, o: StubOptions = {}) {
     reply = { input_tokens: 0, output_tokens: 100, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: tokens - cacheRead }
   }
 
-  return { files, clock: mock.clock(on), toasts, commands, prompts, systems, opened, respondWith, forks }
+  return { files, clock: mock.clock(on), toasts, commands, prompts, systems, calls, opened, respondWith, forks }
 }
 
 // One request of the main chat, its response reporting `tokens` of context

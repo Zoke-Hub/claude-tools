@@ -21,7 +21,7 @@ import { isClaudeReplying } from './actions'
 import { errorText, logEvent } from './debug'
 import { currentChat } from './chunks'
 import { namedPaths, shellCommandsIn, shellCommandsOf } from './shell'
-import { AUDIO_EXT, categorise, STILL_EXT, TEXT_EXT, VIDEO_EXT } from './categories'
+import { categorise, JUNK, STILL_EXT, TEXT_EXT } from './categories'
 import { isFilesProject, workFolders } from './work'
 import type { Category } from './categories'
 import type { NamedPath, ShellCommand } from './shell'
@@ -43,19 +43,12 @@ const TEXT_BYTES = 1024 * 1024
 // A personal rule or skill travels when this many chunks used it.
 const RULE_USES = 3
 
-// Folders tools rebuild or keep for themselves, hidden folders included.
 // A Claude Code chat's id, which names its copy's folders in a project.
 const CHAT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// Folders tools rebuild or keep for themselves, hidden folders included.
 const CACHE_DIR = /^(\..+|node_modules|venv|env|__pycache__|site-packages|dist|build)$/
+// A folder of renders: its files are sorted by round.
 export const RENDER_DIR = /^(renders?|outputs?|exports?)$/i
-export const REFERENCE_DIR = /^(references?|refs?|inspiration|moodboards?)$/i
-export const PROJECT_EXT: Array<[RegExp, string]> = [
-  [/\.aepx?$/i, 'After Effects projects'],
-  [/\.prproj$/i, 'Premiere projects'],
-  [/\.(psd|psb)$/i, 'Photoshop files'],
-  [/\.(ai|indd)$/i, 'Illustrator and InDesign files'],
-  [/\.(blend|c4d|ma|mb|fig|sketch)$/i, '3D and design files'],
-]
 
 // A file the scan found: its size, and when it last changed.
 export type Found = { path: string; bytes: number; mtimeMs: number }
@@ -171,6 +164,8 @@ export async function walk($: EngineInterface, root: string, skip?: RegExp): Pro
       if (seen > SCAN_LIMIT) return
       const path = `${dir}/${entry.name}`
       if (entry.name.startsWith(`${PACK_PREFIX} - `) || entry.name.startsWith(`${FILES_PREFIX} - `)) continue
+      // The system's own files (.DS_Store, Thumbs.db) are never listed or packed.
+      if (entry.kind !== 'dir' && JUNK.test(entry.name)) continue
       let kind = entry.kind
       let size = entry.size
       let mtimeMs = entry.mtimeMs
@@ -243,7 +238,8 @@ function parentGroup(id: string, label: string, children: PackGroup[], about: st
 
 // A folder as a group: its folders become groups of their own (down to three
 // levels) when it holds two or more; the files directly in it form one more.
-function folderGroup(path: string, label: string, found: Found[], root: string, touched: Set<string>, isOn: (f: Found) => boolean, depth = 1): PackGroup {
+// Each row of files is a filesRow.
+function folderGroup(path: string, label: string, found: Found[], root: string, touched: Set<string>, kinds: ReadonlyMap<string, string> = new Map(), depth = 1): PackGroup {
   const level = path.split('/').length
   const bySub = new Map<string, Found[]>()
   for (const f of found) {
@@ -252,16 +248,35 @@ function folderGroup(path: string, label: string, found: Found[], root: string, 
     bySub.set(sub, [...(bySub.get(sub) ?? []), f])
   }
   const named = [...bySub.keys()].filter(k => k !== '')
-  if (named.length < 2 || depth >= 3) return leafGroup(`folder:${path}`, label, 'files', found, touched, isOn)
+  if (named.length < 2 || depth >= 3) return filesRow(`folder:${path}`, label, found, path, touched, kinds)
   const children = [...bySub]
     .sort((a, b) => (a[0] === '' ? 1 : b[0] === '' ? -1 : a[0].localeCompare(b[0], undefined, { numeric: true })))
     .map(([sub, list]) =>
       sub === ''
-        ? leafGroup(`folder:${path}/.`, `Files directly in ${label}`, 'files', list, touched, isOn)
-        : folderGroup(`${path}/${sub}`, sub, list, root, touched, isOn, depth + 1),
+        ? filesRow(`folder:${path}/.`, `Files directly in ${label}`, list, path, touched, kinds)
+        : folderGroup(`${path}/${sub}`, sub, list, root, touched, kinds, depth + 1),
     )
 
   return parentGroup(`folder:${path}`, label, children, aboutOf(found, touched, `${named.length} folders`))
+}
+
+// One row of the files that sit together in a folder. In a renders folder they
+// are sorted by round and start unticked. Elsewhere they are one row, ticked
+// when the chat used one of them; where Haiku saw two or more kinds among them
+// (`kinds`, a file's kind by its path), a row for each kind inside the folder,
+// and what it didn't name in a row of its own. Haiku never moves a file out of
+// its folder.
+function filesRow(id: string, label: string, found: Found[], path: string, touched: Set<string>, kinds: ReadonlyMap<string, string>): PackGroup {
+  if (RENDER_DIR.test(base(path))) return renderKinds(id, label, found, touched)
+  const byKind = new Map<string, Found[]>()
+  for (const f of found) byKind.set(kinds.get(f.path) ?? '', [...(byKind.get(kinds.get(f.path) ?? '') ?? []), f])
+  const named = [...byKind.keys()].filter(k => k !== '')
+  if (named.length < 2) return leafGroup(id, label, 'files', found, touched, usedTick(found, touched))
+  const rows = [...byKind]
+    .sort((a, b) => (a[0] === '' ? 1 : b[0] === '' ? -1 : a[0].localeCompare(b[0], undefined, { numeric: true })))
+    .map(([kind, list]) => leafGroup(`${id}:${kind || '.'}`, kind || 'Other files', 'files', list, touched, usedTick(list, touched)))
+
+  return parentGroup(id, label, rows, aboutOf(found, touched, `${named.length} kinds`))
 }
 
 // A render's round, from a name like "r13_preview_1080p.mp4" or "r4-final.mov".
@@ -308,62 +323,46 @@ function renderKinds(name: string, label: string, found: Found[], touched: Set<s
   return parentGroup(`renders:${name}`, label, kids, aboutOf(found, touched, extra))
 }
 
-// Folder names a working setup gives every animation alike: a renders folder
-// below one belongs to the animation folder above it (A19/anim/renders is A19's).
-// Render folders' names (RENDER_DIR) are working folders' too.
-const WORK_DIR = /^(anims?|animations?|comps?|compositions?|builds?|src|source|html|web|project|ae|aep|after[ _-]?effects|hyperframes|remotion|work|tmp|temp)$/i
-const isWorkDir = (s: string) => WORK_DIR.test(s) || RENDER_DIR.test(s)
-
-// Folders a renders folder sorts its renders into by stage or size, not by
-// what they render: renders/drafts/A08 and renders/final/A08 are both A08's.
-const STAGE_DIR = /^(drafts?|finals?|previews?|reviews?|rounds?|wip|old|archived?|stills?|frames?|\d{3,4}p|[48]k|hd|uhd)$/i
-
-// Where a render belongs: its animation and its place in it. A renders folder
-// that sorts by animation (renders/drafts/A08) names the first folder below it
-// that is neither a stage nor a working folder, and the stages above that are
-// the place. Otherwise the animation is the nearest folder above its renders
-// folder (or above the file when it sits in none) whose name isn't a working
-// folder's, and the place the folders from there down to the renders folder.
-// A renders folder at the project's top that sorts by nothing is its own animation.
-export function renderHome(segs: string[]): { name: string; place: string } {
-  const at = segs.findIndex(s => RENDER_DIR.test(s))
-  if (at >= 0) {
-    const below = segs.slice(at + 1)
-    const own = below.findIndex(s => !STAGE_DIR.test(s) && !isWorkDir(s))
-    if (own >= 0) return { name: below[own]!, place: below.slice(0, own).join('/') }
+// The project's own Renders folder at its top (the project-folders rule), by
+// the name it has; null when it has none.
+const TOP_RENDERS = /^renders?$/i
+function topRenders(files: readonly Found[], root: string): string | null {
+  for (const f of files) {
+    const segs = relative(f.path, root).split('/')
+    if (segs.length > 1 && TOP_RENDERS.test(segs[0]!)) return segs[0]!
   }
-  if (at === 0) return { name: segs[0]!, place: '' }
-  const from = at > 0 ? at - 1 : segs.length - 1
-  let i = from
-  while (i > 0 && isWorkDir(segs[i]!)) i -= 1
-  // Only working folders above it: the nearest names it, as it is.
-  if (i >= 0 && isWorkDir(segs[i]!)) i = from
 
-  return { name: i >= 0 ? segs[i]! : 'Project folder', place: segs.slice(i + 1, at >= 0 ? at + 1 : segs.length).join('/') }
+  return null
 }
 
-// Renders by what they render: each animation's together, with a row for each
-// place it keeps renders in (renders, anim/renders), the nearest first; then
-// by round and kind within it.
-function renderGroups(found: Found[], root: string, touched: Set<string>): PackGroup[] {
-  const byName = new Map<string, Map<string, Found[]>>()
+// Drafts first, then Final, then any other stage, by name.
+const stageRank = (s: string) => (/^drafts?$/i.test(s) ? 0 : /^finals?$/i.test(s) ? 1 : 2)
+
+// The renders in the project's Renders folder, as the folder keeps them: each
+// stage (Drafts, then Final) with its animations inside, each animation's
+// renders by round. Files sitting directly in a folder get a row of their own.
+function stageGroups(found: Found[], root: string, top: string, touched: Set<string>): PackGroup[] {
+  const byStage = new Map<string, Map<string, Found[]>>()
   for (const f of found) {
-    const { name, place } = renderHome(relative(f.path, root).split('/').slice(0, -1))
-    const places = byName.get(name) ?? new Map<string, Found[]>()
-    places.set(place, [...(places.get(place) ?? []), f])
-    byName.set(name, places)
+    const segs = relative(f.path, root).split('/').slice(1, -1)
+    const stage = segs[0] ?? ''
+    const animation = segs[1] ?? ''
+    const into = byStage.get(stage) ?? new Map<string, Found[]>()
+    into.set(animation, [...(into.get(animation) ?? []), f])
+    byStage.set(stage, into)
   }
+  const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true })
 
-  return [...byName]
-    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-    .map(([name, places]) => {
-      const all = [...places.values()].flat()
-      if (places.size === 1) return renderKinds(name, name, all, touched)
-      const rows = [...places]
-        .sort((a, b) => a[0].split('/').length - b[0].split('/').length || a[0].localeCompare(b[0], undefined, { numeric: true }))
-        .map(([place, list]) => renderKinds(`${name}:${place || '.'}`, place || `Files directly in ${name}`, list, touched))
+  return [...byStage]
+    .sort((a, b) => (a[0] === '' ? 1 : b[0] === '' ? -1 : stageRank(a[0]) - stageRank(b[0]) || byName(a[0], b[0])))
+    .map(([stage, animations]) => {
+      if (stage === '') return renderKinds('renders:.', `Files directly in ${top}`, [...animations.values()].flat(), touched)
+      const rows = [...animations]
+        .sort((a, b) => (a[0] === '' ? 1 : b[0] === '' ? -1 : byName(a[0], b[0])))
+        .map(([animation, list]) => renderKinds(`renders:${stage}/${animation || '.'}`, animation || `Files directly in ${stage}`, list, touched))
+      const list = [...animations.values()].flat()
 
-      return parentGroup(`renders:${name}`, name, rows, aboutOf(all, touched, `in ${places.size} places: ${rows.map(r => r.label).join(', ')}`))
+      return parentGroup(`renders:${stage}`, stage, rows, aboutOf(list, touched, `${rows.length} ${rows.length === 1 ? 'folder' : 'folders'}`))
     })
 }
 
@@ -374,9 +373,6 @@ function usedTick(list: Found[], touched: Set<string>): (f: Found) => boolean {
   return () => isUsed
 }
 
-// A render, by the rules: in a renders folder, or a video.
-const isRender = (f: Found, root: string) => relative(f.path, root).split('/').slice(0, -1).some(s => RENDER_DIR.test(s)) || VIDEO_EXT.test(f.path)
-
 // The small text files the chat touched: they go inside the FolioPack itself.
 const isPackText = (f: Found, touched: Set<string>) => touched.has(f.path) && TEXT_EXT.test(f.path) && f.bytes <= TEXT_BYTES
 
@@ -384,171 +380,57 @@ function textsGroup(texts: Found[], touched: Set<string>): PackGroup {
   return leafGroup('texts', 'Small text files the chat touched', 'pack', texts, touched, () => true, 'scripts, notes and settings files; they go inside the FolioPack, at their places in the project')
 }
 
-// The project's files as the pack's groups. With Haiku's categories (section
-// 7): the small text files the chat touched first, by rule, as they travel
-// inside the FolioPack; then Haiku's categories, a tree of up to three levels
-// (renders by animation, then by round as the rules sort them); then what
-// Haiku left out, grouped by the rules, a row of the rules joining Haiku's of
-// the same name; caches last. With none, the rules alone, as before.
-function groupFiles(files: Found[], caches: Found[], root: string, touched: Set<string>, sorted: readonly Category[] = []): PackGroup[] {
-  const pool = new Map(files.map(f => [f.path, f]))
-  const placed = sorted.map(c => ({ ...c, found: c.files.flatMap(p => (pool.has(p) && !isPackText(pool.get(p)!, touched) ? [pool.get(p)!] : [])) })).filter(c => c.found.length > 0)
-  if (placed.length === 0) return ruleGroups(files, caches, root, touched)
-  const texts = files.filter(f => isPackText(f, touched))
-  const taken = new Set([...texts, ...placed.flatMap(c => c.found)].map(f => f.path))
-  const rest = ruleGroups(files.filter(f => !taken.has(f.path)), caches, root, touched)
-  const roots = [...(texts.length > 0 ? [textsGroup(texts, touched)] : []), ...categoryTree(placed, root, touched)]
-  for (const g of rest) {
-    const same = roots.findIndex(r => r.into === 'files' && g.into === 'files' && r.children !== undefined && g.children !== undefined && r.label.toLowerCase() === g.label.toLowerCase())
-    if (same < 0) roots.push(g)
-    else roots[same] = parentGroup(roots[same]!.id, roots[same]!.label, [...roots[same]!.children!, ...g.children!], roots[same]!.about)
+// The order of the project's top folders: the layout's own (projects.ts),
+// then any other by name.
+const TOP_ORDER = ['animations', 'renders', 'segments', 'references', 'work']
+const topRank = (name: string) => (TOP_ORDER.includes(name.toLowerCase()) ? TOP_ORDER.indexOf(name.toLowerCase()) : TOP_ORDER.length)
+
+// The project's files as the pack's groups, by the project's own folders: the
+// small text files the chat touched first (they travel inside the FolioPack);
+// then a section for each folder at the project's top, its folders as rows
+// (the Renders folder by stage and animation, each animation's renders by
+// round); then the files at the top; caches last. Haiku's categories only
+// split the files that sit together in one folder into a row for each kind
+// (filesRow): a file stays in its folder, so a renders folder inside Work never
+// mixes with the project's Renders folder.
+function groupFiles(files: Found[], caches: Found[], root: string, touched: Set<string>, sorted: readonly Category[] = [], rendersTop: string | null = null): PackGroup[] {
+  const kinds = new Map<string, string>()
+  for (const c of sorted) {
+    const kind = c.path.at(-1)
+    if (kind !== undefined) for (const p of c.files) kinds.set(p, kind)
   }
-
-  return roots
-}
-
-// One level of Haiku's categories: a name, its line, its own files, and the
-// categories under it.
-type CategoryNode = { name: string; about: string; found: Found[]; kids: Map<string, CategoryNode> }
-
-// Haiku's line, then what the files are, in counts.
-const withAbout = (line: string, counts: string) => (line === '' ? counts : `${line.replace(/[.\s]+$/, '')}. ${counts}`)
-
-// Haiku's categories as the pack's tree: a top row for each first name, the
-// names under it as rows inside it, in name order. A category of renders is
-// sorted by round, as the rules sort renders; one with categories under it
-// keeps its own files in a row of their own. Renders start unticked; any
-// other category starts ticked when the chat used it.
-function categoryTree(placed: ReadonlyArray<Category & { found: Found[] }>, root: string, touched: Set<string>): PackGroup[] {
-  const top = new Map<string, CategoryNode>()
-  for (const c of placed) {
-    let level = top
-    let node: CategoryNode | undefined
-    for (const name of c.path) {
-      node = level.get(name.toLowerCase()) ?? { name, about: '', found: [], kids: new Map() }
-      level.set(name.toLowerCase(), node)
-      level = node.kids
-    }
-    node!.found.push(...c.found)
-    if (node!.about === '') node!.about = c.about
-  }
-  const inOrder = (m: Map<string, CategoryNode>) => [...m.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
-  const everything = (n: CategoryNode): Found[] => [...n.found, ...[...n.kids.values()].flatMap(everything)]
-  const leaf = (id: string, label: string, about: string, found: Found[]): PackGroup => {
-    if (found.every(f => isRender(f, root))) {
-      const g = renderKinds(id, label, found, touched)
-
-      return { ...g, about: withAbout(about, g.about) }
-    }
-
-    return { ...leafGroup(id, label, 'files', found, touched, usedTick(found, touched)), about: withAbout(about, aboutOf(found, touched)) }
-  }
-  const toGroup = (n: CategoryNode, ids: string[]): PackGroup => {
-    const id = `sort:${ids.join('/')}`
-    const kids = inOrder(n.kids).map(k => toGroup(k, [...ids, k.name]))
-    if (kids.length === 0) return leaf(id, n.name, n.about, n.found)
-    if (n.found.length > 0) kids.push(leaf(`${id}/.`, `The rest of ${n.name}`, '', n.found))
-
-    return parentGroup(id, n.name, kids, withAbout(n.about, aboutOf(everything(n), touched)))
-  }
-
-  // A top row always holds rows: one category alone sits inside it.
-  return inOrder(top).map(n => {
-    const g = toGroup(n, [n.name])
-
-    return g.children !== undefined ? g : parentGroup(`${g.id}:top`, g.label, [g], g.about)
-  })
-}
-
-// Folders of the project-folders rule (projects.ts): Segments/<Animation> at
-// the project's top, the script and breakdown in Work/Scripts (or a Script or
-// Breakdown folder at the top), and Work itself. A Scripts folder's code (a
-// build's scripts) is working files, not the script.
-const SEGMENT_DIR = /^(segments?|vo|voice[ _-]?overs?)$/i
-const SCRIPT_DIR = /^(scripts?|breakdowns?)$/i
-const WORK_TOP = /^work$/i
-const CODE_EXT = /\.(py|js|mjs|cjs|jsx|ts|tsx|sh|bash|zsh|ps1|bat|rb|pl)$/i
-
-// The project's files as the rules group them, the way this project is laid
-// out: project files by kind, renders by what they render, voiceover segments
-// by animation, references and audio, the small text files the chat touched,
-// the script and breakdown, the project's own folders, Work's folders, then
-// caches. A group the chat used starts ticked; renders and caches start
-// unticked.
-function ruleGroups(files: Found[], caches: Found[], root: string, touched: Set<string>): PackGroup[] {
   const groups: PackGroup[] = []
-  const taken = new Set<string>()
-  const take = (found: Found[]) => {
-    for (const f of found) taken.add(f.path)
-    return found
-  }
-  const segs = (f: Found) => relative(f.path, root).split('/').slice(0, -1)
-  const top = (f: Found) => segs(f)[0] ?? ''
-  // The folder a file sits in inside Work ('' when it isn't in one).
-  const inWork = (f: Found) => (WORK_TOP.test(top(f)) ? (segs(f)[1] ?? '') : '')
-  // A section of rows, one for each folder `key` gives; a section of one
-  // folder shows that folder's own rows.
-  const section = (id: string, label: string, list: Found[], key: (f: Found) => string, about: string) => {
-    const by = new Map<string, Found[]>()
-    for (const f of list) by.set(key(f), [...(by.get(key(f)) ?? []), f])
-    const rows = [...by]
-      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-      .map(([path, found]) => folderGroup(path, path.split('/').at(-1)!, found, root, touched, usedTick(found, touched)))
-    const only = rows.length === 1 ? rows[0]! : null
-
-    return parentGroup(id, label, only?.children ?? rows, about)
-  }
-  const upTo = (f: Found, n: number) => segs(f).slice(0, n).join('/')
-
-  const kinds: PackGroup[] = []
-  for (const [re, label] of PROJECT_EXT) {
-    const found = take(files.filter(f => !taken.has(f.path) && re.test(f.path)))
-    if (found.length > 0) kinds.push(leafGroup(`ext:${label}`, label, 'files', found, touched, usedTick(found, touched)))
-  }
-  if (kinds.length > 0) groups.push(parentGroup('cat:project', 'Project files', kinds, 'Editing and design projects (After Effects, Premiere, Photoshop and the like), by kind.'))
-  const refs = take(files.filter(f => !taken.has(f.path) && segs(f).some(s => REFERENCE_DIR.test(s))))
-  // Before renders: a voiceover piece may be a video file.
-  const segments = take(files.filter(f => !taken.has(f.path) && SEGMENT_DIR.test(top(f))))
-  const renders = take(files.filter(f => !taken.has(f.path) && isRender(f, root)))
-  if (renders.length > 0) {
-    groups.push(parentGroup('cat:renders', 'Renders', renderGroups(renders, root, touched), 'Rendered videos and previews, by what they render. They start unticked: the other computer can render again.'))
-  }
-  if (segments.length > 0) {
-    groups.push(section('cat:segments', 'Voiceover segments', segments, f => upTo(f, segs(f).length > 1 ? 2 : 1), "Each animation's voiceover piece and its word times, by animation."))
-  }
-  const audio = take(files.filter(f => !taken.has(f.path) && AUDIO_EXT.test(f.path)))
-  const media: PackGroup[] = []
-  if (refs.length > 0) {
-    const first = segs(refs[0]!)
-    const at = first.findIndex(s => REFERENCE_DIR.test(s))
-    media.push(folderGroup(first.slice(0, at + 1).join('/'), 'References', refs, root, touched, usedTick(refs, touched)))
-  }
-  if (audio.length > 0) media.push(leafGroup('audio', 'Audio', 'files', audio, touched, usedTick(audio, touched)))
-  if (media.length > 0) groups.push(parentGroup('cat:media', 'References and audio', media, 'Reference videos and images, and sound.'))
-  const texts = take(files.filter(f => !taken.has(f.path) && isPackText(f, touched)))
+  const texts = files.filter(f => isPackText(f, touched))
   if (texts.length > 0) groups.push(textsGroup(texts, touched))
-  const isScript = (f: Found) => !CODE_EXT.test(f.path) && (SCRIPT_DIR.test(inWork(f)) || SCRIPT_DIR.test(top(f)))
-  const scripts = take(files.filter(f => !taken.has(f.path) && isScript(f)))
-  if (scripts.length > 0) {
-    groups.push(section('cat:scripts', 'Script and breakdown', scripts, f => upTo(f, inWork(f) === '' ? 1 : 2), "The script and its breakdown, with the breakdown's working files."))
-  }
-  // Work's folders: each tool's own files (Folio, MarkRoom, PulseWise), the
-  // backups and the other working folders, folder by folder.
-  const work = take(files.filter(f => !taken.has(f.path) && WORK_TOP.test(top(f))))
-
-  // The rest by the project's own folders.
   const byTop = new Map<string, Found[]>()
+  const atTop: Found[] = []
   for (const f of files) {
-    if (taken.has(f.path)) continue
-    const top = segs(f)[0] ?? ''
-    if (top === '') continue
-    byTop.set(top, [...(byTop.get(top) ?? []), f])
+    if (isPackText(f, touched)) continue
+    const segs = relative(f.path, root).split('/')
+    if (segs.length === 1) atTop.push(f)
+    else byTop.set(segs[0]!, [...(byTop.get(segs[0]!) ?? []), f])
   }
-  const folders = [...byTop]
-    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-    .map(([top, list]) => folderGroup(top, top, list, root, touched, usedTick(list, touched)))
-  if (folders.length > 0) groups.push(parentGroup('cat:folders', "The project's folders", folders, 'Everything else in the project, folder by folder.'))
-  if (work.length > 0) groups.push(section('cat:work', 'Working files', work, f => upTo(f, inWork(f) === '' ? 1 : 2), "Each tool's own files, the backups and the other working folders, folder by folder."))
+  const tops = [...byTop].sort((a, b) => topRank(a[0]) - topRank(b[0]) || a[0].localeCompare(b[0], undefined, { numeric: true }))
+  for (const [name, list] of tops) {
+    if (name === rendersTop) {
+      groups.push(parentGroup('cat:renders', name, stageGroups(list, root, name, touched), 'Rendered videos and previews, as the Renders folder keeps them. They start unticked: the other computer can render again.'))
+      continue
+    }
+    // Down a chain of single folders (work/segments), to where the folder splits.
+    let path = name
+    for (;;) {
+      const level = path.split('/').length
+      const subs = new Set(list.map(f => relative(f.path, root).split('/')).map(r => (r.length - 1 > level ? r[level]! : '')))
+      if (subs.size !== 1 || subs.has('')) break
+      path = `${path}/${[...subs][0]}`
+    }
+    const g = folderGroup(path, base(path), list, root, touched, kinds)
+    groups.push(parentGroup(`cat:folder:${name}`, path, g.children ?? [g], aboutOf(list, touched)))
+  }
+  if (atTop.length > 0) {
+    const row = filesRow('top', atTop.length === 1 ? base(atTop[0]!.path) : 'Files', atTop, '', touched, kinds)
+    groups.push(parentGroup('cat:top', "Files at the project's top", [row], aboutOf(atTop, touched)))
+  }
   if (caches.length > 0) {
     const cache: PackGroup = {
       ...leafGroup('caches', 'Caches and build output', 'files', caches, touched, () => false),
@@ -810,14 +692,18 @@ export async function scanProject($: EngineInterface): Promise<PackDraft> {
     }),
   )
 
+  // The project's own Renders folder: the rules show it as it is kept, so
+  // Haiku doesn't sort what is in it.
+  const rendersTop = topRenders(files, root)
+  const toSort = rendersTop === null ? files : files.filter(f => relative(f.path, root).split('/')[0] !== rendersTop)
   // Haiku's categories, the same for both scopes; none when it gave no answer.
-  const sorted = (await stage($, 'pack-scan', 'categories', () => categorise($, files, root)).catch(() => null))?.categories ?? []
+  const sorted = (await stage($, 'pack-scan', 'categories', () => categorise($, toSort, root)).catch(() => null))?.categories ?? []
 
   return {
     name: base(root),
     root,
     scope: 'chat',
-    groups: inProject(groupFiles(files, caches, root, touched, sorted), root),
+    groups: inProject(groupFiles(files, caches, root, touched, sorted, rendersTop), root),
     chatGroups: inProject(
       groupFiles(
         files.filter(f => touched.has(f.path)),
@@ -825,6 +711,7 @@ export async function scanProject($: EngineInterface): Promise<PackDraft> {
         root,
         touched,
         sorted,
+        rendersTop,
       ),
       root,
     ),

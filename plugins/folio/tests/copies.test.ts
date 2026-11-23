@@ -132,7 +132,7 @@ test("FolioPack leaves the chats' copies out of its list, old places too, and ke
   const { ui, groups } = await packGroups($, on, tree)
   expect(groups.some(t => t.includes(chat) || /^(originals|Backup)/.test(t))).toBe(false)
   // Work's folders: the script beside the copies, and the board; an earlier pack is never packed.
-  expect(groups).toEqual(['Renders · 1', 'Folio · 1', 'MarkRoom · 1'])
+  expect(groups).toEqual(['Files directly in Renders · 1', 'Folio · 1', 'MarkRoom · 1'])
   await ui.unmount()
 })
 
@@ -150,7 +150,7 @@ test('an earlier pack stays out of the scan in a project whose folder name has c
   expect(files.map(f => f.path)).toEqual(['/P/My Show/Renders/r01_intro.mp4'])
 })
 
-test('renders kept by stage under one renders folder group by animation, each stage a place', async ($, on) => {
+test('the Renders folder reads as it is kept: Drafts first, then Final, each with its animations inside', async ($, on) => {
   const tree: Record<string, FsEntry[]> = {
     '/w': [entry('Renders', 'dir')],
     '/w/Renders': [entry('Drafts', 'dir'), entry('Final', 'dir')],
@@ -161,12 +161,11 @@ test('renders kept by stage under one renders folder group by animation, each st
     '/w/Renders/Final/A08-A09': [entry('r03_A08-A09_4k.mp4', 'file')],
   }
   const { ui, rows, groups } = await packGroups($, on, tree)
-  expect(groups).toEqual(['A08-A09 · 3', 'A10 · 1'])
-  expect(groups.some(t => /^Renders/.test(t))).toBe(false)
-  await ui.press({ key: 'name-renders:A08-A09' })
+  expect(groups).toEqual(['Drafts · 3', 'Final · 1'])
+  await ui.press({ key: 'name-renders:Drafts' })
   const opened = await rows()
-  expect(opened.some(t => t.startsWith('Drafts · 2'))).toBe(true)
-  expect(opened.some(t => t.startsWith('Final · 1'))).toBe(true)
+  expect(opened.some(t => t.startsWith('A08-A09 · 2'))).toBe(true)
+  expect(opened.some(t => t.startsWith('A10 · 1'))).toBe(true)
   await ui.unmount()
 })
 
@@ -188,4 +187,34 @@ test("Saves to defaults to the project's Work/Folio/Folio packs", async ($, on) 
 
 test('Saves to defaults to ~/FolioPacks in a code repository', async ($, on) => {
   expect(await savesToDefault($, on, new Map([['/w/.git/HEAD', 'ref']]))).toBe('~/FolioPacks')
+})
+
+test("with a Renders folder, Haiku's guesses at renders elsewhere go back to their folders", async ($, on) => {
+  const tree: Record<string, FsEntry[]> = {
+    '/w': [entry('Renders', 'dir'), entry('Animations', 'dir')],
+    '/w/Renders': [entry('Drafts', 'dir')],
+    '/w/Renders/Drafts': [entry('A1', 'dir')],
+    '/w/Renders/Drafts/A1': [entry('r01_A1_1080p.mp4', 'file')],
+    '/w/Animations': [entry('Style-kit', 'dir')],
+    '/w/Animations/Style-kit': [entry('renders', 'dir')],
+    '/w/Animations/Style-kit/renders': [entry('stills_r08', 'dir')],
+    '/w/Animations/Style-kit/renders/stills_r08': [entry('frame_01.png', 'file'), entry('frame_02.png', 'file')],
+  }
+  // Haiku calls the build's stills renders.
+  const answer = (p: string) => {
+    if (!p.includes('Sort these files into categories')) return null
+    const d = /^d(\d+) Animations\/Style-kit\/renders\/stills_r08\/ · /m.exec(p)?.[1]
+
+    return JSON.stringify({ categories: [{ path: ['Renders', 'stills_r08'], about: 'Stills', members: [`d${d}`] }] })
+  }
+  stubEngine(on, { tree, files: new Map(), exists: () => false, model: answer })
+  await start($)
+  const ui = await mountPanel($, { columns: 110, rows: 60 })
+  await ui.press({ key: 'folio-pack' })
+  await ui.press({ key: 'scope-project' })
+  const groups = (await ui.findAll({ type: 'Button' })).map(b => String((b as { text?: string }).text ?? '').trim()).filter(t => / · \d+/.test(t)).map(t => t.replace(/\s*▸$/, ''))
+  // The Renders section holds only the Renders folder; the stills sit with the animation's build.
+  expect(groups).toEqual(['stills_r08 · 2', 'Drafts · 1'])
+  expect(await ui.find({ type: 'Text', text: 'Animations/Style-kit/renders/stills_r08' })).toBeTruthy()
+  await ui.unmount()
 })

@@ -3,6 +3,17 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-23 · Folio 1.0.0 (number unchanged), later
+
+- **Folio, FolioPack lists by the project's own folders:** a section for each folder at the project's top (Animations,
+  Renders, Segments, References, Work first, then the rest by name), its folders as rows, the files at the top, caches
+  last; the same in This chat and Whole project. The Renders folder shows as it is kept: Drafts first, then Final, each
+  with its animations inside. Haiku only splits the files that sit together in one folder by kind, and a file never
+  leaves its folder. System files (`.DS_Store`, `Thumbs.db`) are left out.
+- **Folio, FolioPack faster:** Haiku sorts at low effort with room to answer (it used to spend its whole cap thinking,
+  about 28 seconds a call, and give no answer); a batch that got no answer isn't asked again for 6 hours while its files
+  stay the same; files in the Renders folder aren't sent to Haiku.
+
 ## 2026-11-23 · Folio 1.0.0 (number unchanged)
 
 - **Folio, project folders:** a short rule in every chat (`projectLayout`, about 400 tokens) for laying out a

@@ -71,10 +71,13 @@ test('a project laid out by the rule reads in FolioPack section by section, each
   await ui.press({ key: 'folio-pack' })
   await ui.press({ key: 'scope-project' })
   const texts = async (type: 'Button' | 'Text') => (await ui.findAll({ type })).map(b => String((b as { text?: string }).text ?? '').trim())
-  expect(await texts('Text')).toEqual(expect.arrayContaining(['Renders', 'Voiceover segments', 'References and audio', 'Script and breakdown', "The project's folders", 'Working files']))
+  // A section for each top folder, in the layout's order, then the files at the top.
+  const heads = (await texts('Text')).filter(t => ['Animations', 'Renders', 'Segments', 'References', 'Work', "Files at the project's top"].includes(t))
+  expect(heads).toEqual(['Animations', 'Renders', 'Segments', 'References', 'Work', "Files at the project's top"])
   const groups = (await texts('Button')).filter(t => / · \d+/.test(t)).map(t => t.replace(/\s*▸$/, ''))
-  // Renders and segments by animation, the references, the script with its
-  // breakdown, the animations' builds, then Work's folders; nothing loose.
-  expect(groups).toEqual(['A1 Intro · 3', 'A2 Map · 1', 'A1 Intro · 2', 'A2 Map · 1', 'References · 3', 'Scripts · 3', 'Animations · 2', 'Backup · 1', 'MarkRoom · 1'])
+  // Each folder's own folders as rows: the builds, the renders by stage, the
+  // segments by animation, the references (one folder and a file: one row), and
+  // Work's folders.
+  expect(groups).toEqual(['A1 Intro · 1', 'Style Kit · 1', 'Drafts · 3', 'Final · 1', 'A1 Intro · 2', 'A2 Map · 1', 'References · 3', 'Backup · 1', 'MarkRoom · 1', 'Scripts · 3', 'README.md · 1'])
   await ui.unmount()
 })

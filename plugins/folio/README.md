@@ -64,9 +64,10 @@ original stays on your computer word for word, and Claude can bring any of it ba
 - **FolioPack.** Packs this chat or the whole project into one folder and zip: the summaries, the brief, the outline
   and the originals, plus any files you tick. Use it to carry the work to a new chat or another computer. A chat with
   Folio opens a pack with its `import_pack` tool; without Folio, the pack's `START-HERE.md` tells Claude how to read it.
-  Haiku sorts the project's files into the groups you tick: each animation's renders under it, segment renders apart
-  from final renders, and working files, sources, notes and deliverables each in their own. Folio's own rules place what
-  Haiku leaves out, and everything when Haiku gives no answer. A pack carries each part's card, the tasks and the
+  The files you tick are listed by the project's own folders: a section for each folder at its top, its folders as
+  rows, and the `Renders` folder as it is kept (Drafts, then Final, each animation's renders by round). A file never
+  leaves its folder. Haiku only splits the files that sit together in one folder by kind (stills apart from boards, say);
+  with no answer from it, each folder is one row. A pack carries each part's card, the tasks and the
   ledger. Its parts take the next numbers of the chat that opens it, so recall reaches them by number. With **Saves
   to** left empty, a pack goes to the project's `Work/Folio/Folio packs` folder (made when needed), or to `~/FolioPacks`
   for a chat with no project folder or in a code repository; earlier packs in that folder are never packed again.
@@ -125,7 +126,7 @@ Open a new chat afterwards. To update: `claude plugin update folio@zoke`, then r
   `~/.claude/folio/log/<date>/<chat id>.jsonl`: each Haiku call, fold, wait, recall and shortened output, one line each.
 - `~/.claude/folio/prefs.json` keeps where packs are saved. With it empty, packs go to the project's
   `Work/Folio/Folio packs`, or to `~/FolioPacks` for a chat with no project folder.
-- To sort FolioPack's files, Haiku reads each file's name, size and kind, and the first 240 characters of up to 300 small
+- To split a folder's files by kind, Haiku reads each file's name, size and kind, and the first 240 characters of up to 300 small
   text files. Folio never sends the start of its own private file, or of files named like keys, passwords, tokens or
   secrets. Before it cuts a file's start, Folio runs its private-value finder over the whole file (keys, tokens,
   passwords, card and phone numbers, email addresses, and any value the chat already set apart) and swaps what it finds

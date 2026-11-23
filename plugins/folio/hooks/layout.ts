@@ -12,7 +12,7 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import { PROJECT_EXT, REFERENCE_DIR, RENDER_DIR, renderHome, ROUND, walk } from './pack'
+import { RENDER_DIR, ROUND, walk } from './pack'
 import { AUDIO_EXT, VIDEO_EXT } from './categories'
 import type { Found } from './pack'
 import { relative, slash } from './paths'
@@ -39,6 +39,51 @@ const OPEN = '\u0000'
 // read does not go into: apps' own auto-saves and backups, old and replaced
 // copies, scratch and temporary folders.
 const ASIDE_DIR = /auto-?save|^(backups?|archived?|archives|old|trash|replaced|superseded|tmp|temp)$|^scratch/i
+
+// Folder names and file types the note sorts by. FolioPack grouped by these too until it came to list a project
+// by its own folders (2026-11-23); the note still reads where each kind lives.
+const REFERENCE_DIR = /^(references?|refs?|inspiration|moodboards?)$/i
+const PROJECT_EXT: Array<[RegExp, string]> = [
+  [/\.aepx?$/i, 'After Effects projects'],
+  [/\.prproj$/i, 'Premiere projects'],
+  [/\.(psd|psb)$/i, 'Photoshop files'],
+  [/\.(ai|indd)$/i, 'Illustrator and InDesign files'],
+  [/\.(blend|c4d|ma|mb|fig|sketch)$/i, '3D and design files'],
+]
+
+// Folder names a working setup gives every animation alike: a renders folder
+// below one belongs to the animation folder above it (A19/anim/renders is A19's).
+// Render folders' names (RENDER_DIR) are working folders' too.
+const WORK_DIR = /^(anims?|animations?|comps?|compositions?|builds?|src|source|html|web|project|ae|aep|after[ _-]?effects|hyperframes|remotion|work|tmp|temp)$/i
+const isWorkDir = (s: string) => WORK_DIR.test(s) || RENDER_DIR.test(s)
+
+// Folders a renders folder sorts its renders into by stage or size, not by
+// what they render: renders/drafts/A08 and renders/final/A08 are both A08's.
+const STAGE_DIR = /^(drafts?|finals?|previews?|reviews?|rounds?|wip|old|archived?|stills?|frames?|\d{3,4}p|[48]k|hd|uhd)$/i
+
+// Where a render belongs: its animation and its place in it. A renders folder
+// that sorts by animation (renders/drafts/A08) names the first folder below it
+// that is neither a stage nor a working folder, and the stages above that are
+// the place. Otherwise the animation is the nearest folder above its renders
+// folder (or above the file when it sits in none) whose name isn't a working
+// folder's, and the place the folders from there down to the renders folder.
+// A renders folder at the project's top that sorts by nothing is its own animation.
+function renderHome(segs: string[]): { name: string; place: string } {
+  const at = segs.findIndex(s => RENDER_DIR.test(s))
+  if (at >= 0) {
+    const below = segs.slice(at + 1)
+    const own = below.findIndex(s => !STAGE_DIR.test(s) && !isWorkDir(s))
+    if (own >= 0) return { name: below[own]!, place: below.slice(0, own).join('/') }
+  }
+  if (at === 0) return { name: segs[0]!, place: '' }
+  const from = at > 0 ? at - 1 : segs.length - 1
+  let i = from
+  while (i > 0 && isWorkDir(segs[i]!)) i -= 1
+  // Only working folders above it: the nearest names it, as it is.
+  if (i >= 0 && isWorkDir(segs[i]!)) i = from
+
+  return { name: i >= 0 ? segs[i]! : 'Project folder', place: segs.slice(i + 1, at >= 0 ? at + 1 : segs.length).join('/') }
+}
 
 // A kind of file, and the folder that is its home: the file's own folder, or
 // for renders and references the renders or references folder it sits in.

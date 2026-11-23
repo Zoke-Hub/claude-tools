@@ -69,7 +69,14 @@ const LISTED_LAST = 4
 const HEAD_CHARS = 240
 const HEAD_BYTES = 64 * 1024
 const HEAD_FILES = 300
-const ANSWER_TOKENS = 4000
+// Sorting is a plain task: Haiku thinks little, and its answer has room. At its
+// own effort Haiku spent the whole of a 4,000-token cap thinking on a big
+// batch, about 28 seconds, and gave no answer or half of one.
+const ANSWER_TOKENS = 16_000
+const EFFORT = 'low'
+// A batch that got no answer isn't asked again for this long while its files
+// stay the same: each try costs the person a wait.
+const RETRY_MS = 6 * 60 * 60 * 1000
 const CALL_MS = 60_000
 // A run asks no more after this long, or after this many calls in a row with
 // no answer (Haiku out of reach): the rules place the rest, and Look again
@@ -112,7 +119,7 @@ const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric
 
 // Files a computer leaves in folders by itself (Finder's, Explorer's): never
 // listed; a folder id still takes them, so they go where their folder goes.
-const JUNK = /^(?:\.DS_Store|Thumbs\.db|desktop\.ini|\._.+)$/i
+export const JUNK = /^(?:\.DS_Store|Thumbs\.db|desktop\.ini|\._.+)$/i
 
 // The project's files folder by folder, in path order, each folder with the
 // files Haiku sees one by one.
@@ -229,6 +236,7 @@ Rules:
 - Keep segment renders (one segment, scene or shot) apart from final renders (the whole video: a master, an export to hand over).
 - Working files (projects, scripts, builds), sources (footage, images and sound brought in), notes (plans, reviews, studies) and deliverables (finished files to hand over) go in categories of their own.
 - A file goes in one category. A file's own id counts over its folder's. Leave out what you can't tell.
+- The pack keeps every file in its own folder and uses a path's last name to split the files that sit together in one folder, so make that last name the plain kind of file (Stills, Final renders, Boards, Scripts), the same name for the same kind everywhere.
 - Where files belong to a category below, use its path exactly.
 ${so.length > 0 ? `\nCategories so far:\n${so.join('\n')}\n` : ''}
 Answer in this form:
@@ -326,10 +334,10 @@ export function categoriesPath(home: string, root: string): string {
   return `${folioDir(home)}/categories/${slug}-${hash(root)}.json`
 }
 
-type Kept = { version: number; root: string; batches: Record<string, Answer[]> }
+type Kept = { version: number; root: string; batches: Record<string, Answer[]>; failed?: Record<string, number> }
 
 // What Haiku's categories did, for the log and the tests.
-type Sorted = { categories: Category[]; batches: number; asked: number; reused: number; answered: number; placed: number }
+type Sorted = { categories: Category[]; batches: number; asked: number; reused: number; answered: number; placed: number; waiting: number }
 
 // Haiku's categories for the project's files, batch by batch, oldest answers
 // reused where a batch's listing is the same as when it was asked. Null when
@@ -353,30 +361,41 @@ export async function categorise($: EngineInterface, files: readonly ListedFile[
   const saved = await readJson<Kept>($, path)
   const old = saved?.version === CATEGORY_VERSION && saved.root === root && typeof saved.batches === 'object' && saved.batches !== null ? saved.batches : {}
   const kept: Record<string, Answer[]> = {}
+  const wasFailed = saved?.version === CATEGORY_VERSION && saved.root === root && typeof saved.failed === 'object' && saved.failed !== null ? saved.failed : {}
+  const failed: Record<string, number> = {}
   const found: Category[] = []
+  let waiting = 0
   let asked = 0
   let reused = 0
   let answered = 0
   let misses = 0
   for (const [i, b] of batches.entries()) {
     let answer: Answer[] | null = Array.isArray(old[b.sig]) ? answerOf({ categories: old[b.sig] }, b) : null
+    const failedAt = wasFailed[b.sig]
     if (answer !== null) reused += 1
-    else if (misses < MISSES_MOST && (await $.clock.now()) - start < SORT_MS) {
+    else if (typeof failedAt === 'number' && start - failedAt < RETRY_MS) {
+      // No answer last time and the same files: the rules place them for now.
+      failed[b.sig] = failedAt
+      waiting += 1
+    } else if (misses < MISSES_MOST && (await $.clock.now()) - start < SORT_MS) {
       asked += 1
-      const json = await complete($, 'categories', SYSTEM, categoryPrompt(project, b, found, i + 1, batches.length), ANSWER_TOKENS, CALL_MS)
+      const json = await complete($, 'categories', SYSTEM, categoryPrompt(project, b, found, i + 1, batches.length), ANSWER_TOKENS, CALL_MS, EFFORT)
       misses = json === null ? misses + 1 : 0
       answer = answerOf(json, b)
       if (answer !== null) answered += 1
+      else failed[b.sig] = start
     }
     if (answer === null) continue
     kept[b.sig] = answer
     mergeInto(found, filesOfAnswer(answer, b, root))
   }
   // Only this listing's answers are kept: a batch whose files changed is asked again.
-  const isSame = Object.keys(kept).length === Object.keys(old).length && Object.keys(kept).every(k => k in old)
-  if (!isSame) await $.fs.write(path, JSON.stringify({ version: CATEGORY_VERSION, root, batches: kept })).catch(() => {})
+  const sameKeys = (a: object, b: object) => Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => k in b)
+  if (!sameKeys(kept, old) || !sameKeys(failed, wasFailed)) {
+    await $.fs.write(path, JSON.stringify({ version: CATEGORY_VERSION, root, batches: kept, failed })).catch(() => {})
+  }
   const placed = found.reduce((s, c) => s + c.files.length, 0)
-  void logEvent($, 'categories', { files: files.length, batches: all.length, read: batches.length, asked, reused, answered, categories: found.length, placed, ms: (await $.clock.now()) - start })
+  void logEvent($, 'categories', { files: files.length, batches: all.length, read: batches.length, asked, reused, waiting, answered, categories: found.length, placed, ms: (await $.clock.now()) - start })
 
-  return found.length > 0 ? { categories: found, batches: all.length, asked, reused, answered, placed } : null
+  return found.length > 0 ? { categories: found, batches: all.length, asked, reused, answered, placed, waiting } : null
 }

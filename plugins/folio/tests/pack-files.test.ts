@@ -165,25 +165,3 @@ test('on Windows, D:\\ paths, D:/ paths and Git Bash /d/ paths all name the proj
     'D:/w/work/segments/A20/anim/renders/r02_preview_1080p.mp4',
   ])
 })
-
-test('renders group under their animation, with a row for each place it keeps them', async ($, on) => {
-  const files: Array<[string, number]> = [
-    ['work/segments/A16/renders/r01_preview_1080p.mp4', OLD],
-    ['work/segments/A16/anim/renders/r02_preview_1080p.mp4', OLD],
-    ['work/segments/A16/anim/renders/r03_preview_1080p.mp4', OLD],
-    ...[1, 2, 3, 4].map((n): [string, number] => [`work/segments/A19/anim/renders/r0${n}_preview_1080p.mp4`, OLD]),
-    ['work/segments/A21/anim/renders/r01_preview_1080p.mp4', OLD],
-    ['Segment Renders/A16_v1.mp4', OLD],
-    ['Segment Renders/A19_v1.mp4', OLD],
-  ]
-  const { groups } = await scan($, on, { files, scope: 'project' })
-  // The rows under a group, in the order shown.
-  const under = (id: string) => [...groups].filter(([k]) => k.startsWith(`${id}:`) && !k.slice(id.length + 1).includes(':')).map(([, label]) => label)
-  expect(under('renders')).toEqual(['A16 · 3', 'A19 · 4', 'A21 · 1', 'Segment Renders · 2'])
-  expect([...groups.values()].filter(label => label.startsWith('anim ·'))).toEqual([])
-  // A16's two places, the nearest first, each sorted by round as before, newest first.
-  expect(under('renders:A16')).toEqual(['renders · 1', 'anim/renders · 2'])
-  expect(under('renders:A16:anim/renders')).toEqual(['r03 · preview · 1080p · 1', 'r02 · preview · 1080p · 1'])
-  // One place: the rounds sit right under the animation, as before.
-  expect(under('renders:A19')).toEqual(['r04 · preview · 1080p · 1', 'r03 · preview · 1080p · 1', 'r02 · preview · 1080p · 1', 'r01 · preview · 1080p · 1'])
-})

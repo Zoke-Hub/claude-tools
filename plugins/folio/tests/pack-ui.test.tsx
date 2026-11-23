@@ -12,13 +12,14 @@ import type { Engine, On } from './engine'
 // The panel as the app opens it, wide enough for FolioPack's rows.
 const panel = ($: Engine) => openPanel($, { columns: 110, rows: 60 })
 
-// A project of three folders, each holding two folders of files.
+// A project whose one folder, p, holds three folders, each holding two folders
+// of files: p is a section of FolioPack's list, a, b and c its rows.
 const entry = (name: string, kind: FsEntry['kind'], size = 0): FsEntry => ({ name, kind, size, mtimeMs: 0, isLink: false })
-const tree: Record<string, FsEntry[]> = { '/w': [] }
+const tree: Record<string, FsEntry[]> = { '/w': [entry('p', 'dir')], '/w/p': [] }
 for (const top of ['a', 'b', 'c']) {
-  tree['/w']!.push(entry(top, 'dir'))
-  tree[`/w/${top}`] = ['x', 'y'].map(sub => entry(sub, 'dir'))
-  for (const sub of ['x', 'y']) tree[`/w/${top}/${sub}`] = [entry('notes.bin', 'file', 10)]
+  tree['/w/p']!.push(entry(top, 'dir'))
+  tree[`/w/p/${top}`] = ['x', 'y'].map(sub => entry(sub, 'dir'))
+  for (const sub of ['x', 'y']) tree[`/w/p/${top}/${sub}`] = [entry('notes.bin', 'file', 10)]
 }
 
 test('FolioPack hides the boxes below the top two, and opens one row at a time', async ($, on) => {
@@ -33,16 +34,16 @@ test('FolioPack hides the boxes below the top two, and opens one row at a time',
   expect(await ui.find({ type: 'Text', text: 'Tasks · newest first' })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: 'Chat, oldest → newest' })).toBeTruthy()
   await ui.press({ key: 'scope-project' })
-  await ui.press({ key: 'name-folder:a' })
-  await ui.press({ key: 'name-folder:a/x' })
+  await ui.press({ key: 'name-folder:p/a' })
+  await ui.press({ key: 'name-folder:p/a/x' })
   // Inside an open row, a row opens without shutting it.
   expect(await ui.find({ type: 'Button', text: /^a · 2 +▾$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /^x · 1 +▾$/ })).toBeTruthy()
   // Opening a row beside it shuts it and what was open inside it.
-  await ui.press({ key: 'name-folder:b' })
+  await ui.press({ key: 'name-folder:p/b' })
   expect(await ui.find({ type: 'Button', text: /^b · 2 +▾$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /^a · 2 +▸$/ })).toBeTruthy()
-  await ui.press({ key: 'name-folder:a' })
+  await ui.press({ key: 'name-folder:p/a' })
   expect(await ui.find({ type: 'Button', text: /^x · 1 +▸$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /^b · 2 +▸$/ })).toBeTruthy()
   await ui.press({ key: 'pack-close' })
@@ -191,7 +192,7 @@ test('an emptied Name packs under the project folder\'s name', async ($, on) => 
   await ui.unmount()
 })
 
-test("renders group under their animation, past a working folder like anim", async ($, on) => {
+test('renders in a working folder stay in it, under the folder of what they render', async ($, on) => {
   // Two animations keep renders in A##/anim/renders; one also has its own renders folder.
   const video = (name: string) => entry(name, 'file', 100)
   const renders: Record<string, FsEntry[]> = {
@@ -214,17 +215,17 @@ test("renders group under their animation, past a working folder like anim", asy
   const ui = await panel($)
   await ui.press({ key: 'folio-pack' })
   await ui.press({ key: 'scope-project' })
+  // No Renders section: the project has no Renders folder, and each folder keeps its own.
+  expect(await ui.find({ type: 'Text', text: 'Renders' })).toBeFalsy()
+  // The section steps down work/segments, a folder holding one folder, to its animations.
+  expect(await ui.find({ type: 'Text', text: 'work/segments' })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /^A16 · 2 / })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /^A19 · 3 / })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /^A21 · 1 / })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /^anim · / })).toBeFalsy()
-  // A16's two places are rows of their own.
-  await ui.press({ key: 'name-renders:A16' })
+  // A16's two folders are rows of their own.
+  await ui.press({ key: 'name-folder:work/segments/A16' })
   expect(await ui.find({ type: 'Button', text: /^renders · 1 / })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /^anim\/renders · 1 / })).toBeTruthy()
-  // A video directly in an animation's folder is a row of that animation.
-  await ui.press({ key: 'name-renders:A19' })
-  expect(await ui.find({ type: 'Button', text: /^Files directly in A19 · 1 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^anim · 1 / })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -283,7 +284,7 @@ test("FolioPack's ticks and zip lines: pictures where the surface draws them, te
     const ui = await openPanel($, { surface, columns: 110, rows: 60 })
     await ui.press({ key: 'folio-pack' })
     await ui.press({ key: 'scope-project' })
-    await ui.press({ key: 'name-folder:a' })
+    await ui.press({ key: 'name-folder:p/a' })
     const pictures = (await ui.findAll({ type: 'Svg' })).map(p => String(p.props?.alt))
     const ticks = (await ui.findAll({ type: 'Text', text: /^[☑⊟☐]$/ })).length
     const zip = await ui.find({ type: 'Text', text: /^FolioPack - w - .*\.zip$/ })

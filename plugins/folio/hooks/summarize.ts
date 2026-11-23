@@ -1,7 +1,7 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import type { EngineInterface } from 'claude-code'
+import type { EngineInterface, ModelEffort } from 'claude-code'
 
 import { logEvent } from './debug'
 import { noChanges } from './ledger'
@@ -239,9 +239,9 @@ type LightTask = 'summary' | 'part' | 'outline' | 'digest' | 'recall' | 'categor
 // One call to the light model, its answer as JSON; null when there is none.
 // Each call is a line in the log: what it was for, characters in and out, how
 // long it took, and whether it gave JSON (and why not).
-export async function complete($: EngineInterface, task: LightTask, system: string, prompt: string, maxTokens: number, timeoutMs = 60_000) {
+export async function complete($: EngineInterface, task: LightTask, system: string, prompt: string, maxTokens: number, timeoutMs = 60_000, effort?: ModelEffort) {
   const start = Date.now()
-  const reply = await $.model.complete({ model: LIGHT_MODEL, system, prompt, maxTokens, timeoutMs })
+  const reply = await $.model.complete({ model: LIGHT_MODEL, system, prompt, maxTokens, timeoutMs, ...(effort === undefined ? {} : { effort }) })
   const call = { task, charsIn: system.length + prompt.length, ms: Date.now() - start }
   if (!reply.isAnswered) {
     void logEvent($, 'haiku', { ...call, charsOut: 0, ok: false, why: reply.reason })

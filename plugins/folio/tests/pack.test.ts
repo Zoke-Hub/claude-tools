@@ -87,24 +87,20 @@ async function openPack($: Engine, on: Parameters<typeof stubEngine>[0], answer:
   return { ui, tree, files, engine }
 }
 
-test("Haiku's categories put renders under their animation and keep segment and final renders apart", async ($, on) => {
-  const { ui, files, engine } = await openPack($, on, p => (isSorting(p) ? sortedAnswer(p, true) : null))
-  // One Renders: what Haiku left out (A19's) joins it from the rules.
-  expect(await ui.findAll({ type: 'Text', text: 'Renders' })).toHaveLength(1)
+test("Haiku's kinds only split the files that sit together in one folder: no file leaves its folder", async ($, on) => {
+  const { ui, files, engine } = await openPack($, on, p => (isSorting(p) ? sortedAnswer(p) : null))
+  // No Renders section: Haiku called work/final and A16's renders "Renders", but each stays in its folder.
+  expect(await ui.findAll({ type: 'Text', text: 'Renders' })).toHaveLength(0)
+  expect(await ui.find({ type: 'Button', text: /^final · 2 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^Final renders/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /^scripts · 1 / })).toBeTruthy()
+  // notes holds two kinds by Haiku's answer (a plan, and other notes): a row for each, inside notes.
+  expect(await ui.find({ type: 'Button', text: /^Plans · 1 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^Notes · 1 / })).toBeTruthy()
+  // The animations' renders stay under work/segments, by round in their renders folder.
+  await ui.press({ key: 'name-folder:work/segments' })
   expect(await ui.find({ type: 'Button', text: /^A16 · 2 / })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /^A19 · 1 / })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /^Final renders · 2 / })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /^Working files · 1 / })).toBeTruthy()
-  // The rules' row for the final renders is gone: Haiku placed them.
-  expect(await ui.find({ type: 'Button', text: /^final · / })).toBeFalsy()
-  await ui.press({ key: 'name-sort:Renders/A16' })
-  expect(await ui.find({ type: 'Button', text: /^Segment renders · 2 / })).toBeTruthy()
-  // Renders in a category are by round, as the rules sort them.
-  await ui.press({ key: 'name-renders:sort:Renders/A16/Segment renders' })
-  expect(await ui.find({ type: 'Button', text: /^r02 · 1 / })).toBeTruthy()
-  // A category with categories under it keeps its own files in a row of their own.
-  expect(await ui.find({ type: 'Button', text: /^Plans · 1 / })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /^The rest of Notes · 1 / })).toBeTruthy()
   // Haiku read the start of the small notes file, never Folio's private file.
   const prompt = engine.prompts.find(isSorting)!
   expect(prompt).toContain('starts "# Plan Cut A19 first."')
@@ -115,11 +111,13 @@ test("Haiku's categories put renders under their animation and keep segment and 
 
 test('an answer Haiku gets wrong, or none, leaves every file to the rules', async ($, on) => {
   let answer: string | null = 'not JSON at all'
-  const { ui, engine } = await openPack($, on, p => (isSorting(p) ? answer : null))
+  const { ui, files, engine } = await openPack($, on, p => (isSorting(p) ? answer : null))
   const isRules = async () => Boolean(await ui.find({ type: 'Button', text: /^final · 2 / })) && !(await ui.find({ type: 'Button', text: /^Final renders/ }))
   expect(await isRules()).toBe(true)
   for (const wrong of ['{"categories": []}', '{"categories":[{"path":["Renders"],"members":["f999","d999","everything"]}]}', '{"categories":[{"path":[],"members":["d1"]}]}', null]) {
     answer = wrong
+    // Each wrong answer is asked for afresh: no failure kept from the last try.
+    files.delete(categoriesPath(HOME, '/w'))
     // Look again starts on This chat, as it always has.
     await ui.press({ key: 'pack-rescan' })
     await engine.clock.advance(100)
@@ -141,12 +139,14 @@ test('the categories are kept per project and asked for again only when the file
   }
   await lookAgain()
   expect(asked()).toBe(1)
-  expect(await ui.find({ type: 'Button', text: /^Final renders · 2 / })).toBeTruthy()
+  // The kept answer still splits notes into its kinds.
+  expect(await ui.find({ type: 'Button', text: /^Plans · 1 / })).toBeTruthy()
   // A new final render: that stretch of the listing is asked for again.
   tree['/w/work/final']!.push(file('Harbour_final_v2.mp4'))
   await lookAgain()
   expect(asked()).toBe(2)
-  expect(await ui.find({ type: 'Button', text: /^Final renders · 3 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^final · 3 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^Plans · 1 / })).toBeTruthy()
   await lookAgain()
   expect(asked()).toBe(2)
   await ui.unmount()
@@ -349,8 +349,8 @@ test('the form names each file by its path in the project, and the pack finds it
   const ui = await panel($)
   await ui.press({ key: 'folio-pack' })
   await engine.clock.advance(1000)
-  // This chat's files sit in Haiku's categories too.
-  expect(await ui.find({ type: 'Button', text: /^Final renders · 1 / })).toBeTruthy()
+  // This chat's files sit in their folders too.
+  expect(await ui.find({ type: 'Button', text: /^final · 1 / })).toBeTruthy()
   await ui.press({ key: 'open-always' })
   await ui.press({ key: 'name-texts' })
   expect(await ui.find({ type: 'Text', text: 'notes/plan.md' })).toBeTruthy()
@@ -381,14 +381,14 @@ test('a big listing is read in batches: each names the categories so far, and on
   expect(first).toBeGreaterThan(1)
   expect(asked()[0]).not.toContain('Categories so far')
   expect(asked()[1]).toContain('Categories so far:\n- Sources / Shots: The shots, frame by frame')
-  expect(await ui.find({ type: 'Button', text: /^Shots · 3000 / })).toBeTruthy()
+  // Every shot stays in its own folder: one kind in each, so no folder splits.
+  expect(await ui.find({ type: 'Button', text: /^s000 · 10 / })).toBeTruthy()
   // One more shot in the last folder: only its batch is asked again.
   tree['/w/shots/s299']!.push(file('frame_10.png', 2000))
   await ui.press({ key: 'pack-rescan' })
   await engine.clock.advance(100)
   await ui.press({ key: 'scope-project' })
   expect(asked().length).toBe(first + 1)
-  expect(await ui.find({ type: 'Button', text: /^Shots · 3001 / })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -441,7 +441,8 @@ test('sorting stops asking after two calls with no answer, and the rules place t
   await ui.press({ key: 'folio-pack' })
   await ui.press({ key: 'scope-project' })
   expect(engine.prompts.filter(isSorting)).toHaveLength(2)
-  expect(await ui.find({ type: 'Button', text: /^shots · 3000 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'shots' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /^s000 · 10 / })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -465,9 +466,9 @@ test('sorting asks no more after three minutes, and keeps what came', async ($, 
   for (let i = 0; i < 10 && !(await ui.find({ key: 'scope-project' })); i++) await engine.clock.advance(1000)
   await ui.press({ key: 'scope-project' })
   expect(engine.prompts.filter(isSorting)).toHaveLength(2)
-  // The first two batches are Haiku's; the rest the rules'.
-  expect(await ui.find({ type: 'Button', text: /^Shots · / })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /^shots · / })).toBeTruthy()
+  // The two answers that came are kept; the folders list every shot either way.
+  expect(Object.keys(JSON.parse(engine.files.get(categoriesPath(HOME, '/w'))!).batches)).toHaveLength(2)
+  expect(await ui.find({ type: 'Button', text: /^s000 · 10 / })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -607,4 +608,27 @@ test("a whole-project scan reads no tasks or ledger of a chat outside the projec
   // Its summarised part's card is read, to see whether its files sit in the project; nothing more.
   expect(files.reads).toContain(`${elsewhere}/parts/p-e1.json`)
   expect(files.reads.filter(p => [`${elsewhere}/parts/p-e2.json`, `${elsewhere}/tasks.json`, `${elsewhere}/ledger.json`].includes(p))).toEqual([])
+})
+
+test('sorting asks Haiku at low effort, with room for its answer', async ($, on) => {
+  // At its own effort Haiku spent a 4,000-token cap thinking and gave no answer.
+  const { ui, engine } = await openPack($, on, p => (isSorting(p) ? sortedAnswer(p) : null))
+  const sorting = engine.calls.filter(c => isSorting(c.prompt))
+  expect(sorting.length).toBeGreaterThan(0)
+  for (const c of sorting) expect(c).toMatchObject({ effort: 'low', maxTokens: 16_000 })
+  await ui.unmount()
+})
+
+test('a batch Haiku gave no answer for is not asked again while its files stay the same', async ($, on) => {
+  const { ui, engine } = await openPack($, on, () => null)
+  const asked = () => engine.calls.filter(c => isSorting(c.prompt)).length
+  const first = asked()
+  expect(first).toBeGreaterThan(0)
+  await ui.press({ key: 'pack-rescan' })
+  await engine.clock.advance(100)
+  await ui.press({ key: 'scope-project' })
+  // The rules place them at once, with no wait for another try that would fail the same way.
+  expect(asked()).toBe(first)
+  expect(await ui.find({ type: 'Button', text: /^final · 2 / })).toBeTruthy()
+  await ui.unmount()
 })
