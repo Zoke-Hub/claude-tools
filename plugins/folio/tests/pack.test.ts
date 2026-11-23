@@ -10,7 +10,7 @@ import { chatFiles } from '../hooks/pack'
 import { freeNumbers } from '../hooks/sync'
 import { normaliseChunk } from '../hooks/store'
 import type { ChunkRecord, Ledger, PickerView, TaskList } from '../types'
-import { callTool, DIR, HOME, mountPanel, openChat, packUpNow, saved, savedView, seed, stubEngine, start, talk } from './engine'
+import { callTool, DIR, HOME, mountPanel, openChat, PACKS, packUpNow, saved, savedView, seed, stubEngine, start, talk } from './engine'
 import type { Engine } from './engine'
 
 // FolioPack's categories (Haiku's, with the rules for what it leaves out) and
@@ -221,7 +221,7 @@ test("a new pack carries each part's card, the tasks and the ledger, each chat i
   on('prompt.submit', (_, e) => ({ text: e.text }))
   const { files, clock } = await ownChat($, on)
   await packUpNow($, clock)
-  const packed = new Map([...files].filter(([path]) => path.startsWith(`${HOME}/FolioPacks/`)).map(([path, text]) => [path.replace(/^.*?\/FolioPack - [^/]*\//, ''), text]))
+  const packed = new Map([...files].filter(([path]) => path.startsWith(`${PACKS}/`)).map(([path, text]) => [path.replace(/^.*?\/FolioPack - [^/]*\//, ''), text]))
   const folio = JSON.parse(packed.get('folio.json')!) as { folio: number; chats: Array<{ dir: string; parts: number }> }
   expect(folio.folio).toBe(3)
   expect(folio.chats).toEqual([{ id: 'this', dir: 'chats/1', parts: 4 }])
@@ -358,7 +358,9 @@ test('the form names each file by its path in the project, and the pack finds it
   await ui.press({ key: 'pack-up' })
   await engine.clock.advance(1000)
   await ui.unmount()
-  const packed = [...files].find(([path]) => path.startsWith(`${HOME}/FolioPacks/`) && path.endsWith('/files/notes/plan.md'))
+  // The project's work folder keeps the name it has (work/), so no second
+  // Work folder is made beside it on a disk that tells cases apart.
+  const packed = [...files].find(([path]) => path.startsWith('/w/work/Folio/Folio packs/') && path.endsWith('/files/notes/plan.md'))
   expect(packed?.[1]).toBe('# Plan\nCut A19 first.')
 })
 
@@ -411,7 +413,7 @@ test("a whole project's pack carries the other chats' tasks and ledgers too", as
   await ui.press({ key: 'pack-up' })
   await engine.clock.advance(1000)
   await ui.unmount()
-  const packed = new Map([...files].filter(([path]) => path.startsWith(`${HOME}/FolioPacks/`)).map(([path, text]) => [path.replace(/^.*?\/FolioPack - [^/]*\//, ''), text]))
+  const packed = new Map([...files].filter(([path]) => path.startsWith(`${PACKS}/`)).map(([path, text]) => [path.replace(/^.*?\/FolioPack - [^/]*\//, ''), text]))
   expect(JSON.parse(packed.get('folio.json')!).chats.map((c: { id: string; dir: string }) => [c.id, c.dir])).toEqual([
     ['this', 'chats/1'],
     ['other-chat', 'chats/2'],
@@ -495,7 +497,7 @@ test('START-HERE.md goes through the private check, as every other file of the p
   await ui.press({ key: 'pack-up' })
   await clock.advance(1000)
   await ui.unmount()
-  const startHere = [...files].find(([path]) => path.startsWith(`${HOME}/FolioPacks/`) && path.endsWith('/START-HERE.md'))![1]
+  const startHere = [...files].find(([path]) => path.startsWith(`${PACKS}/`) && path.endsWith('/START-HERE.md'))![1]
   expect(startHere).toContain('Maps for [private:email address')
   expect(startHere).not.toContain('jo.bloggs@mailbox.org')
 })
@@ -583,7 +585,7 @@ test('a pack whose session ends while it waits on the summaries stops: nothing i
   await clock.advance(1000)
   await ui.unmount()
   expect(asked).toBe(0)
-  expect([...files.keys()].filter(k => k.includes('/FolioPacks/'))).toEqual([])
+  expect([...files.keys()].filter(k => k.startsWith(`${PACKS}/`) || k.includes('/FolioPacks/'))).toEqual([])
 })
 
 test("a whole-project scan reads no tasks or ledger of a chat outside the project, and no card of a part not summarised (SC1)", async ($, on) => {

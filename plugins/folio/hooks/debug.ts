@@ -3,6 +3,7 @@
 
 import type { EngineInterface } from 'claude-code'
 
+import { copyTo } from './copies'
 import { safeName } from './paths'
 import { boundId, folioDir, homeDir } from './store'
 
@@ -56,6 +57,9 @@ async function flush($: EngineInterface): Promise<void> {
         const text = `${before}${lines.join('')}`
         await $.fs.write(path, text)
         written = { path, text }
+        // The chat's log goes with the rest of its copy in the project.
+        const day = /\/log\/(\d{4}-\d{2}-\d{2})\/([^/]+)\.jsonl$/.exec(path)
+        if (day !== null) await copyTo($, day[2]!, `log/${day[1]}.jsonl`, text)
       } catch {
         // Lines that can't be written are let go.
       }

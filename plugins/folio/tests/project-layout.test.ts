@@ -5,7 +5,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { FsEntry } from 'claude-code'
 
-import { LAYOUT_BLOCK, layoutNote } from '../hooks/layout'
+import { LAYOUT_BLOCK, layoutNote, noteOf } from '../hooks/layout'
 import { walk } from '../hooks/pack'
 import { HOME, start, stubEngine } from './engine'
 
@@ -90,15 +90,38 @@ function treeOf(root: string, paths: string[]): Record<string, FsEntry[]> {
   return tree
 }
 
-test("the chat's first message carries the note as a block of its own, and the note is saved for the next chat in the folder", async ($, on) => {
+test("the chat's first message carries the note as a block of its own after the project-folders rule, and the places are saved for the next chat in the folder", async ($, on) => {
   on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   const { files } = stubEngine(on, { tree: treeOf('/w', SEGMENTS) })
   await start($, '/w')
   const { blocks } = await $.prompt.context({ blocks: [{ name: 'currentDate', text: 'today' }] })
-  expect(blocks.map(b => b.name)).toEqual(['currentDate', 'folio', LAYOUT_BLOCK])
-  expect(blocks[2]!.text).toContain('renders in `work/segments/<animation>/anim/renders/`')
+  expect(blocks.map(b => b.name)).toEqual(['currentDate', 'folio', 'folio-projects', LAYOUT_BLOCK])
+  const text = blocks[3]!.text
+  expect(text).toContain('renders in `work/segments/<animation>/anim/renders/`')
+  // The rule comes first, and the note no longer forbids the tidy the rule offers.
+  expect(text).toContain("Folio's project-folders rule comes first")
+  expect(text).toContain('Move or tidy files only as that rule says, on a yes.')
+  expect(text).not.toContain('Never move')
   const saved = [...files].find(([path]) => path.startsWith(`${HOME}/.claude/folio/layouts/`))
-  expect(saved?.[1]).toContain('work/segments/<animation>/anim/renders/')
+  expect(JSON.parse(saved?.[1] ?? '{}').places.parts).toContain('renders in `work/segments/<animation>/anim/renders/` (named `rNN_…` by round; a new round takes the next number)')
+})
+
+test('with the project-folders rule off, the note stands alone and says never to move a file', { options: { projectLayout: false } }, async ($, on) => {
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
+  stubEngine(on, { tree: treeOf('/w', SEGMENTS) })
+  await start($, '/w')
+  const { blocks } = await $.prompt.context({ blocks: [] })
+  expect(blocks.map(b => b.name)).toEqual(['folio', LAYOUT_BLOCK])
+  expect(blocks[1]!.text).toContain('Never move, rename or tidy existing files to fit this.')
+  expect(blocks[1]!.text).not.toContain('project-folders rule')
+})
+
+test('the note follows from the places in both wordings, and no places give no note', () => {
+  const places = { parts: ['renders in `renders/`'], which: '' }
+  expect(noteOf(places, true)).toContain('Folio read where this project keeps its files now: renders in `renders/`.')
+  expect(noteOf(places, false)).toContain('Folio read where this project keeps its files: renders in `renders/`.')
+  expect(noteOf(null, true)).toBe('')
+  expect(noteOf(null, false)).toBe('')
 })
 
 test('a chat in the home folder gets no note, and the folder is not read', async ($, on) => {
@@ -116,16 +139,16 @@ test('a chat in the home folder gets no note, and the folder is not read', async
   })
   await start($, HOME)
   const { blocks } = await $.prompt.context({ blocks: [] })
-  expect(blocks.map(b => b.name)).toEqual(['folio'])
+  expect(blocks.map(b => b.name)).toEqual(['folio', 'folio-projects'])
   expect(listed.some(path => path.replace(/\\/g, '/').endsWith(HOME))).toBe(false)
 })
 
-test('with the setting off, no note and no read', { options: { projectLayout: false } }, async ($, on) => {
+test('with the setting off, no note and no read', { options: { projectPlaces: false } }, async ($, on) => {
   on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   stubEngine(on, { tree: treeOf('/w', SEGMENTS) })
   await start($, '/w')
   const { blocks } = await $.prompt.context({ blocks: [] })
-  expect(blocks.map(b => b.name)).toEqual(['folio'])
+  expect(blocks.map(b => b.name)).toEqual(['folio', 'folio-projects'])
 })
 
 test('in a folder of several projects, a place open at the top counts only when every project keeps that kind that way', () => {
@@ -163,7 +186,7 @@ test('auto-save, backup and scratch folders are not read', async ($, on) => {
   })
   await start($, '/w')
   const { blocks } = await $.prompt.context({ blocks: [] })
-  expect(blocks.map(b => b.name)).toEqual(['folio'])
+  expect(blocks.map(b => b.name)).toEqual(['folio', 'folio-projects'])
   expect(listed.some(path => /Auto-Save|Scratch|Backup/.test(path))).toBe(false)
 })
 

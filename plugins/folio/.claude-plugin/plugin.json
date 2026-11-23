@@ -16,16 +16,28 @@
       "description": "A shell command's output over 20,000 characters reaches Claude as its start, its end and a note. Folio saves the whole output first, and recall gives back any of it word for word. A command that only prints files, and any output inside a subagent, stays whole. On by default; turn it off to keep every output whole in the chat.",
       "default": true
     },
-    "projectLayout": {
-      "type": "boolean",
-      "title": "Tell Claude where this project keeps its files",
-      "description": "Once per chat, Folio reads where the project already keeps each kind of file (renders, editing projects, references, sound) and tells Claude to save new files of each kind there. It never moves a file, and a project with no clear layout gets no note. On by default; turn it off to leave file places to Claude.",
-      "default": true
-    },
     "promptPointers": {
       "type": "boolean",
       "title": "Point Claude to folded parts",
       "description": "When a prompt or a subagent's brief names a file, an id such as A29, or a task that only folded parts hold, Folio adds one line for Claude: \"Folded parts that mention A29: 77, 79, 96.\" No model call, about 30 tokens, and only when something matches. On by default; turn it off to add nothing to prompts.",
+      "default": true
+    },
+    "projectLayout": {
+      "type": "boolean",
+      "title": "Keep project folders organised",
+      "description": "Folio gives Claude a short rule for laying out a project's folders: Animations, Renders/Drafts and Renders/Final by animation, Segments by animation, sorted References, and Work for everything else (Work/Scripts for the script and breakdown, Work/Backup, and a folder for each tool), with a README at the top and folder names starting with a capital letter. FolioPack's list then reads as clean groups. Claude offers to tidy a project that has drifted, and moves files only on your yes. A layout rule the project already has comes first, and a code repository keeps its own. About 400 tokens, sent at the start and after each compaction. On by default; turn it off to send nothing.",
+      "default": true
+    },
+    "projectPlaces": {
+      "type": "boolean",
+      "title": "Tell Claude where this project keeps its files",
+      "description": "Once per chat, Folio reads where the project already keeps each kind of file (renders, editing projects, references, sound) and tells Claude. With Keep project folders organised on, that rule comes first: this note fills in where a project doesn't follow it yet or the rule names no place, and Claude moves files only as the rule says, on your yes. With that rule off, Claude saves new files where their kind already lives and never moves one. A project with no clear layout gets no note. On by default; turn it off to leave file places to Claude.",
+      "default": true
+    },
+    "projectCopies": {
+      "type": "boolean",
+      "title": "Keep a copy of each chat in its project",
+      "description": "In a project with a Work folder at its top, Folio writes a copy of its files for each chat into the project: the summaries, part cards, tasks and ledger in Work/Folio/<chat>, and the word-for-word archive and the chat's log in Work/Backup/Folio/<chat>. Folio never makes the Work folder itself. It still reads its own store in ~/.claude/folio, so recall keeps working when the project is moved or its drive is away. The private file is never copied; every other file already holds a placeholder for each private value. Never in the home folder or a code repository. FolioPack leaves these folders out, since it packs the chats itself. On by default; turn it off to stop writing copies (the ones written stay).",
       "default": true
     },
     "foldNote": {

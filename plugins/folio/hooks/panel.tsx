@@ -11,7 +11,7 @@ import { shortTokens } from './chunks'
 import { keptAndFolded, keptParts, realContext, realOf, summaryTokens, tokensOf, workChunks, workTokens } from './measure'
 import { drawBar, MIN_PART_COLUMNS, PART_PX } from './bars'
 import type { Tick } from './pack'
-import { alwaysLines, bytesText, filesName, filesOf, folderState, groupsOf, isPackBusy, packFolder, packName, packTitle, packUp, privateLine, privateList, scanProject, tickedBytes, tickOf, toggleGroup, writeSaveTo } from './pack'
+import { alwaysLines, bytesText, filesName, filesOf, folderState, groupsOf, isPackBusy, packFolder, packName, packTitle, packUp, privateLine, privateList, scanProject, shortFolder, tickedBytes, tickOf, toggleGroup, writeSaveTo } from './pack'
 import { cappedBrief } from './brief'
 import type { BriefLines } from './brief'
 import { partNo, partNos, runs } from './fold'
@@ -1238,8 +1238,12 @@ async function packSection(
     void writeSaveTo($, saveTo).catch(() => {})
   }
   const saveTo = draft?.saveTo ?? ''
-  const folder = isOpen && draft !== null ? packFolder(saveTo, await homeDir($)) : ''
-  const reach = folder === '' ? 'ready' : await folderState($, folder)
+  const home = await homeDir($)
+  const fallback = draft?.defaultFolder ?? `${home}/FolioPacks`
+  const folder = isOpen && draft !== null ? packFolder(saveTo, home, fallback) : ''
+  // The default Work/Folio may not be there yet: it is made inside the project.
+  const reach = folder === '' ? 'ready' : await folderState($, folder, saveTo === '' ? draft?.root : undefined)
+  const shownDefault = shortFolder(fallback, home)
   const line = (left: RenderChildren, right?: string) => (
     <Box flexDirection="row" justifyContent="space-between" alignItems="flex-start" gap="sm">
       <Box flexShrink={1}>{left}</Box>
@@ -1524,10 +1528,10 @@ async function packSection(
         <Box flexDirection="row" alignItems="flex-end" gap="sm">
           <Box flexGrow={1}>
             {draws.input ? (
-              <elements.Input key="pack-save-to" label="Saves to" placeholder="~/FolioPacks" value={saveTo} onInput={setSaveTo} onSubmit={setSaveTo} />
+              <elements.Input key="pack-save-to" label="Saves to" placeholder={shownDefault} value={saveTo} onInput={setSaveTo} onSubmit={setSaveTo} />
             ) : (
               <Text size="footnote" weight="medium">
-                Saves to {saveTo || '~/FolioPacks'}
+                Saves to {saveTo || shownDefault}
               </Text>
             )}
           </Box>

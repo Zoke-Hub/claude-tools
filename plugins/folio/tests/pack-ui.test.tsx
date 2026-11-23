@@ -52,10 +52,10 @@ test('FolioPack hides the boxes below the top two, and opens one row at a time',
 
 test('Pack up says Packed after one press and takes no second one', async ($, on) => {
   let packs = 0
-  // The home folder is there, so ~/FolioPacks can be made in it; the zip is
-  // there once Claude has made it.
+  // The project's folder is there, so its Work/Folio can be made in it; the
+  // zip is there once Claude has made it.
   let isZipped = false
-  const { toasts } = stubEngine(on, { tree, exists: path => path === HOME || (isZipped && path.endsWith('.zip')) })
+  const { toasts } = stubEngine(on, { tree, exists: path => path === HOME || path === '/w' || (isZipped && path.endsWith('.zip')) })
   let ask = ''
   on('prompt.submit', (_, e) => {
     packs++
@@ -97,7 +97,7 @@ test('Saves to reads Mac and Windows paths alike', () => {
 
 // Pack up on a drive that isn't connected says so and packs nothing; once the
 // folder is reachable, it packs there, and the folder is kept for every chat.
-async function packTo($: Engine, on: On, home = HOME, os?: string, there = [home]) {
+async function packTo($: Engine, on: On, home = HOME, os?: string, there = [home, '/w']) {
   const asks: string[] = []
   // On a Mac the engine reads a Windows path as relative to the mod's folder,
   // so a test path matches by its ending.
@@ -153,7 +153,7 @@ test('Pack up on Windows saves to the typed folder and zips with Windows tar', a
   expect([...writes.keys()].some(k => k.includes('D:/Folio Packs/FolioPack - '))).toBe(true)
   const prefs = () => JSON.parse([...writes].find(([k]) => k.endsWith('C:/Users/me/.claude/folio/prefs.json'))?.[1] ?? '{}')
   expect(prefs()).toEqual({ saveTo: 'D:\\Folio Packs' })
-  // Reset goes back to ~/FolioPacks.
+  // Reset goes back to the default, the project's Work/Folio.
   await ui.press({ key: 'pack-save-reset' })
   expect(prefs()).toEqual({ saveTo: '' })
   await ui.unmount()

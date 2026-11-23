@@ -30,8 +30,11 @@ export type Point = {
   remindedCall?: number | null
 }
 
-/** Claude's own count for a point, as the count tool last sent it. */
-export type PointCount = { done: number; total: number; unit: string | null; at: number; call: number; none?: boolean }
+/**
+ * Claude's own count for a point, as the count tool last sent it. `peak` is the most pieces it ever counted done for
+ * the point: a count that never went past 0 stands aside for the point's background work while Claude waits on it.
+ */
+export type PointCount = { done: number; total: number; unit: string | null; at: number; call: number; none?: boolean; peak?: number }
 
 /** One step inside a helper job (a script that reports its own progress). */
 export type TaskStep = {

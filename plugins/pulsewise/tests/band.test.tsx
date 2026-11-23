@@ -5,7 +5,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentStatus, On } from 'claude-code'
 
-import { cleanLabel, etaRecord, jobToTask, settleOverdue } from '../hooks/register'
+import { cleanLabel, etaRecord, jobToTask, pointFill, pointWeight, settleOverdue } from '../hooks/register'
 
 const BAND = {
   plugin: 'pulsewise',
@@ -2718,4 +2718,103 @@ test('a new job with the same name as one that stopped is its redo, wherever it 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await drawnText(ui)).toContain('redo of “Log the site ads”')
   await ui.unmount()
+})
+
+/** An opened beat's percentage, from the line the bar reads out for it ("Fix the chunk store 58%. …"). */
+const beatPct = (drawn: string, point: string) => Number(new RegExp(`${point.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} (\\d+)%\\.`).exec(drawn)?.[1] ?? NaN)
+
+/** The beat of point 1, opened, as drawn now (shut again after, since the bar remembers an opened beat). */
+const openedBeat = async ($: Engine) => {
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'open-p:0' })
+  const drawn = await drawnText(ui)
+  await ui.press({ key: 'open-p:0' })
+  await ui.unmount()
+  return drawn
+}
+
+/**
+ * Point 1 handed whole to a background job of five steps (Read code, Orphan test, Units and legs, Naming and repair,
+ * Checks), on its fourth; point 2 still to come.
+ */
+const handedChat = async ($: Engine, on: On) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('turn.start', (_, e) => ({ turnId: (e as { turnId?: string }).turnId ?? 't' }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Fix the chunk store', status: 'in_progress' }, { content: 'Report back', status: 'pending' }] })
+  const t0 = Date.now() - 10 * 60_000
+  const step = (name: string, state: string, started: number | null, ended: number | null) => ({ name, state, done: null, total: null, unit: null, weight: null, est_ms: null, started, ended })
+  const steps = [
+    step('Read code', 'done', t0, t0 + 120_000),
+    step('Orphan test', 'done', t0 + 120_000, t0 + 240_000),
+    step('Units and legs', 'done', t0 + 240_000, t0 + 420_000),
+    step('Naming and repair', 'running', t0 + 420_000, null),
+    step('Checks', 'pending', null, null),
+  ]
+  files.set('j-store', { mtime: 1, body: () => jobBody({ id: 'j-store', name: 'Store fixes', point: '1', started: t0, steps }) })
+  await clock.advance(1100)
+  return { clock }
+}
+
+test("a count that never moved stands aside while Claude's turn waits on the point's background job", async ($, on) => {
+  const { clock } = await handedChat($, on)
+  // Claude counts the handed-over point and never moves it, then its turn ends to wait on the job.
+  await $.tool.call({ tool: COUNT, point: 1, done: 0, total: 3, unit: 'parts' })
+  await clock.advance(5 * 60_000)
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  await clock.advance(13 * 60_000)
+  const drawn = await openedBeat($)
+  // No grey Claude block stuck at 0 beside the job's steps, and the beat reads as the job goes (on its 4th step of 5).
+  expect(drawn).toContain('Naming and repair')
+  expect(drawn).not.toContain('waiting on its background work')
+  expect(beatPct(drawn, 'Fix the chunk store')).toBeGreaterThanOrEqual(55)
+})
+
+test("a count whose total is the steps of the point's one stepped job stands aside; another count still shows", async ($, on) => {
+  await handedChat($, on)
+  // Claude counts the job's own five steps: the same work twice, so only the job's steps make the beat.
+  await $.tool.call({ tool: COUNT, point: 1, done: 0, total: 5, unit: 'steps' })
+  let drawn = await openedBeat($)
+  expect(drawn).not.toContain('Claude · 0 / 5 steps')
+  expect(beatPct(drawn, 'Fix the chunk store')).toBeGreaterThanOrEqual(55)
+  // A count of Claude's own pieces, while its turn runs, keeps its part beside the job.
+  await $.tool.call({ tool: COUNT, point: 1, done: 0, total: 3, unit: 'parts' })
+  drawn = await openedBeat($)
+  expect(drawn).toContain('0 / 3 parts')
+})
+
+test("one long call with Claude's count unchanged holds its part where it stood, so the beat doesn't sink", () => {
+  // The case seen: point 1 renders (a 13-second job), logs and posts (one slow publish). Claude counted 1 of 3 after
+  // the render and never sent 2 of 3 before the post. The model is built with its times in the past, since the bar
+  // reads Date.now and the test clock moves only timers.
+  const t0 = 1_800_000_000_000
+  const s = 1000
+  const m = {
+    points: [
+      { name: 'Render r12, post to MarkRoom', state: 'running', started: t0, ended: null, count: { done: 1, total: 3, unit: 'steps', at: t0 + 21 * s, call: 4, peak: 1 } },
+      { name: 'Report back', state: 'pending', started: null, ended: null },
+    ],
+    tasks: [
+      {
+        id: 'j-r12', kind: 'job', name: 'Render r12', state: 'done', point: 0, started: t0, ended: t0 + 13 * s, actions: 0,
+        steps: [{ name: 'Render', state: 'done', done: null, total: null, unit: null, weight: null, estMs: null, started: t0, ended: t0 + 13 * s }],
+      },
+    ],
+    // The post: one call, from just after the count.
+    actions: [{ label: 'Publish the board', started: t0 + 21 * s, toolUseId: 'post', isWaiting: false }],
+    log: [], side: [], finishedAt: null, phase: 'working', phaseAt: t0, turn: 1, listTurn: 1, closedJobs: {},
+  } as never
+  const atStart = { fill: pointFill(m, 0, t0 + 21 * s), weight: pointWeight(m, 0, t0 + 21 * s) }
+  // Under 30 seconds in, Claude's part grows by its count as before.
+  expect(pointWeight(m, 0, t0 + 45 * s)).toBeGreaterThan(atStart.weight)
+  // Two and a half minutes into the call, the count unchanged: the beat and its share of the pulse stay where they were.
+  const later = { fill: pointFill(m, 0, t0 + 171 * s), weight: pointWeight(m, 0, t0 + 171 * s) }
+  expect(atStart.fill).toBeGreaterThan(0.3)
+  expect(Math.abs(later.fill - atStart.fill)).toBeLessThan(0.01)
+  expect(later.weight).toBe(atStart.weight)
 })

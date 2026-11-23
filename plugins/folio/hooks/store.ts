@@ -6,6 +6,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Activity, Brief, ChunkRecord, Ledger, MapState, PickerView, RealSizes, RowType, Section, Settings, Strategy, Task, TaskList } from '../types'
 import type { Vault } from './private'
+import { copyTo } from './copies'
 import { safeName, slash } from './paths'
 import { houseRules } from './house'
 import { emptyLedger, withPointValues } from './ledger'
@@ -560,7 +561,8 @@ async function readMap($: EngineInterface, dir: string): Promise<MapState | null
   return isWhole ? { ...state, text } : null
 }
 
-// Writes the files that changed since they were last written (S2); only an open store writes.
+// Writes the files that changed since they were last written (S2); only an
+// open store writes. Each goes to the project's copy as well (copies.ts).
 async function save($: EngineInterface): Promise<void> {
   const open = store
   if (open.kind !== 'open') return
@@ -568,6 +570,7 @@ async function save($: EngineInterface): Promise<void> {
     if (open.written.get(path) === text) continue
     await $.fs.write(path, text)
     open.written.set(path, text)
+    await copyTo($, open.id, path.slice(open.dir.length + 1), text)
   }
 }
 
@@ -626,7 +629,9 @@ export async function savePrivate($: EngineInterface): Promise<void> {
 export async function writeOriginal($: EngineInterface, id: string, original: Original) {
   const dir = openDir()
   if (dir === '') return
-  await $.fs.write(`${dir}/originals/${id}.json`, JSON.stringify({ ...original, version: ORIGINAL_VERSION }))
+  const text = JSON.stringify({ ...original, version: ORIGINAL_VERSION })
+  await $.fs.write(`${dir}/originals/${id}.json`, text)
+  await copyTo($, boundId() ?? '', `originals/${id}.json`, text)
 }
 
 // A shell output Folio shortened in the chat, whole, by its id.
@@ -634,6 +639,7 @@ export async function writeOutput($: EngineInterface, id: string, text: string) 
   const dir = openDir()
   if (dir === '') return
   await $.fs.write(`${dir}/outputs/${id}.txt`, text)
+  await copyTo($, boundId() ?? '', `outputs/${id}.txt`, text)
 }
 
 export async function readOutput($: EngineInterface, id: string): Promise<string | null> {

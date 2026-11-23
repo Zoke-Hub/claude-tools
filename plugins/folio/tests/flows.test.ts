@@ -8,7 +8,7 @@ import { outputId, shorten } from '../hooks/shorten'
 import { chunksOf, messageTexts, splitChunks, TIDY_MARK, toolResultsOf, TRIM_MARK } from '../hooks/chunks'
 import type { Original } from '../hooks/store'
 import type { Ledger } from '../types'
-import { callTool, chat, DIR, HOME, mountPanel, openChat, packUpNow, request, saved, savedOriginal, savedView, seed, start, stubEngine, talk } from './engine'
+import { callTool, chat, DIR, mountPanel, openChat, PACKS, packUpNow, request, saved, savedOriginal, savedView, seed, start, stubEngine, talk } from './engine'
 
 test("a long turn's new work is saved before Claude Code's own compaction runs", async ($, on) => {
   const messages = talk(40)
@@ -27,7 +27,7 @@ test('every chat carries a line pointing to recall, as a block of its own', asyn
   on('prompt.context', (_, e) => ({ blocks: e.blocks }))
   await openChat($, on, seed(messages, 'watch'), messages)
   const { blocks } = await $.prompt.context({ blocks: [{ name: 'currentDate', text: 'today' }] })
-  expect(blocks.map(b => b.name)).toEqual(['currentDate', 'folio'])
+  expect(blocks.map(b => b.name)).toEqual(['currentDate', 'folio', 'folio-projects'])
   expect(blocks[1]!.text).toContain('mcp__folio__recall')
   // It names the new ways in: kinds and a part's card.
   expect(blocks[1]!.text).toContain('kind "command"')
@@ -273,7 +273,7 @@ test('a pack holds no private value, even one that appears unlabelled', async ($
   const { clock } = await openChat($, on, files, messages)
   await packUpNow($, clock)
 
-  const packed = [...files].filter(([path]) => path.startsWith(`${HOME}/FolioPacks/`))
+  const packed = [...files].filter(([path]) => path.startsWith(`${PACKS}/`))
   const startHere = packed.find(([path]) => path.endsWith('/START-HERE.md'))?.[1] ?? ''
   // It offers the install line, and names no folder of the computer that made it.
   expect(startHere).toContain('claude plugin install folio --marketplace')
@@ -298,7 +298,7 @@ test('Pack up runs the summaries a small Watch chat was waiting with, and packs 
   await engine.clock.advance(1000)
   await ui.unmount()
   expect(engine.prompts.length).toBeGreaterThan(0)
-  const pack = [...files].find(([path]) => path.startsWith(`${HOME}/FolioPacks/`) && path.endsWith('/folio.json'))![1]
+  const pack = [...files].find(([path]) => path.startsWith(`${PACKS}/`) && path.endsWith('/folio.json'))![1]
   expect((JSON.parse(pack) as { brief: { rules: string[] } }).brief.rules).toEqual(['Number every render'])
 })
 

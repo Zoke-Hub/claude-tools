@@ -7,13 +7,17 @@ import type { EngineInterface, Register } from 'claude-code'
 import { afterTurn, armIdle, coldFold, compactNow, currentHistory, isSameChat, onCompact, REBUILD_ASK, resetActions, setReplying, showFolding } from './actions'
 import { shortTokens } from './chunks'
 import { noteRequest, refreshContext, setDueTokens } from './measure'
-import { FILES_PREFIX, IMPORT_DESCRIPTION, IMPORT_SCHEMA, importPack, notePackTurn, PACK_PREFIX, packOnOpen, packTurnDone, resetPack } from './pack'
+import { FILES_PREFIX, IMPORT_DESCRIPTION, IMPORT_SCHEMA, importPack, notePackTurn, PACK_PREFIX, packOnOpen, packTurnDone, projectFolder, resetPack } from './pack'
+import { catchUp, copiesIn, setCopies } from './copies'
+import { isFilesProject, workFolders } from './work'
+import { slash } from './paths'
 import { HISTORY_BLOCK, RECALL_TOOL } from './fold'
 import { currentLayout, LAYOUT_BLOCK, readLayout } from './layout'
 import { drawPanel, layoutOf, resetPanel } from './panel'
-import { AGENT_LINE, noteCut, RECALL_BLOCK, RECALL_DESCRIPTION, RECALL_SCHEMA, recallCall, resetRecall } from './recall'
+import { fixedBlocks } from './projects'
+import { AGENT_LINE, noteCut, RECALL_DESCRIPTION, RECALL_SCHEMA, recallCall, resetRecall } from './recall'
 import { pointerLine, resetPointers, warmPointers } from './pointers'
-import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, openStore, setSettings, storeFailure } from './store'
+import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, folioDir, homeDir, openStore, sessionsDir, setSettings, storeFailure } from './store'
 import { noteCommand, shortenRow } from './shorten'
 import { resetHouse } from './house'
 import { noteTurnGrowth, noteTurnStart, resetSync, syncChunks } from './sync'
@@ -58,6 +62,39 @@ async function rebind($: EngineInterface, id: string) {
     $.ui.toast(`Folio couldn't open this chat's saved parts (${errorText(err)}). It leaves this chat alone and changes none of its files until Claude Code starts again.`)
   }
   if (was !== null) void note($, `the chat went on as session ${id}: Folio closed ${was} and opened ${id}`)
+  await bindCopies($).catch(err => note($, `the project's copy could not be set up: ${errorText(err)}`))
+}
+
+// Whether chats keep a copy of their Folio files in their project (the
+// projectCopies setting, read once by register), and the chat it was last
+// settled for, copied or not.
+let isCopying = true
+let copiesFor: string | null = null
+
+// A chat whose project has a Work folder at its top keeps a copy of its Folio
+// files in Work/Folio and Work/Backup/Folio (copies.ts, work.ts). Folio doesn't
+// make the Work folder itself: a project laid out by the project-folders rule
+// has one. Never the home folder or one above it, Folio's own folder, or a
+// code repository (isFilesProject). Settled once a chat, when its folder is
+// known; the chat's whole store is copied after the reply, and from then on
+// each write is.
+async function bindCopies($: EngineInterface) {
+  const id = boundId()
+  if (!isCopying || id === null || storeFailure() !== null || copiesFor === id) return
+  const cwd = slash((await read($, view)).cwd).replace(/\/+$/, '')
+  if (cwd === '') return
+  copiesFor = id
+  const home = slash(await homeDir($)).replace(/\/+$/, '')
+  const project = await projectFolder($, cwd, home, id)
+  if (!(await isFilesProject($, project, home))) return
+  const folders = await workFolders($, project)
+  if (!folders.hasWork) return
+  const c = copiesIn(folders, id)
+  setCopies(c)
+  later($, async () => {
+    const done = await catchUp($, c, `${sessionsDir(home)}/${id}`, `${folioDir(home)}/log`)
+    void logEvent($, 'copies', done)
+  })
 }
 
 // Lets go of everything one session holds: its store, waiting folds and packs,
@@ -65,6 +102,8 @@ async function rebind($: EngineInterface, id: string) {
 // and its FolioPack form.
 async function endSession($: EngineInterface) {
   await closeStore($)
+  setCopies(null)
+  copiesFor = null
   resetRecall()
   resetPointers()
   resetSync()
@@ -129,6 +168,8 @@ async function pointersAt($: EngineInterface, text: string): Promise<string> {
 }
 
 export const register: Register = (on, options) => {
+  const withProjects = options.projectLayout !== false
+  isCopying = options.projectCopies !== false
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({ name: COMMAND, description: 'Open Folio, which keeps long chats small' })
@@ -137,9 +178,10 @@ export const register: Register = (on, options) => {
     await ensureSession($)
     await change($, v => ({ ...v, cwd: e.cwd }))
     // Where this project keeps its files, for the note the first message carries.
-    if (options.projectLayout !== false) readLayout($, e.cwd)
+    if (options.projectPlaces !== false) readLayout($, e.cwd)
     later($, async () => {
       await ensureSession($)
+      await bindCopies($).catch(err => note($, `the project's copy could not be set up: ${errorText(err)}`))
       await refreshContext($).catch(() => {})
       await syncChunks($)
       // The folded parts' names, read once, so the first prompt that names one waits for nothing.
@@ -192,7 +234,7 @@ export const register: Register = (on, options) => {
         await ensureSession($)
         await refreshContext($).catch(() => {})
         await syncChunks($).catch(err => note($, `sync failed: ${errorText(err, true)}`))
-        await afterTurn($).catch(err => note($, `the end of the turn failed: ${errorText(err, true)}`))
+        await afterTurn($, withProjects).catch(err => note($, `the end of the turn failed: ${errorText(err, true)}`))
         await armIdle($)
       })
     }
@@ -278,7 +320,8 @@ export const register: Register = (on, options) => {
     return done
   })
 
-  // The recall line, and once parts have folded, their history. After a
+  // The recall line, the project-folders rule (unless the setting is off), and
+  // once parts have folded, their history. After a
   // compaction between replies the engine asks again once the compaction's
   // hooks are done, so the history is the one the fold just wrote (one inside
   // a reply goes on with the answer the reply began with: see foldOrPass). A
@@ -293,11 +336,11 @@ export const register: Register = (on, options) => {
       },
     )
 
-    const layout = options.projectLayout === false ? '' : await currentLayout($).catch(() => '')
+    const layout = options.projectPlaces === false ? '' : await currentLayout($, withProjects).catch(() => '')
 
     return next({
       ...e,
-      blocks: [...e.blocks, RECALL_BLOCK, ...(layout === '' ? [] : [{ name: LAYOUT_BLOCK, text: layout }]), ...(history === null ? [] : [{ name: HISTORY_BLOCK, text: history }])],
+      blocks: [...e.blocks, ...fixedBlocks(withProjects), ...(layout === '' ? [] : [{ name: LAYOUT_BLOCK, text: layout }]), ...(history === null ? [] : [{ name: HISTORY_BLOCK, text: history }])],
     })
   })
 

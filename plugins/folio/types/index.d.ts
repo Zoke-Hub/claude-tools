@@ -408,9 +408,11 @@ export type PackDraft = {
   chats: PackChat[]
   rules: Array<{ path: string; label: string; uses: number; isChecked: boolean; about: string }>
   skills: string[]
-  // Where Pack up saves, as typed: '' is ~/FolioPacks. Kept for every chat in
+  // Where Pack up saves, as typed: '' is defaultFolder. Kept for every chat in
   // ~/.claude/folio/prefs.json.
   saveTo: string
+  // Where an empty Saves to goes: the project's Work/Folio/Folio packs, or ~/FolioPacks.
+  defaultFolder: string
 }
 
 // Where the FolioPack form stands. The form itself (every file of the project,

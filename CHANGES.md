@@ -3,6 +3,38 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-23 · Folio 1.0.0 (number unchanged)
+
+- **Folio, project folders:** a short rule in every chat (`projectLayout`, about 400 tokens) for laying out a
+  project's folders: `Animations`, `Renders/Drafts` and `Renders/Final` by animation, `Segments` by animation, sorted
+  `References`, and `Work` for everything else (`Work/Scripts`, `Work/Backup` and a folder for each tool), with a
+  README at the top and folder names starting with a capital letter. Claude offers to tidy a project that has drifted
+  and moves files only on a yes. A project's own layout rule comes first, and a code repository keeps its own.
+- **Folio, where new files go:** the note on where a project already keeps each kind of file has a setting of its own
+  now, `projectPlaces` (it was `projectLayout`, which is the folder rule's from today). It comes after the folder rule
+  and fills in where a project doesn't follow it yet, or where the rule names no place; with the folder rule off, it
+  reads as before. If you turned `projectLayout` off to stop the note, turn `projectPlaces` off instead.
+- **Folio, a copy in the project:** in a project with a `Work` folder at its top, each chat's Folio files are copied
+  there as Folio writes them (`projectCopies`, on): the summaries, part cards, tasks and ledger in `Work/Folio/<chat>/`,
+  and the originals, shortened outputs and log in `Work/Backup/Folio/<chat>/`. Folio still reads only its own store,
+  never copies the private file, and writes no copy in the home folder or a code repository.
+- **Folio, FolioPack:** with Saves to empty, a pack goes to the project's `Work/Folio/Folio packs` (or `~/FolioPacks`
+  with no project folder, or in a code repository), and nothing in that folder is packed again, whatever the case of
+  the project's folder name. Renders kept by stage group under their animation; voiceover segments, the script and
+  breakdown, and Work's folders get groups of their own. Each stage of a scan and of a pack goes to the log.
+- **Folio, fixes:** FolioPack no longer hangs on a chat whose quoted script is full of JSON: braces inside quotes stay
+  as written, and the path reader stops at 50 values as it goes.
+
+## 2026-11-23 · PulseWise 1.0.0 (number unchanged)
+
+- **PulseWise, a point handed to background work:** Claude's own count stands aside when the point's jobs report the
+  work: while Claude's turn waits on that work with a count that never went past 0, or when the count's total is the
+  steps of the point's one stepped job. No grey "waiting on its background work" block stuck at 0 drags the beat down.
+- **PulseWise, one slow call:** while one of Claude's calls runs over 30 seconds with its count unchanged (an upload, a
+  publish, a render), Claude's part stays where it stood as that call began, so the beat doesn't sink through the call.
+- **PulseWise, the count tool:** it asks Claude not to count a point it hands whole to a background agent or job, and
+  to send each new count as soon as a piece finishes, before a slow call.
+
 ## 2026-11-21 · Folio 1.0.0 (number unchanged)
 
 A redesign of how Folio keeps a chat. A chat's saved data upgrades the first time it loads: the old `index.json` is kept

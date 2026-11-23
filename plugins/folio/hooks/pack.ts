@@ -18,10 +18,11 @@ import { addActivity, cardName, cardOf, change, EMPTY_VIEW, folioDir, fromCard, 
 import type { CardFile } from './store'
 import { base, expandHome, relative, slash } from './paths'
 import { isClaudeReplying } from './actions'
-import { errorText } from './debug'
+import { errorText, logEvent } from './debug'
 import { currentChat } from './chunks'
 import { namedPaths, shellCommandsIn, shellCommandsOf } from './shell'
 import { AUDIO_EXT, categorise, STILL_EXT, TEXT_EXT, VIDEO_EXT } from './categories'
+import { isFilesProject, workFolders } from './work'
 import type { Category } from './categories'
 import type { NamedPath, ShellCommand } from './shell'
 
@@ -43,6 +44,8 @@ const TEXT_BYTES = 1024 * 1024
 const RULE_USES = 3
 
 // Folders tools rebuild or keep for themselves, hidden folders included.
+// A Claude Code chat's id, which names its copy's folders in a project.
+const CHAT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const CACHE_DIR = /^(\..+|node_modules|venv|env|__pycache__|site-packages|dist|build)$/
 export const RENDER_DIR = /^(renders?|outputs?|exports?)$/i
 export const REFERENCE_DIR = /^(references?|refs?|inspiration|moodboards?)$/i
@@ -71,27 +74,37 @@ async function isWindows($: EngineInterface, home: string): Promise<boolean> {
 }
 
 // The folder Pack up saves to, from what was typed in Saves to: quotes and a
-// shell's escaped spaces dropped, ~ for the home folder, '' for ~/FolioPacks.
-export function packFolder(saveTo: string, home: string): string {
+// shell's escaped spaces dropped, ~ for the home folder, '' for the default
+// (the project's Work/Folio/Folio packs, or ~/FolioPacks: see defaultFolder).
+export function packFolder(saveTo: string, home: string, fallback = `${home}/FolioPacks`): string {
   let path = saveTo.trim().replace(/^(["'])(.*)\1$/, '$2')
   // A Mac path pasted from Terminal escapes its spaces; Windows paths use \ as
   // their separator, so they are left as they are.
   if (!/^[A-Za-z]:/.test(path) && !path.startsWith('\\\\')) path = path.replace(/\\ /g, ' ')
   path = expandHome(path, home)
-  if (path === '') path = `${home}/FolioPacks`
+  if (path === '') path = fallback
   // A drive's root keeps its slash ("E:/"); any other folder drops it.
 
   return /^[A-Za-z]:\/$/.test(path) || path === '/' ? path : path.replace(/\/+$/, '')
 }
 
 // Whether Pack up can save there: the folder is there, or will be made inside
-// a folder that is. Missing means its drive isn't connected (or it was mistyped).
-export async function folderState($: EngineInterface, folder: string): Promise<'ready' | 'new' | 'missing'> {
+// a folder that is (`within`, the project for its Work/Folio, or the folder
+// just above). Missing means its drive isn't connected (or it was mistyped).
+export async function folderState($: EngineInterface, folder: string, within?: string): Promise<'ready' | 'new' | 'missing'> {
   if (await $.fs.exists(folder).catch(() => false)) return 'ready'
+  if (within !== undefined && folder.startsWith(`${within}/`)) return (await $.fs.exists(within).catch(() => false)) ? 'new' : 'missing'
   const cut = folder.lastIndexOf('/')
   const parent = cut <= 0 ? '/' : /^[A-Za-z]:$/.test(folder.slice(0, cut)) ? `${folder.slice(0, cut)}/` : folder.slice(0, cut)
 
   return (await $.fs.exists(parent).catch(() => false)) ? 'new' : 'missing'
+}
+
+// Where a pack goes when Saves to is empty: the project's Work/Folio/Folio
+// packs (by the project-folders rule), or ~/FolioPacks for a chat with no
+// project of files (the home folder, a code repository).
+async function defaultFolder($: EngineInterface, root: string, home: string): Promise<string> {
+  return (await isFilesProject($, root, home)) ? (await workFolders($, root)).packs : `${home}/FolioPacks`
 }
 
 // Saves to is the person's choice for every chat, so it is kept outside any one
@@ -107,7 +120,7 @@ export async function writeSaveTo($: EngineInterface, saveTo: string): Promise<v
 }
 
 // The folder as the person reads it: the home folder as ~.
-function shortFolder(folder: string, home: string): string {
+export function shortFolder(folder: string, home: string): string {
   return home !== '' && (folder === home || folder.startsWith(`${home}/`)) ? `~${folder.slice(home.length)}` : folder
 }
 
@@ -140,6 +153,10 @@ export function bytesText(n: number): string {
 export async function walk($: EngineInterface, root: string, skip?: RegExp): Promise<{ files: Found[]; caches: Found[]; isCut: boolean }> {
   const files: Found[] = []
   const caches: Found[] = []
+  const copyFolders = new Set([`${root}/work/folio`, `${root}/work/backup/folio`, `${root}/backup/folio`].map(p => p.toLowerCase()))
+  // Where packs go by default: an earlier pack is never packed again. Compared
+  // in small letters, as the copies' folders are, whatever the project's name.
+  const packsFolder = `${root}/work/folio/folio packs`.toLowerCase()
   let seen = 0
   const visit = async (dir: string, depth: number) => {
     if (depth > SCAN_DEPTH) return
@@ -167,6 +184,11 @@ export async function walk($: EngineInterface, root: string, skip?: RegExp): Pro
           continue
         }
       }
+      // A chat's copy of its Folio files in the project (copies.ts), a folder
+      // named by the chat's id: the pack carries the chats in its own form,
+      // from Folio's store. Anything else kept beside them stays listed.
+      if (kind === 'dir' && copyFolders.has(dir.toLowerCase()) && CHAT_ID.test(entry.name)) continue
+      if (kind === 'dir' && path.toLowerCase() === packsFolder) continue
       if (kind === 'dir' && CACHE_DIR.test(entry.name)) caches.push({ path, bytes: 0, mtimeMs: 0 })
       else if (kind === 'dir' && skip?.test(entry.name) !== true) await visit(path, depth + 1)
       else if (kind === 'file') files.push({ path, bytes: size, mtimeMs })
@@ -292,12 +314,24 @@ function renderKinds(name: string, label: string, found: Found[], touched: Set<s
 const WORK_DIR = /^(anims?|animations?|comps?|compositions?|builds?|src|source|html|web|project|ae|aep|after[ _-]?effects|hyperframes|remotion|work|tmp|temp)$/i
 const isWorkDir = (s: string) => WORK_DIR.test(s) || RENDER_DIR.test(s)
 
-// Where a render belongs: its animation (the nearest folder above its renders
-// folder, or above the file when it sits in none, whose name isn't a working
-// folder's) and its place in it (the folders from there down to the renders
-// folder). A renders folder at the project's top is its own animation.
+// Folders a renders folder sorts its renders into by stage or size, not by
+// what they render: renders/drafts/A08 and renders/final/A08 are both A08's.
+const STAGE_DIR = /^(drafts?|finals?|previews?|reviews?|rounds?|wip|old|archived?|stills?|frames?|\d{3,4}p|[48]k|hd|uhd)$/i
+
+// Where a render belongs: its animation and its place in it. A renders folder
+// that sorts by animation (renders/drafts/A08) names the first folder below it
+// that is neither a stage nor a working folder, and the stages above that are
+// the place. Otherwise the animation is the nearest folder above its renders
+// folder (or above the file when it sits in none) whose name isn't a working
+// folder's, and the place the folders from there down to the renders folder.
+// A renders folder at the project's top that sorts by nothing is its own animation.
 export function renderHome(segs: string[]): { name: string; place: string } {
   const at = segs.findIndex(s => RENDER_DIR.test(s))
+  if (at >= 0) {
+    const below = segs.slice(at + 1)
+    const own = below.findIndex(s => !STAGE_DIR.test(s) && !isWorkDir(s))
+    if (own >= 0) return { name: below[own]!, place: below.slice(0, own).join('/') }
+  }
   if (at === 0) return { name: segs[0]!, place: '' }
   const from = at > 0 ? at - 1 : segs.length - 1
   let i = from
@@ -426,10 +460,20 @@ function categoryTree(placed: ReadonlyArray<Category & { found: Found[] }>, root
   })
 }
 
+// Folders of the project-folders rule (projects.ts): Segments/<Animation> at
+// the project's top, the script and breakdown in Work/Scripts (or a Script or
+// Breakdown folder at the top), and Work itself. A Scripts folder's code (a
+// build's scripts) is working files, not the script.
+const SEGMENT_DIR = /^(segments?|vo|voice[ _-]?overs?)$/i
+const SCRIPT_DIR = /^(scripts?|breakdowns?)$/i
+const WORK_TOP = /^work$/i
+const CODE_EXT = /\.(py|js|mjs|cjs|jsx|ts|tsx|sh|bash|zsh|ps1|bat|rb|pl)$/i
+
 // The project's files as the rules group them, the way this project is laid
-// out: project files by kind, renders by what they render, references and
-// audio, the small text files the chat touched, the project's own folders,
-// then caches. A group the chat used starts ticked; renders and caches start
+// out: project files by kind, renders by what they render, voiceover segments
+// by animation, references and audio, the small text files the chat touched,
+// the script and breakdown, the project's own folders, Work's folders, then
+// caches. A group the chat used starts ticked; renders and caches start
 // unticked.
 function ruleGroups(files: Found[], caches: Found[], root: string, touched: Set<string>): PackGroup[] {
   const groups: PackGroup[] = []
@@ -439,6 +483,22 @@ function ruleGroups(files: Found[], caches: Found[], root: string, touched: Set<
     return found
   }
   const segs = (f: Found) => relative(f.path, root).split('/').slice(0, -1)
+  const top = (f: Found) => segs(f)[0] ?? ''
+  // The folder a file sits in inside Work ('' when it isn't in one).
+  const inWork = (f: Found) => (WORK_TOP.test(top(f)) ? (segs(f)[1] ?? '') : '')
+  // A section of rows, one for each folder `key` gives; a section of one
+  // folder shows that folder's own rows.
+  const section = (id: string, label: string, list: Found[], key: (f: Found) => string, about: string) => {
+    const by = new Map<string, Found[]>()
+    for (const f of list) by.set(key(f), [...(by.get(key(f)) ?? []), f])
+    const rows = [...by]
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+      .map(([path, found]) => folderGroup(path, path.split('/').at(-1)!, found, root, touched, usedTick(found, touched)))
+    const only = rows.length === 1 ? rows[0]! : null
+
+    return parentGroup(id, label, only?.children ?? rows, about)
+  }
+  const upTo = (f: Found, n: number) => segs(f).slice(0, n).join('/')
 
   const kinds: PackGroup[] = []
   for (const [re, label] of PROJECT_EXT) {
@@ -447,9 +507,14 @@ function ruleGroups(files: Found[], caches: Found[], root: string, touched: Set<
   }
   if (kinds.length > 0) groups.push(parentGroup('cat:project', 'Project files', kinds, 'Editing and design projects (After Effects, Premiere, Photoshop and the like), by kind.'))
   const refs = take(files.filter(f => !taken.has(f.path) && segs(f).some(s => REFERENCE_DIR.test(s))))
+  // Before renders: a voiceover piece may be a video file.
+  const segments = take(files.filter(f => !taken.has(f.path) && SEGMENT_DIR.test(top(f))))
   const renders = take(files.filter(f => !taken.has(f.path) && isRender(f, root)))
   if (renders.length > 0) {
     groups.push(parentGroup('cat:renders', 'Renders', renderGroups(renders, root, touched), 'Rendered videos and previews, by what they render. They start unticked: the other computer can render again.'))
+  }
+  if (segments.length > 0) {
+    groups.push(section('cat:segments', 'Voiceover segments', segments, f => upTo(f, segs(f).length > 1 ? 2 : 1), "Each animation's voiceover piece and its word times, by animation."))
   }
   const audio = take(files.filter(f => !taken.has(f.path) && AUDIO_EXT.test(f.path)))
   const media: PackGroup[] = []
@@ -462,6 +527,14 @@ function ruleGroups(files: Found[], caches: Found[], root: string, touched: Set<
   if (media.length > 0) groups.push(parentGroup('cat:media', 'References and audio', media, 'Reference videos and images, and sound.'))
   const texts = take(files.filter(f => !taken.has(f.path) && isPackText(f, touched)))
   if (texts.length > 0) groups.push(textsGroup(texts, touched))
+  const isScript = (f: Found) => !CODE_EXT.test(f.path) && (SCRIPT_DIR.test(inWork(f)) || SCRIPT_DIR.test(top(f)))
+  const scripts = take(files.filter(f => !taken.has(f.path) && isScript(f)))
+  if (scripts.length > 0) {
+    groups.push(section('cat:scripts', 'Script and breakdown', scripts, f => upTo(f, inWork(f) === '' ? 1 : 2), "The script and its breakdown, with the breakdown's working files."))
+  }
+  // Work's folders: each tool's own files (Folio, MarkRoom, PulseWise), the
+  // backups and the other working folders, folder by folder.
+  const work = take(files.filter(f => !taken.has(f.path) && WORK_TOP.test(top(f))))
 
   // The rest by the project's own folders.
   const byTop = new Map<string, Found[]>()
@@ -475,6 +548,7 @@ function ruleGroups(files: Found[], caches: Found[], root: string, touched: Set<
     .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
     .map(([top, list]) => folderGroup(top, top, list, root, touched, usedTick(list, touched)))
   if (folders.length > 0) groups.push(parentGroup('cat:folders', "The project's folders", folders, 'Everything else in the project, folder by folder.'))
+  if (work.length > 0) groups.push(section('cat:work', 'Working files', work, f => upTo(f, inWork(f) === '' ? 1 : 2), "Each tool's own files, the backups and the other working folders, folder by folder."))
   if (caches.length > 0) {
     const cache: PackGroup = {
       ...leafGroup('caches', 'Caches and build output', 'files', caches, touched, () => false),
@@ -690,19 +764,37 @@ function chatTitle(chunks: ChunkRecord[]): string {
 // Looks through the project folder and the chat for what a pack could carry:
 // for this chat, the files it touched; for the whole project, every file in it
 // and every other chat Folio kept there. Haiku sorts the files (categories.ts).
+// One stage of a scan or a pack, logged as it starts and as it ends or fails,
+// so a pack that stops shows in the log where it stopped (a stage that never
+// ends has a start line and no end).
+async function stage<T>($: EngineInterface, kind: string, name: string, work: () => Promise<T>, fields: (r: T) => Record<string, unknown> = () => ({})): Promise<T> {
+  const start = await $.clock.now()
+  void logEvent($, kind, { stage: name, at: 'start' })
+  try {
+    const r = await work()
+    void logEvent($, kind, { stage: name, at: 'end', ms: (await $.clock.now()) - start, ...fields(r) })
+
+    return r
+  } catch (err) {
+    void logEvent($, `${kind}-failed`, { stage: name, ms: (await $.clock.now()) - start, why: errorText(err) })
+    throw err
+  }
+}
+
 export async function scanProject($: EngineInterface): Promise<PackDraft> {
   const v = await read($, view)
   const cwd = v.cwd
   const home = await homeDir($)
   // The folder the chat was opened in is the project; a chat opened in the home
   // folder narrows to the folder its work is in.
-  const opened = await projectFolder($, cwd, home, await $.session.id())
+  const opened = await stage($, 'pack-scan', 'project folder', async () => projectFolder($, cwd, home, await $.session.id()))
   const root = opened === home ? projectRoot(v, opened) : opened
   const touched = new Set(v.chunks.flatMap(c => c.paths.map(slash)))
-  const { files, caches } = await walk($, root)
+  const { files, caches } = await stage($, 'pack-scan', 'files', () => walk($, root), r => ({ files: r.files.length, caches: r.caches.length }))
   // What the chat's shell commands made or used counts as touched too.
-  for (const path of await shellTouched($, v, files, root, home)) touched.add(path)
-  const chats = await projectChats($, root, await $.session.id())
+  const named = await stage($, 'pack-scan', 'shell paths', () => shellTouched($, v, files, root, home), r => ({ paths: r.length }))
+  for (const path of named) touched.add(path)
+  const chats = await stage($, 'pack-scan', 'chats', async () => projectChats($, root, await $.session.id()), r => ({ chats: r.length }))
   const { rules: used, skills } = usedRules(v, home)
   // Each rule's own one-line description, from its front matter.
   const rules = await Promise.all(
@@ -719,7 +811,7 @@ export async function scanProject($: EngineInterface): Promise<PackDraft> {
   )
 
   // Haiku's categories, the same for both scopes; none when it gave no answer.
-  const sorted = (await categorise($, files, root).catch(() => null))?.categories ?? []
+  const sorted = (await stage($, 'pack-scan', 'categories', () => categorise($, files, root)).catch(() => null))?.categories ?? []
 
   return {
     name: base(root),
@@ -740,6 +832,7 @@ export async function scanProject($: EngineInterface): Promise<PackDraft> {
     rules,
     skills,
     saveTo: await readSaveTo($),
+    defaultFolder: await defaultFolder($, root, home),
   }
 }
 
@@ -1055,7 +1148,7 @@ export async function packUp($: EngineInterface, draft: PackDraft): Promise<void
   const epoch = sessionEpoch()
   try {
     await showPack($)
-    await writePack($, draft, epoch)
+    await stage($, 'pack-write', 'write', () => writePack($, draft, epoch), () => ({ scope: draft.scope }))
   } catch (err) {
     // A pack whose session ended was let go with it.
     if (sessionEpoch() !== epoch) return
@@ -1078,9 +1171,9 @@ async function writePack($: EngineInterface, draft: PackDraft, epoch: number): P
   const v = await read($, view)
   const home = await homeDir($)
   const name = packTitle(draft)
-  const outDir = packFolder(draft.saveTo, home)
+  const outDir = packFolder(draft.saveTo, home, draft.defaultFolder)
   // A drive that isn't connected stops the pack before anything is written.
-  if ((await folderState($, outDir)) === 'missing') throw new Error(`Folio can't reach ${outDir}. Connect the drive, or change Saves to.`)
+  if ((await folderState($, outDir, draft.saveTo === '' ? draft.root : undefined)) === 'missing') throw new Error(`Folio can't reach ${outDir}. Connect the drive, or change Saves to.`)
   const where = shortFolder(outDir, home)
   const dir = `${outDir}/${packName(name)}`
   const others = draft.scope === 'project' ? await projectChats($, draft.root, await $.session.id()) : []

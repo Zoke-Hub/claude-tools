@@ -183,7 +183,7 @@ const ESTIMATE_TOOL = 'mcp__pulsewise__estimate'
 const COUNT_SPEC: ToolSpec = {
   name: 'count',
   description:
-    "PulseWise's bar for your own work on a task-list point (a point whose work an agent or a background job reports needs no count from you: the bar follows that work). When a point starts, size it by its pieces (files to change, cases to run, pages to check) and send {point, done: 0, total, unit}; send it again as pieces finish. Send it in the same message as another call, never on its own. Raise total when more pieces turn up (the bar shows that honestly). A point that can't be sized (tracking down a cause): send {point, none: true} once. Background scripts report through the progress helper instead; for background work the bar can't follow, send {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
+    "PulseWise's bar for your own work on a task-list point (a point whose work an agent or a background job reports needs no count from you: the bar follows that work). Don't count a point whose work you hand whole to a background agent or job: its own steps show on the bar. When a point starts, size it by its pieces (files to change, cases to run, pages to check) and send {point, done: 0, total, unit}; send it again as pieces finish. Send the new count as soon as a piece finishes, before you start the next call, above all before a slow one (an upload, a publish, a render). Send it in the same message as another call, never on its own. Raise total when more pieces turn up (the bar shows that honestly). A point that can't be sized (tracking down a cause): send {point, none: true} once. Background scripts report through the progress helper instead; for background work the bar can't follow, send {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -522,21 +522,60 @@ const countWords = (p: Point | undefined) =>
   p?.count && !p.count.none ? `Claude · ${p.count.done} / ${p.count.total}${p.count.unit ? ` ${p.count.unit}` : ''}` : null
 
 /**
+ * Claude's count stands aside for the point's background work, as if it sent none, when that work is what it counts:
+ * Claude's turn waits on the point's running work with a count that never went past 0, or its count's total is the
+ * steps of the point's one stepped job. Its own part would only sit still at its count and drag the beat down.
+ */
+function isCountBesideJobs(m: Model, index: number): boolean {
+  const p = m.points[index]
+  if (!p?.count || p.count.none) return false
+  const tasks = pointTasks(m, index)
+  if (!tasks.length) return false
+  const isWaitingOnIt = m.phase === 'awaitingReply' && tasks.some(t => t.state === 'running')
+  if (isWaitingOnIt && (p.count.peak ?? p.count.done) === 0) return true
+  const single = tasks.length === 1 ? tasks[0] : undefined
+  const steps = single ? sourceOf(m, single).steps.length : 0
+  return steps > 1 && p.count.total === steps
+}
+
+/** Claude's counted share of a point as the bar draws it: null when it sent no count or its count stands aside. */
+const ownFraction = (m: Model, index: number) => (isCountBesideJobs(m, index) ? null : countFraction(m.points[index]))
+
+// One of Claude's tool calls running longer than this with its count unchanged (a slow upload, publish or render):
+// Claude's counted part is drawn as it stood when that call began, so the beat doesn't sink during the one call.
+const LONG_CALL_MS = 30_000
+
+/**
+ * The moment Claude's counted part of a point is projected from (its time so far, stretched by its count): its own
+ * now, or, while one of its calls has run over LONG_CALL_MS with the count unchanged as long, that call's start (or
+ * the count's, when the count came just after it).
+ */
+function projectedFrom(m: Model, p: Point, now: number): number {
+  const own = ownNow(m, now)
+  const at = p.count?.at
+  if (at == null || isHeld(m) || own - at <= LONG_CALL_MS) return own
+  const long = (m.actions ?? []).find(a => !a.isWaiting && own - a.started > LONG_CALL_MS)
+
+  return long ? Math.max(long.started, at) : own
+}
+
+/**
  * A point's share of the time: its real time once done; while it runs, its time so far stretched by Claude's count
  * (once a little of it is done), else what it is expected to take.
  */
-function pointWeight(m: Model, index: number, now: number): number {
+export function pointWeight(m: Model, index: number, now: number): number {
   const p = m.points[index]
   if (!p) return averageDone(m)
   const expected = expectedMs(m, p.name)
   const start = p.started ?? p.seenAt ?? null
   if (start === null) return expected
   const own = ownNow(m, now)
-  const f = countFraction(p)
+  const f = ownFraction(m, index)
   const isOpen = p.state === 'running' || p.seenAt != null
+  const from = projectedFrom(m, p, now)
   let end =
     p.ended ??
-    (isHeld(m) ? own : isOpen && f !== null && f >= 0.03 ? Math.max(own, start + (own - start) / f) : isOpen ? Math.max(own, start + expected) : own)
+    (isHeld(m) ? own : isOpen && f !== null && f >= 0.03 ? Math.max(from, start + (from - start) / f) : isOpen ? Math.max(own, start + expected) : own)
   for (const t of pointTasks(m, index)) end = Math.max(end, t.started + taskWeight(t, now))
   return Math.max(1000, end - start)
 }
@@ -544,7 +583,7 @@ function pointWeight(m: Model, index: number, now: number): number {
 // The most an uncounted point still open is drawn filled, its jobs all done.
 const UNCOUNTED_CAP = 0.9
 
-function pointFill(m: Model, index: number, now: number): number {
+export function pointFill(m: Model, index: number, now: number): number {
   const p = m.points[index]
   if (!p) return 0
   const tasks = pointTasks(m, index)
@@ -554,7 +593,7 @@ function pointFill(m: Model, index: number, now: number): number {
   // The same sum as the beat's close-up: its jobs, and Claude's own part when it is counted. Uncounted and still open,
   // a point stops short of full however its jobs went (it is not done until ticked), without sinking as time passes.
   const sum = overall(detailSegs(m, `p:${index}`, now)) / 100
-  const isOwnOpen = p.state !== 'done' && countFraction(p) === null
+  const isOwnOpen = p.state !== 'done' && ownFraction(m, index) === null
   return isOwnOpen ? Math.min(UNCOUNTED_CAP, sum) : sum
 }
 
@@ -711,7 +750,8 @@ function stepSegs(t: Task, now: number): Seg[] {
 
 /**
  * The bar a click opens: a point's tasks, and Claude's own part when it is counted (or is all the point has), or a
- * job's steps. An uncounted Claude part beside jobs is left out: it would only sit empty and drag the beat down.
+ * job's steps. An uncounted Claude part beside jobs is left out, as is a count that stands aside for them
+ * (isCountBesideJobs): it would only sit empty and drag the beat down.
  */
 function detailSegs(m: Model, key: string, now: number): Seg[] {
   if (key.startsWith('t:')) {
@@ -724,7 +764,7 @@ function detailSegs(m: Model, key: string, now: number): Seg[] {
   const tasks = index === -1 ? otherTasks(m) : pointTasks(m, index)
   const single = tasks.length === 1 ? tasks[0] : undefined
   const p = m.points[index]
-  const f = countFraction(p)
+  const f = p ? ownFraction(m, index) : null
   // One job with steps of its own: its steps make the bar (beside Claude's part when counted).
   const segs = single && sourceOf(m, single).steps.length > 1 ? stepSegs(sourceOf(m, single), now) : tasks.map(t => taskSeg(t, now, m))
   if (p && (f !== null || !segs.length)) {
@@ -733,10 +773,12 @@ function detailSegs(m: Model, key: string, now: number): Seg[] {
     const isStill = isHeld(m) && p.state !== 'done' && begun !== null
     const isOpen = p.state === 'running' || (p.state === 'pending' && p.seenAt != null)
     const counted = countWords(p)?.replace(/^Claude · /, '')
+    // Its time so far stretched by its count, held during one long call (projectedFrom).
+    const projected = begun !== null ? projectedFrom(m, p, now) - begun : 0
     segs.unshift({
       key: `c:${index}`,
       name: 'Claude',
-      weight: Math.max(1000, p.state === 'pending' && p.seenAt == null ? expectedMs(m, p.name) : f !== null && f >= 0.03 && isOpen && !isStill ? elapsed / f : elapsed),
+      weight: Math.max(1000, p.state === 'pending' && p.seenAt == null ? expectedMs(m, p.name) : f !== null && f >= 0.03 && isOpen && !isStill ? projected / f : elapsed),
       fill: p.state === 'done' ? 1 : (f ?? 0),
       state: isOpen ? 'running' : p.state,
       // Uncounted work shows as moving; counted work fills instead.
@@ -1790,7 +1832,8 @@ function applyCount(m: Model, input: Record<string, unknown>, now: number, fx: E
   p.activeAt = now
   const done = Math.min(total, Math.max(0, Math.round(Number(input.done ?? 0)) || 0))
   const unit = typeof input.unit === 'string' && input.unit.trim() ? input.unit.trim().slice(0, 24) : (p.count?.unit ?? null)
-  p.count = { done, total, unit, at: now, call }
+  const peak = Math.max(done, p.count && !p.count.none ? (p.count.peak ?? p.count.done) : 0)
+  p.count = { done, total, unit, at: now, call, peak }
   // Counted before the list marked it: it is under way from now.
   if (p.state === 'pending' && p.seenAt == null) p.seenAt = now
   return `Point ${n}: ${done} / ${total}${unit ? ` ${unit}` : ''}.`

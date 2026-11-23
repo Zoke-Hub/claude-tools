@@ -15,7 +15,7 @@ import type { NextMap } from './map'
 import { errorText, later, logEvent, note } from './debug'
 import { contextAt, hasHistory, IDLE_MS, measureRatio, needsFold, ownCompactPoint, realContext, realOf, refreshContext, setDueTokens, summaryTokens } from './measure'
 import { redact } from './private'
-import { RECALL_BLOCK } from './recall'
+import { fixedBlocks } from './projects'
 import { addActivity, change, chunkOf, EMPTY_VIEW, patchChunk, privateVault, readOriginal, savePrivate, settingsOf, writeOriginal } from './store'
 import { mapStrings } from './strip'
 import { catchUp, saveChat } from './sync'
@@ -356,9 +356,9 @@ function takeAsks(ask: Ask): { asks: Ask[]; why: FoldWhy | null } {
 
 // After each reply: the real-token ratio is measured; waiting asks run; and
 // in Automatic the fold itself runs once it is due and pays for itself.
-export async function afterTurn($: EngineInterface) {
+export async function afterTurn($: EngineInterface, withProjects = true) {
   const messages = currentChat(await $.session.messages())
-  await measureRatio($, messages, `${RECALL_BLOCK.text}\n${(await currentHistory($)) ?? ''}`)
+  await measureRatio($, messages, [...fixedBlocks(withProjects).map(b => b.text), (await currentHistory($)) ?? ''].join('\n'))
   if (request.kind === 'queued') {
     if (!isReplying) await shown($, send($, request.asks, request.why))
 

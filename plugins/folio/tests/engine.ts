@@ -20,6 +20,8 @@ export type { Engine, On }
 export const HOME = '/tmp/folio-test-home'
 // Where Folio keeps the test chat.
 export const DIR = `${HOME}/.claude/folio/sessions/test-session`
+// Where a pack goes by default: the test project's Work/Folio/Folio packs.
+export const PACKS = '/w/Work/Folio/Folio packs'
 // A model call's usage, for an answer that cost nothing.
 const NO_USAGE = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
 
@@ -89,9 +91,10 @@ export function stubEngine(on: On, o: StubOptions = {}) {
     const messages = o.messages
     on('session.messages', () => ({ value: messages }))
   }
+  // The folder the test chat opens in is always there, as a real project's is.
   on('fs.exists', (_, e) => {
     const forms = formsOf(e.path)
-    const isThere = (path: string) => o.exists?.(path) ?? (files.has(path) || [...files.keys()].some(k => k.startsWith(`${path}/`)))
+    const isThere = (path: string) => o.exists?.(path) ?? (path === '/w' || files.has(path) || [...files.keys()].some(k => k.startsWith(`${path}/`)))
 
     return { value: forms.some(isThere) }
   })

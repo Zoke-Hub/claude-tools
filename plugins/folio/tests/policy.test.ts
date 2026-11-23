@@ -6,7 +6,7 @@ import { expect, test } from 'claude-code/testing'
 import { FOLD_ASK } from '../hooks/actions'
 import { estimateTokens, textTokens } from '../hooks/chunks'
 import { summaryTokens } from '../hooks/measure'
-import { RECALL_BLOCK } from '../hooks/recall'
+import { fixedBlocks } from '../hooks/projects'
 import { EMPTY_REAL, EMPTY_VIEW, normaliseChunk } from '../hooks/store'
 import { suggestionsFor } from '../hooks/suggest'
 import { HOME, mountPanel, openChat, request, saved, savedView, seed, talk } from './engine'
@@ -47,8 +47,8 @@ test("a fold's saving is the real drop the next request shows, and the log has i
 test('the ratio of real tokens to Folio\'s estimate is measured as each turn ends', async ($, on) => {
   const messages = talk(40)
   const files = seed(messages, 'watch')
-  // What the last request carried: the chat but its last reply, and the recall line.
-  const estimate = messages.slice(0, -1).reduce((sum, m) => sum + estimateTokens(m), 0) + textTokens(`${RECALL_BLOCK.text}\n`)
+  // What the last request carried: the chat but its last reply, the recall line and the project-folders rule.
+  const estimate = messages.slice(0, -1).reduce((sum, m) => sum + estimateTokens(m), 0) + textTokens(`${fixedBlocks(true).map(b => b.text).join('\n')}\n`)
   const fixed = 80_000
   const real = fixed + 2 * estimate
   const { clock, engine } = await openChat($, on, files, messages, Promise.resolve(), { tokens: real, fixed })

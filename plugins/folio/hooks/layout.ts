@@ -4,8 +4,11 @@
 // Where this project keeps each kind of file, read from the files already in
 // it, told to Claude once per chat (and again after a compaction) so a new file
 // lands beside the ones of its kind: renders where the renders are, and so on.
-// Nothing is moved: the note only says where new files go, in this project's
-// own layout, never a scheme of Folio's. A project with no clear layout gets no note.
+// Folio's project-folders rule (projects.ts) comes first when it is sent: the
+// note then fills in where the project doesn't follow that layout yet, or where
+// the rule names no place. Sent alone, it says where new files go in this
+// project's own layout and never to move one. Folio itself moves nothing. A
+// project with no clear layout gets no note.
 
 import type { EngineInterface } from 'claude-code'
 
@@ -102,12 +105,13 @@ function placesOf(folders: Map<string, number>, animations: Set<string>): Array<
 
 const placeText = (place: string) => (place === '' ? 'the top of the project folder' : `\`${place}/\``)
 
-/**
- * The note for a project's files (inside `root`): each kind with a clear home
- * and where it is, renders' naming when they are numbered by round, and what to
- * do with that. Empty when no kind has a clear home.
- */
-export function layoutNote(files: readonly Found[], root: string): string {
+// What the note says of a project: each kind with a clear home and where it is
+// (with renders' naming when they are numbered by round), and what an open name
+// in a place stands for.
+export type Places = { parts: string[]; which: string }
+
+/** The places of a project's files (inside `root`); null when no kind has a clear home. */
+export function placesIn(files: readonly Found[], root: string): Places | null {
   const folders = KINDS.map(() => new Map<string, number>())
   const animations = new Set<string>()
   let renderVideos = 0
@@ -140,16 +144,42 @@ export function layoutNote(files: readonly Found[], root: string): string {
     const naming = kind.label === 'renders' && renderVideos > 0 && rounds >= renderVideos * ROUND_SHARE ? ' (named `rNN_…` by round; a new round takes the next number)' : ''
     parts.push(`${kind.label} in ${where}${naming}`)
   }
-  if (parts.length === 0) return ''
+  if (parts.length === 0) return null
   const open = ['<project>', '<animation>', '<name>'].filter(word => parts.some(p => p.includes(word)))
   const which = open.length > 0 ? ` (${open.map(w => `\`${w}\``).join(' or ')}: the one the file belongs to)` : ''
 
-  return `Folio read where this project keeps its files: ${parts.join('; ')}. Save each new file where files of its kind already live here${which}, unless a skill you follow names its own place. Never move, rename or tidy existing files to fit this.`
+  return { parts, which }
+}
+
+/**
+ * The note Claude reads, '' with no places. After Folio's project-folders rule
+ * (`afterRule`) the rule comes first and the note fills in where the project
+ * doesn't follow it yet; alone, it says to save new files where their kind
+ * already lives and never to move one.
+ */
+export function noteOf(places: Places | null, afterRule: boolean): string {
+  if (places === null) return ''
+  const where = places.parts.join('; ')
+
+  return afterRule
+    ? `Folio read where this project keeps its files now: ${where}. Folio's project-folders rule comes first. Where this project doesn't follow it yet, or the rule names no place for a kind of file, save each new file where files of its kind already live here${places.which}, unless a skill you follow names its own place. Move or tidy files only as that rule says, on a yes.`
+    : `Folio read where this project keeps its files: ${where}. Save each new file where files of its kind already live here${places.which}, unless a skill you follow names its own place. Never move, rename or tidy existing files to fit this.`
+}
+
+/** The note for a project's files (inside `root`); '' when no kind has a clear home. */
+export const layoutNote = (files: readonly Found[], root: string, afterRule = false): string => noteOf(placesIn(files, root), afterRule)
+
+// Places saved by an earlier chat, when they are what a read saves.
+function savedPlaces(saved: { places?: unknown } | null): Places | null {
+  const p = saved?.places as Partial<Places> | null | undefined
+  if (typeof p !== 'object' || p === null || !Array.isArray(p.parts) || typeof p.which !== 'string') return null
+
+  return p.parts.every(s => typeof s === 'string') ? { parts: p.parts, which: p.which } : null
 }
 
 // This chat's read of its project's layout, begun as the chat starts: the
-// folder read, and the note it gives. Null before any chat started.
-let reading: { root: string; note: Promise<string> } | null = null
+// folder read, and the places it found. Null before any chat started.
+let reading: { root: string; places: Promise<Places | null> } | null = null
 
 const savedPath = (home: string, root: string) => `${folioDir(home)}/layouts/${root.replace(/[^A-Za-z0-9]/g, '-')}.json`
 
@@ -162,35 +192,35 @@ function isProject(root: string, home: string): boolean {
 /** Starts reading the layout of the folder the chat works in; the note waits for it. */
 export function readLayout($: EngineInterface, cwd: string): void {
   const root = slash(cwd).replace(/\/+$/, '')
-  const text = (async () => {
+  const places = (async (): Promise<Places | null> => {
     const home = await homeDir($)
-    if (!isProject(root, home)) return ''
+    if (!isProject(root, home)) return null
     // Folders set aside are not gone into; a read cut short by the scan's limit
     // could take a part of the project for its layout, so it gives no note.
     const { files, isCut } = await walk($, root, ASIDE_DIR)
-    const made = isCut ? '' : layoutNote(files, root)
-    await $.fs.write(savedPath(home, root), `${JSON.stringify({ note: made, at: Date.now() })}\n`).catch(() => undefined)
+    const made = isCut ? null : placesIn(files, root)
+    await $.fs.write(savedPath(home, root), `${JSON.stringify({ places: made, at: Date.now() })}\n`).catch(() => undefined)
 
     return made
   })().catch(err => {
     void note($, `the project's layout could not be read: ${errorText(err)}`)
 
-    return ''
+    return null
   })
-  reading = { root, note: text }
+  reading = { root, places }
 }
 
 /**
- * The note for the context block: this chat's read when it is done within
- * WAIT_MS, else the note the last chat in this folder saved; '' when neither has one.
+ * The note for the context block, after the project-folders rule when
+ * `afterRule`: this chat's read when it is done within WAIT_MS, else the places
+ * the last chat in this folder saved; '' when neither has any.
  */
-export async function currentLayout($: EngineInterface): Promise<string> {
+export async function currentLayout($: EngineInterface, afterRule: boolean): Promise<string> {
   if (reading === null) return ''
-  const { root, note: made } = reading
-  const waited = new Promise<null>(resolve => $.clock.after(WAIT_MS, () => resolve(null)))
-  const read = await Promise.race([made, waited])
-  if (read !== null) return read
-  const saved = await readJson<{ note?: unknown }>($, savedPath(await homeDir($), root))
+  const { root, places } = reading
+  const waited = new Promise<'waited'>(resolve => $.clock.after(WAIT_MS, () => resolve('waited')))
+  const read = await Promise.race([places, waited])
+  if (read !== 'waited') return noteOf(read, afterRule)
 
-  return typeof saved?.note === 'string' ? saved.note : ''
+  return noteOf(savedPlaces(await readJson<{ places?: unknown }>($, savedPath(await homeDir($), root))), afterRule)
 }

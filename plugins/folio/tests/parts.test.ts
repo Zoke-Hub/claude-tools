@@ -68,7 +68,7 @@ test('the pack finds the project folder from the files the chat touched', () => 
 })
 
 // A FolioPack form for this chat alone.
-const draft = (skills: string[] = []): PackDraft => ({ name: 'x', root: '/x', scope: 'chat', groups: [], chatGroups: [], chats: [], rules: [], skills, saveTo: '' })
+const draft = (skills: string[] = []): PackDraft => ({ name: 'x', root: '/x', scope: 'chat', groups: [], chatGroups: [], chats: [], rules: [], skills, saveTo: '', defaultFolder: '/x/Work/Folio' })
 
 test('what always goes in a pack is described from this chat', () => {
   const chunks = [

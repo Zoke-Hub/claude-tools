@@ -67,15 +67,29 @@ original stays on your computer word for word, and Claude can bring any of it ba
   Haiku sorts the project's files into the groups you tick: each animation's renders under it, segment renders apart
   from final renders, and working files, sources, notes and deliverables each in their own. Folio's own rules place what
   Haiku leaves out, and everything when Haiku gives no answer. A pack carries each part's card, the tasks and the
-  ledger. Its parts take the next numbers of the chat that opens it, so recall reaches them by number.
+  ledger. Its parts take the next numbers of the chat that opens it, so recall reaches them by number. With **Saves
+  to** left empty, a pack goes to the project's `Work/Folio/Folio packs` folder (made when needed), or to `~/FolioPacks`
+  for a chat with no project folder or in a code repository; earlier packs in that folder are never packed again.
+- **Project folders.** Folio gives every chat a short rule for laying out a project's folders: `Animations`,
+  `Renders/Drafts` and `Renders/Final` by animation, `Segments` by animation, sorted `References`, and `Work` for
+  everything else (`Work/Scripts` for the script and breakdown, `Work/Backup`, and a folder for each tool), with a README
+  at the top and folder names starting with a capital letter. A project's own layout rule comes first, and a code
+  repository keeps its own. Claude offers to tidy a project that has drifted and moves files only on your yes.
+  FolioPack's groups follow the same layout.
 - **Where new files go.** As a chat starts, Folio reads where the project already keeps each kind of file (renders,
-  editing and design projects, references, sound) and tells Claude in a short note (about 150 tokens) to save new
-  files of each kind there. Folders that differ in one name only read as one place: `segments/A16/renders` and
-  `segments/A19/renders` become `segments/<animation>/renders`, and renders numbered `r01_…` keep being numbered. A
-  skill's own place still wins. Auto-save, backup and scratch folders don't count. In a folder of several projects, a
-  place counts as `<project>/…` only when every project keeps that kind there. Folio never moves, renames or tidies a
-  file; a project with no clear layout, one too big to read whole, and the home folder get no note. The note is saved
-  per folder, so a chat that starts before its read is done uses the last one.
+  editing and design projects, references, sound) and tells Claude in a short note (about 150 tokens). The
+  project-folders rule comes first: the note fills in where a project doesn't follow that layout yet, or where the rule
+  names no place, and Claude moves files only as the rule says, on your yes. With the rule turned off, the note tells
+  Claude to save new files of each kind where they already live and never to move one. Folders that differ in one name
+  only read as one place: `segments/A16/renders` and `segments/A19/renders` become `segments/<animation>/renders`, and
+  renders numbered `r01_…` keep being numbered. A skill's own place still wins. Auto-save, backup and scratch folders
+  don't count. In a folder of several projects, a place counts as `<project>/…` only when every project keeps that kind
+  there. Folio itself never moves, renames or tidies a file; a project with no clear layout, one too big to read whole,
+  and the home folder get no note. The note is saved per folder, so a chat that starts before its read is done uses the
+  last one.
+- **A copy in the project.** In a project with a `Work` folder at its top, Folio keeps a copy of each chat's files there
+  as it writes its own: the summaries in `Work/Folio/<chat id>/`, and the originals, shortened outputs and log in
+  `Work/Backup/Folio/<chat id>/`. It still reads only its own store, so recall keeps working if the project moves.
 
 ## Install
 
@@ -99,7 +113,9 @@ Open a new chat afterwards. To update: `claude plugin update folio@zoke`, then r
 ## Your data
 
 - Everything stays on your computer. Each chat's index, summaries and originals are in
-  `~/.claude/folio/sessions/<chat id>/` (on Windows, the same path under your user folder).
+  `~/.claude/folio/sessions/<chat id>/` (on Windows, the same path under your user folder). In a project with a `Work`
+  folder at its top, a copy of the same files goes in `Work/Folio/<chat id>/` and `Work/Backup/Folio/<chat id>/`; the
+  private file is never copied.
 - Private items (keys, tokens, passwords, card and phone numbers, email addresses) are swapped for placeholders before
   anything is saved. The real values stay in that chat's private file, and only recall on the same computer reads them
   back. Summaries and packs hold the placeholders only.
@@ -107,7 +123,8 @@ Open a new chat afterwards. To update: `claude plugin update folio@zoke`, then r
   way.
 - A log of what Folio did, sizes and times only (never the chat's words), is in
   `~/.claude/folio/log/<date>/<chat id>.jsonl`: each Haiku call, fold, wait, recall and shortened output, one line each.
-- `~/.claude/folio/prefs.json` keeps where packs are saved. Packs go to `~/FolioPacks` unless you choose another folder.
+- `~/.claude/folio/prefs.json` keeps where packs are saved. With it empty, packs go to the project's
+  `Work/Folio/Folio packs`, or to `~/FolioPacks` for a chat with no project folder.
 - To sort FolioPack's files, Haiku reads each file's name, size and kind, and the first 240 characters of up to 300 small
   text files. Folio never sends the start of its own private file, or of files named like keys, passwords, tokens or
   secrets. Before it cuts a file's start, Folio runs its private-value finder over the whole file (keys, tokens,
@@ -124,23 +141,30 @@ Open a new chat afterwards. To update: `claude plugin update folio@zoke`, then r
 In the panel: Watch or Automatic, the strategy and Custom's ceiling are kept for each chat. FolioPack's **Saves to** is
 kept for every chat.
 
-Four plugin settings:
+Plugin settings:
 
 - **Shorten long shell outputs** (`shortenOutputs`), on by default.
-- **Tell Claude where this project keeps its files** (`projectLayout`), on by default: the note a chat's first
-  message carries (see "Where new files go").
 - **Point Claude to folded parts** (`promptPointers`), on by default: the one line added to a prompt or a subagent's
   brief that names something only folded parts hold.
+- **Keep project folders organised** (`projectLayout`), on by default: the project-folders rule, about 400 tokens, sent
+  at the start of a chat and after each compaction.
+- **Tell Claude where this project keeps its files** (`projectPlaces`), on by default: the note a chat's first
+  message carries, after the project-folders rule (see "Where new files go").
+- **Keep a copy of each chat in its project** (`projectCopies`), on by default: the copy in `Work/Folio` and
+  `Work/Backup/Folio`. Turned off, no new copies are written; the ones written stay.
 - **Ask Claude for a note before a fold** (`foldNote`), off by default until it has been tried in the app. Before
   Automatic folds while the prompt cache is warm, Folio asks Claude itself what is still open, what it is in the middle
   of, and what in the parts about to fold it needs word for word. The answer closes finished open tasks, writes the
   map's State now, and can hold a part back from that fold. It costs about one ordinary request a fold, and a fold waits
   at most 30 seconds for it. Never on a cold fold or Claude Code's own compaction.
+- **Where the list of tasks sits** (`tasksPlace`): under the chat strip (the default), or in a box of their own.
+- **Where FolioPack sits** (`footerPlace`): pinned at the bottom of the panel under a thin rule (the default), or right
+  after the last box.
 
 Change them in Claude Code's plugin settings, or in `~/.claude/settings.json`:
 
 ```json
-"pluginConfigs": { "folio@zoke": { "options": { "shortenOutputs": false, "projectLayout": false, "promptPointers": false, "foldNote": true } } }
+"pluginConfigs": { "folio@zoke": { "options": { "shortenOutputs": false, "projectCopies": false, "foldNote": true } } }
 ```
 
 ## Uninstall

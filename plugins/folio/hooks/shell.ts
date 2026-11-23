@@ -138,15 +138,21 @@ function formsOf(value: string): string[] {
   return forms
 }
 
-// Bash's braces: a{1,2}b as a1b and a2b.
-function braces(s: string): string[] {
+// Bash's braces: a{1,2}b as a1b and a2b. It stops at `cap` values as it
+// goes: multiplying every group out first and cutting afterwards never ends
+// for text with many groups (a JSON object has one per comma list).
+function braces(s: string, cap = MAX_VALUES): string[] {
   const m = s.includes('{') ? /\{([^{}]*,[^{}]*)\}/.exec(s) : null
   if (m === null) return [s]
+  const out: string[] = []
+  for (const x of m[1]!.split(',')) {
+    for (const v of braces(`${s.slice(0, m.index)}${x}${s.slice(m.index + m[0].length)}`, cap - out.length)) {
+      out.push(v)
+      if (out.length >= cap) return out
+    }
+  }
 
-  return m[1]!
-    .split(',')
-    .flatMap(x => braces(`${s.slice(0, m.index)}${x}${s.slice(m.index + m[0].length)}`))
-    .slice(0, MAX_VALUES)
+  return out
 }
 
 // One piece of a word: plain text, a variable, or what only running the
@@ -458,7 +464,8 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
   }
   // A word's values: every way its variables and braces read; null when one
   // can't be known.
-  const valuesOf = (parts: Part[]): string[] | null => {
+  // Braces in quotes stay as written, as in Bash ('{a,b}' is one word).
+  const valuesOf = (parts: Part[], isQuoted = false): string[] | null => {
     let out = ['']
     for (const p of parts) {
       if ('isUnknown' in p) return null
@@ -470,7 +477,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
       if (known === undefined) return null
       out = out.flatMap(s => known.map(k => `${s}${k}`)).slice(0, MAX_VALUES)
     }
-    if (isBash) out = out.flatMap(braces).slice(0, MAX_VALUES)
+    if (isBash && !isQuoted) out = out.flatMap(s => braces(s)).slice(0, MAX_VALUES)
     // Windows' %NAME%: the home folder's and the working folder's; any other can't be known.
     let isKnown = true
     out = out.map(s =>
@@ -524,7 +531,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
       // A redirection's target (> out.txt) is a path, never the command's word,
       // even written first. A here-document's word was taken with its <<.
       else if (tok.op !== '<<' && tokens[t + 1]?.kind === 'word') {
-        const values = valuesOf((tokens[t + 1] as Word).parts)
+        const values = valuesOf((tokens[t + 1] as Word).parts, (tokens[t + 1] as Word).isQuoted)
         if (values !== null) name(values)
         t += 1
       }
@@ -538,7 +545,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
       const values: string[] = []
       let isKnown = true
       for (; tokens[u]?.kind === 'word'; u++) {
-        const vs = valuesOf((tokens[u] as Word).parts)
+        const vs = valuesOf((tokens[u] as Word).parts, (tokens[u] as Word).isQuoted)
         if (vs === null) isKnown = false
         else {
           values.push(...vs)
@@ -565,7 +572,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
           continue
         }
         if (literalOf(x) === '@') continue
-        const vs = valuesOf(x.parts)
+        const vs = valuesOf(x.parts, x.isQuoted)
         if (vs === null || !x.isQuoted) isKnown = false
         else values.push(...vs.flatMap(s => s.split(',')).map(s => s.trim()).filter(Boolean))
       }
@@ -582,7 +589,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
     const first = tok.parts[0]
     const assign = isBash && segment === 'start' && first !== undefined && 'text' in first ? /^([A-Za-z_]\w*)=/.exec(first.text) : null
     if (assign !== null && first !== undefined && 'text' in first) {
-      const values = valuesOf([{ text: first.text.slice(assign[0].length) }, ...tok.parts.slice(1)])
+      const values = valuesOf([{ text: first.text.slice(assign[0].length) }, ...tok.parts.slice(1)], tok.isQuoted)
       setVar(assign[1]!, values)
       if (values !== null) name(values)
       continue
@@ -591,7 +598,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
     if (!isBash && first !== undefined && 'name' in first) {
       const second = tok.parts[1]
       if (tok.parts.length === 1 && after(1) === '=' && tokens[t + 2]?.kind === 'word') {
-        const values = valuesOf((tokens[t + 2] as Word).parts)
+        const values = valuesOf((tokens[t + 2] as Word).parts, (tokens[t + 2] as Word).isQuoted)
         setVar(keyOf(first.name), values)
         if (values !== null) name(values)
         t += 2
@@ -599,7 +606,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
         continue
       }
       if (second !== undefined && 'text' in second && second.text.startsWith('=')) {
-        const values = valuesOf([{ text: second.text.slice(1) }, ...tok.parts.slice(2)])
+        const values = valuesOf([{ text: second.text.slice(1) }, ...tok.parts.slice(2)], tok.isQuoted)
         setVar(keyOf(first.name), values)
         if (values !== null) name(values)
         if (segment === 'start') segment = 'run'
@@ -612,7 +619,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
       while (tokens[u]?.kind === 'word' && /^-./.test(literalOf(tokens[u]) ?? '')) u++
       const target = tokens[u]
       if (target?.kind === 'word') {
-        const values = valuesOf(target.parts)
+        const values = valuesOf(target.parts, target.isQuoted)
         if (values !== null) name(values)
         const to = values?.length === 1 && values[0] !== '-' ? values[0]! : null
         dirs = dirs.map(d => (to === null ? null : fullPath(to, d, w)))
@@ -622,7 +629,7 @@ function commandPaths(command: string, tool: string, starts: string[], w: Where,
       continue
     }
     if (segment === 'start') segment = literal !== null && LOOK.test(literal) ? 'look' : 'run'
-    const values = valuesOf(tok.parts)
+    const values = valuesOf(tok.parts, tok.isQuoted)
     if (values !== null) name(values)
   }
   // A command inside this one runs where this one ended up.

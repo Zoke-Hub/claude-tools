@@ -52,9 +52,13 @@ async function packTo($: Engine, on: On, home = HOME, os?: string, there = [home
 
 
 
+// The home folder and the test project are there; a pack's default folder,
+// the project's Work/Folio/Folio packs, is made inside the project.
+const isThere = (path: string) => path === HOME || path === '/w'
+
 test('a packing prompt sent together with another one still finishes the pack', async ($, on) => {
   let isZipped = false
-  stubEngine(on, { tree, exists: path => path === HOME || (isZipped && path.endsWith('.zip')) })
+  stubEngine(on, { tree, exists: path => isThere(path) || (isZipped && path.endsWith('.zip')) })
   const asks: string[] = []
   on('prompt.submit', (_, e) => {
     asks.push(e.text)
@@ -73,7 +77,7 @@ test('a packing prompt sent together with another one still finishes the pack', 
 })
 
 test("a packing prompt that never runs lets Pack up come back by itself", async ($, on) => {
-  const { clock, toasts } = stubEngine(on, { tree, exists: path => path === HOME })
+  const { clock, toasts } = stubEngine(on, { tree, exists: isThere })
   on('prompt.submit', (_, e) => ({ text: e.text }))
   await start($)
   const ui = await panel($)
@@ -89,7 +93,7 @@ test("a packing prompt that never runs lets Pack up come back by itself", async 
 
 test('two presses of Pack up before the panel redraws make one pack', async ($, on) => {
   let packs = 0
-  stubEngine(on, { tree, exists: path => path === HOME })
+  stubEngine(on, { tree, exists: isThere })
   on('prompt.submit', (_, e) => {
     packs++
     return { text: e.text }
