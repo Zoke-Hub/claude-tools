@@ -97,6 +97,43 @@ export function stripInput(input: Record<string, unknown>, part: number): { inpu
   return { input: out, saves: Math.max(0, saves) }
 }
 
+// A whole note as a strip leaves it, in place of an input or a result, with
+// the part it names. Claude reads these in its own context where old calls
+// stood, and can take one for the call's text and write it into a new call:
+// the note then reaches whoever gets the call (an agent's brief, a file), who
+// can't recall it, and the words were never written anywhere.
+const WHOLE_NOTE = /\[Folio stripped this [^\]\n]{1,80}? to save room: [\d,]+ characters\.[\s\S]{0,400}?Recall part (\d+) for it word for word; don't rebuild it from memory\.\]/
+
+/** The part a whole note in a call's input names, the first one found; null when the input holds none. */
+export function noteInCall(input: unknown): number | null {
+  let part: number | null = null
+  walk(input, s => {
+    const found = part === null ? WHOLE_NOTE.exec(s) : null
+    if (found) part = Number(found[1])
+
+    return s
+  })
+
+  return part
+}
+
+// Tools whose input a note may sit in as what to look for, not as words to pass
+// on: reading and searching, and Folio's own recall and FolioPack.
+const LOOKS_ONLY = /^(Read|Grep|Glob|mcp__folio__.+)$/
+
+/**
+ * Why a call can't run as Claude wrote it, when one of its values holds a
+ * whole note instead of the words the note stood for; null when it may run.
+ * The words Claude reads, so it writes the text out and calls again.
+ */
+export function noteRefusal(tool: string, input: unknown): string | null {
+  if (LOOKS_ONLY.test(tool)) return null
+  const part = noteInCall(input)
+  if (part === null) return null
+
+  return `Folio refused this call: its input holds a Folio note ("${STRIP_MARK} … Recall part ${part} …]") where text should be. A note only stands in, in your own context, for words shortened there; it is not the text, and whoever gets this call can't recall it. Write the text out in full and call again. If you need the words the note stood for, get them first with mcp__folio__recall (part ${part}).`
+}
+
 // Every text value of a value through `fn` (a mask, or the reverse), its
 // keys and its shape kept.
 export function mapStrings<T>(value: T, fn: (s: string) => string): T {

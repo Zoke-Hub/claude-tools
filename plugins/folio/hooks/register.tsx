@@ -19,6 +19,7 @@ import { AGENT_LINE, noteCut, RECALL_DESCRIPTION, RECALL_SCHEMA, recallCall, res
 import { pointerLine, resetPointers, warmPointers } from './pointers'
 import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, folioDir, homeDir, openStore, sessionsDir, setSettings, storeFailure } from './store'
 import { noteCommand, shortenRow } from './shorten'
+import { noteRefusal } from './strip'
 import { resetHouse } from './house'
 import { noteTurnGrowth, noteTurnStart, resetSync, syncChunks } from './sync'
 import { errorText, later, logEvent, note } from './debug'
@@ -265,6 +266,19 @@ export const register: Register = (on, options) => {
 
     return { result: text }
   }).catch(() => ({ result: "Recall ran out of time. Try a narrower query, a `kind`, or a part's card." }))
+
+  // A call whose input holds one of Folio's notes where its text should be
+  // never runs: Claude copied the note from an old call in its context, and
+  // the note would reach whoever gets the call (an agent's brief, a file) with
+  // no words behind it. Claude is told to write the text out, in the main
+  // thread and in subagents alike. Every other call goes on as it is.
+  on('tool.call', async ($, e, next) => {
+    const refusal = noteRefusal(String(e.tool), e)
+    if (refusal === null) return next(e)
+    void logEvent($, 'note-refused', { tool: String(e.tool), agent: e.agentId !== undefined })
+
+    return { deny: refusal }
+  })
 
   on('tool.call', { tool: 'mcp__folio__import_pack' }, async ($, e) => {
     const path = typeof e.path === 'string' ? e.path : ''

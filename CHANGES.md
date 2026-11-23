@@ -3,6 +3,13 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-24 · Folio 1.0.0 (number unchanged)
+
+- **Folio, a note never stands in for real text:** a tool call whose text is one of Folio's "[Folio stripped this …]"
+  notes (Claude copying a shortened old call from its context into a new message, brief or file) is refused, and
+  Claude is told to write the text out and to recall the part first if it needs the words. Reading, searching and
+  Folio's own tools are left alone.
+
 ## 2026-11-23 · Folio 1.0.0 (number unchanged), later
 
 - **Folio, FolioPack lists by the project's own folders:** a section for each folder at the project's top (Animations,

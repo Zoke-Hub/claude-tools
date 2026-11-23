@@ -9,9 +9,9 @@ import { chunksOf, messageTexts, splitChunks, toolResultsOf } from '../hooks/chu
 import { buildFolded, isPaired, noPlan, planFold, protectedIds } from '../hooks/fold'
 import type { Original } from '../hooks/store'
 import { cardName, EMPTY_VIEW, normaliseChunk } from '../hooks/store'
-import { inputNote } from '../hooks/strip'
+import { inputNote, noteInCall, noteRefusal, resultNote } from '../hooks/strip'
 import type { ChunkRecord, PickerView } from '../types'
-import { DIR, mountPanel, openChat, request, saved, savedView, seed, start, stubEngine } from './engine'
+import { callTool, DIR, mountPanel, openChat, request, saved, savedView, seed, start, stubEngine } from './engine'
 import type { Engine } from './engine'
 
 // The stripped stage (F8): a part between word for word and folded, its words
@@ -321,4 +321,85 @@ test('Keep on a stripped part gives its words back at once, as Undo does', async
   await ui.unmount()
   expect(pluginAsks).toEqual([REBUILD_ASK])
   expect(saved(files).chunks[0]).toMatchObject({ decision: 'keep', status: 'live' })
+})
+
+// A brief to an agent, longer than the one a chat lost (2,186 characters).
+const BRIEF = `Round g10: ${'cover every loading gap with the native screen, then film it on the real screen and send the frames. '.repeat(26)}`.trim()
+
+test('a call holding a whole Folio note where its text should be is refused, naming the part; the words themselves pass', () => {
+  expect(BRIEF.length).toBeGreaterThan(2186)
+  expect(noteRefusal('SendMessage', { to: 'builder', summary: 'Round g10', message: BRIEF })).toBeNull()
+  // The note Claude copied from an old call in its context, in place of the brief.
+  const refusal = noteRefusal('SendMessage', { to: 'builder', summary: 'Round g10', message: inputNote(2186, 177) })
+  expect(refusal).toContain('Folio refused this call')
+  expect(refusal).toContain('part 177')
+  expect(noteInCall({ message: inputNote(2186, 177) })).toBe(177)
+  // Inside a longer value too (an agent's brief, a file), and a result's note as well.
+  expect(noteRefusal('Agent', { prompt: `Go on from here:\n${inputNote(4091, 176)}` })).toContain('part 176')
+  expect(noteRefusal('Write', { file_path: '/p/brief.md', content: resultNote('Bash', 'ran\nok', 12) })).toContain('part 12')
+  // Looking for a note, recalling one and naming one in passing are fine.
+  expect(noteRefusal('Grep', { pattern: inputNote(2186, 177) })).toBeNull()
+  expect(noteRefusal('mcp__folio__recall', { query: inputNote(2186, 177) })).toBeNull()
+  expect(noteRefusal('SendMessage', { message: 'The brief reached you as a note ("[Folio stripped this input ...]"): it is in a file now.' })).toBeNull()
+})
+
+// Part 1 of a chat sends a builder its brief, with the long write and the
+// commands after it.
+function briefed(): SessionMessage[] {
+  const messages = chatOf(20)
+  const at = messages.findIndex(m => m.toolUses.some(u => u.tool_use_id === 'e0')) + 2
+  messages.splice(
+    at,
+    0,
+    { role: 'assistant', text: 'brief the builder', toolUses: [{ tool_use_id: 'm0', tool: 'SendMessage', input: { to: 'builder', summary: 'Round g10', message: BRIEF } }] },
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'm0', text: 'Message sent.', isError: false }] },
+  )
+
+  return messages
+}
+
+test('a long SendMessage brief reaches its agent word for word, and one holding a note in its place never runs', async ($, on) => {
+  // The tool beneath Folio: what each call delivered.
+  const delivered: string[] = []
+  on('tool.call', { tool: 'SendMessage' }, (_, e) => {
+    delivered.push(String((e as { message?: unknown }).message))
+
+    return { result: 'Message sent.' }
+  })
+  const messages = briefed()
+  await openChat($, on, seed(messages, 'auto'), messages)
+  await callTool($, { tool: 'SendMessage', to: 'builder', summary: 'Round g10', message: BRIEF })
+  expect(delivered).toEqual([BRIEF])
+  const refused = JSON.stringify(await callTool($, { tool: 'SendMessage', to: 'builder', summary: 'Round g10', message: inputNote(2186, 177) }))
+  expect(refused).toContain('Folio refused this call')
+  expect(delivered).toEqual([BRIEF])
+})
+
+// Strips the oldest part, then reads its brief back as recall gives a command.
+async function stripBrief($: Engine, on: Parameters<typeof openChat>[1], files: Map<string, string>, messages: SessionMessage[]) {
+  const { clock, engine } = await openChat($, on, files, messages)
+  await request($, engine, 260_000)
+  const done = await compact($, messages)
+  expect(saved(files).chunks[0]!.status).toBe('trimmed')
+  // In the chat, the brief is a note now.
+  expect(useOf(done.messages, 'm0').input.message).toBe(inputNote(BRIEF.length, 1))
+  const recalled = async (agentId?: string) =>
+    JSON.parse(JSON.stringify(await callTool($, { tool: 'mcp__folio__recall', query: 'Round g10 cover every loading gap', kind: 'command', ...(agentId === undefined ? {} : { agentId }) }))).result as string
+  const first = await recalled()
+  // A save in between keeps it, for the agent that was sent the brief too.
+  messages.splice(0, messages.length, ...done.messages)
+  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1' })
+  await clock.advance(1000)
+
+  return { first, after: await recalled('builder-agent'), original: JSON.parse(files.get(`${DIR}/originals/${saved(files).chunks[0]!.id}.json`)!) as Original }
+}
+
+test('a long SendMessage brief a strip took comes back word for word from recall, after a save too and for the agent', async ($, on) => {
+  const messages = briefed()
+  const files = seed(messages, 'auto')
+  wholeOriginals(files, messages)
+  const { first, after, original } = await stripBrief($, on, files, messages)
+  expect(original.toolInputs?.m0).toEqual({ to: 'builder', summary: 'Round g10', message: BRIEF })
+  expect(first).toContain(BRIEF)
+  expect(after).toContain(BRIEF)
 })
