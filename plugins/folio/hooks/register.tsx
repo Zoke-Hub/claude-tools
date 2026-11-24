@@ -20,6 +20,7 @@ import { pointerLine, resetPointers, warmPointers } from './pointers'
 import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, folioDir, homeDir, openStore, sessionsDir, setSettings, storeFailure } from './store'
 import { noteCommand, shortenRow } from './shorten'
 import { noteRefusal } from './strip'
+import { matchWindow } from './window'
 import { resetHouse } from './house'
 import { noteTurnGrowth, noteTurnStart, resetSync, syncChunks } from './sync'
 import { errorText, later, logEvent, note } from './debug'
@@ -184,6 +185,10 @@ export const register: Register = (on, options) => {
       await ensureSession($)
       await bindCopies($).catch(err => note($, `the project's copy could not be set up: ${errorText(err)}`))
       await refreshContext($).catch(() => {})
+      // A chat in Automatic: Claude Code's own window at a million, unless it is
+      // already. Not waited for: the command waits until the chat is idle, and
+      // the cold fold below must not.
+      if ((await read($, view)).settings.mode === 'auto') void matchWindow($, 'auto')
       await syncChunks($)
       // The folded parts' names, read once, so the first prompt that names one waits for nothing.
       if (options.promptPointers !== false) await warmPointers($, await read($, view)).catch(() => {})

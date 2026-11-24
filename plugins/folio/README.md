@@ -41,6 +41,9 @@ original stays on your computer word for word, and Claude can bring any of it ba
   not lowered. Past that point Claude Code compacts as before. Claude Code stops a reply when its compaction comes
   within three requests of the one before, three times in a row, so where handing the chat back would make the third,
   Folio skips that compaction (a "not compacted" line shows) and goes on after a few requests.
+  Pressing Automatic also runs `/autocompact 1000000`, so Claude Code's own compaction waits until a million tokens on
+  a model that takes that many; pressing Watch puts back what was there before (`auto`, or the window you set). The
+  command saves the window for the model, so the last chat switched decides for every chat on it.
 - **What fills the context.** The panel shows each part of the context, the work that counts toward the next fold,
   the newest open tasks, and what Folio did recently, each recall as one line.
 - **Tasks.** Every part belongs to a task. The panel lists the tasks, newest first; a task opens to its parts, and a

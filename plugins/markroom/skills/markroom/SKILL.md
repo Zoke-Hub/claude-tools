@@ -70,7 +70,7 @@ the turn, and in a short message too. Never open the board for the user: the lin
 | Tool | Key | What it does |
 |---|---|---|
 | Move | V | Click a mark to select its note; drag to move the whole note (Alt/Option-drag moves one mark); drag empty space to pan |
-| Marker | P | Click to drop a marker |
+| Marker | M | Click to drop a marker |
 | Arrow | A | Drag from where it starts to what it points at |
 | Box | B | Drag to frame an area |
 | Draw | D | Freehand; every stroke is a mark |

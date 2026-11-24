@@ -67,6 +67,9 @@ type StubOptions = {
   // The session's id as the engine reads it now ("test-session" unless given),
   // so a test can play a /clear, which goes on under a new id.
   id?: () => string
+  // A slash command's run, as the session gives it: it may wait (a command
+  // waits until the session is idle) and change what the session measures.
+  command?: (command: string, args: string) => void | Promise<void>
 }
 
 // A path from a file event in the form the test wrote it, on any system. The
@@ -140,8 +143,9 @@ export function stubEngine(on: On, o: StubOptions = {}) {
 
     return { value: undefined }
   })
-  on('command.run', (_, e) => {
+  on('command.run', async (_, e) => {
     commands.push(`${e.command} ${e.args ?? ''}`)
+    await o.command?.(e.command, e.args ?? '')
 
     return { text: '' }
   })
@@ -157,7 +161,8 @@ export function stubEngine(on: On, o: StubOptions = {}) {
   })
   if (o.usage !== undefined) {
     const u = o.usage
-    const breakdown = {
+    // Read anew each time, so a test can change the window as /autocompact would.
+    const breakdownOf = () => ({
       categories: [{ name: 'System prompt', tokens: u.fixed, isDeferred: false }],
       totalTokens: u.tokens,
       mcpTools: [],
@@ -165,14 +170,15 @@ export function stubEngine(on: On, o: StubOptions = {}) {
       autoCompactThreshold: u.compactAt,
       rawMaxTokens: u.raw ?? u.window ?? 1_000_000,
       autocompactSource: u.source ?? 'auto',
-    }
+      model: 'test-model',
+    })
     // The first `unreadFirst` reads fail, as before the session has a size.
     let reads = 0
     on('session.usage', () => {
       reads += 1
       if (reads <= (u.unreadFirst ?? 0)) throw new Error('no size yet')
 
-      return { value: { startedAt: 0, context: { tokens: u.tokens, window: u.window ?? 1_000_000, breakdown }, rateLimits: [] } as never }
+      return { value: { startedAt: 0, context: { tokens: u.tokens, window: u.window ?? 1_000_000, breakdown: breakdownOf() }, rateLimits: [] } as never }
     })
   }
   // Each light-model call as sent: its prompt, effort and answer cap.

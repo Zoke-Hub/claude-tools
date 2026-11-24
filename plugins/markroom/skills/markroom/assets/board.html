@@ -395,7 +395,7 @@ textarea::placeholder { color: var(--muted); }
       <div class="seg" id="tools">
         <button class="tbtn" data-tool="move" title="Move and select (V). Drag empty space to pan." aria-pressed="true">
           <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg><span class="lbl">Move</span></button>
-        <button class="tbtn" data-tool="pin" title="Marker (P). Click to drop a numbered marker." aria-pressed="false">
+        <button class="tbtn" data-tool="pin" title="Marker (M). Click to drop a numbered marker." aria-pressed="false">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="9" r="5"/><path d="M12 14v7"/></svg><span class="lbl">Marker</span></button>
         <button class="tbtn" data-tool="arrow" title="Arrow (A). Drag from where it starts to what it points at." aria-pressed="false">
           <svg viewBox="0 0 24 24"><path d="M5 19L19 5M10 5h9v9"/></svg><span class="lbl">Arrow</span></button>
@@ -1597,7 +1597,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       ? "Nothing here with this filter. Switch to <b>All</b> to see every note."
       : RO ? "<b>No notes on this image.</b>"
       : VID() ? "<b>No notes on this video yet.</b> Pause on a frame and write a note on the right (C), then press Enter. To point at something, mark the frame with <b>Marker</b>, <b>Arrow</b>, <b>Box</b>, <b>Draw</b> or <b>Text</b>: the marks join the note. <b>Set in</b> (I) makes a note that covers a range."
-      : "<b>No notes" + (IMAGES.length > 1 && all.length ? " on this image" : "") + " yet.</b> Pick <b>Marker</b> (P), <b>Arrow</b> (A), <b>Box</b> (B), <b>Draw</b> (D) or <b>Text</b> (T) and mark the image."
+      : "<b>No notes" + (IMAGES.length > 1 && all.length ? " on this image" : "") + " yet.</b> Pick <b>Marker</b> (M), <b>Arrow</b> (A), <b>Box</b> (B), <b>Draw</b> (D) or <b>Text</b> (T) and mark the image."
         + " Add as many marks as the note needs: they stay together until you click <b>Done</b> beside them, then write what should change and press Enter."
         + " Click any mark later to reopen its note, and anything you draw then joins it.";
     if (users && authors.size > 1) {
@@ -2357,7 +2357,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       if (ui === "collect" && !RO) openComment(activeId, true); else finish();
       return;
     }
-    if (RO && (e.key === "Delete" || e.key === "Backspace" || /^[vhpmabdt1-4]$/i.test(e.key) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z"))) return;
+    if (RO && (e.key === "Delete" || e.key === "Backspace" || /^[vhmabdt1-4]$/i.test(e.key) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z"))) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); doUndo(); return; }
     // Alt / Option + arrows anywhere on the board (not while typing): ← / → open the tab to the left or right, ↑ / ↓ the
     // newer or older version of this tab (up and down the Version list, newest at the top). Alt + Shift + ← / → moves the
@@ -2385,7 +2385,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && e.shiftKey && IMAGES.length > 1 && !VID()) { stepTab(e.key === "ArrowRight" ? 1 : -1); return; }
     const k = e.key.toLowerCase();
     if (k === "f") { setFull(!app.classList.contains("full")); return; }                 // full screen, on image and video tabs alike
-    const tools = { v: "move", h: "move", p: "pin", m: "pin", a: "arrow", b: "box", d: "pen", t: "text" };
+    const tools = { v: "move", h: "move", m: "pin", a: "arrow", b: "box", d: "pen", t: "text" };   // M for Marker
     if (tools[k]) { setTool(tools[k]); return; }
     const zoomKey = { "+": "#zin", "=": "#zin", "-": "#zout", "_": "#zout", "0": "#fit", l: "#fill" }[k];
     if (zoomKey) $(zoomKey).click();

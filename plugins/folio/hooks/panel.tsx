@@ -21,6 +21,7 @@ import { ACTIVITY_ICONS, ROOM, STEP_ICONS, checkboxSvg, chunkState, chunkTitle, 
 import { change, chunkOf, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, homeDir, sessionEpoch, setSettings, settingsOf, STRATEGIES } from './store'
 import type { Suggestion } from './suggest'
 import { suggestionsFor } from './suggest'
+import { matchWindow } from './window'
 import { base } from './paths'
 import { isOutputQuery, outputLabel } from './shorten'
 import { DIM, LIGHT, TICK } from './colors'
@@ -323,7 +324,8 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
     if (name === 'chunks') void update($, openChunk, () => null)
     void update($, open, list => (list.includes(name) ? list.filter(x => x !== name && !x.startsWith(`${name}:`)) : [...list.filter(x => !isOneOf(x)), name]))
   }
-  const setMode = (mode: 'watch' | 'auto') => () => void setSettings($, { mode })
+  // Claude Code's own auto-compact window follows: a million in Automatic.
+  const setMode = (mode: 'watch' | 'auto') => () => void setSettings($, { mode }).then(() => matchWindow($, mode))
   // The meter shows the new strategy's sizes at once, as both bars do.
   const customTop = v.context?.customTop ?? CUSTOM_MAX
   const canCustom = customTop >= CUSTOM_MIN

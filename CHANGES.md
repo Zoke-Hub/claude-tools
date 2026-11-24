@@ -3,6 +3,19 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-24 · Folio 1.0.0 (number unchanged), later still
+
+- **Folio, Claude Code's window follows Automatic:** pressing Automatic runs `/autocompact 1000000`, so Claude Code's
+  own compaction waits until a million tokens while Folio folds the chat; pressing Watch runs `/autocompact` with what
+  was there before (`auto`, or the window you had set). A chat that opens in Automatic sets it once. Nothing runs when
+  the window is already a million, on a model that takes fewer tokens, or when `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sets
+  it; a window you change by hand after Automatic is left as you set it. The command saves the window for the model,
+  so it covers every chat on that model: the last chat switched decides.
+
+## 2026-11-24 · MarkRoom 1.0.0 (number unchanged), later
+
+- **MarkRoom, M for Marker:** the Marker tool's key is M, as its button and the empty-notes line say (it was P).
+
 ## 2026-11-24 · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom, more room for the board's name:** a board of several files no longer shows a count of its images and
