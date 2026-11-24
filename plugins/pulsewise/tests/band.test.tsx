@@ -2818,3 +2818,29 @@ test("one long call with Claude's count unchanged holds its part where it stood,
   expect(Math.abs(later.fill - atStart.fill)).toBeLessThan(0.01)
   expect(later.weight).toBe(atStart.weight)
 })
+
+test("a point not started is drawn as big as Claude's estimate for it, not as the first point that finished", () => {
+  // The case seen: point 1 (a quick read) finished in a minute, point 2 ran half an hour with its background work, and
+  // points 3 to 5 were drawn at point 1's size because a point not started took this chat's average finished point.
+  const t0 = 1_800_000_000_000
+  const min = 60_000
+  const now = t0 + 31 * min
+  const m = {
+    points: [
+      { name: 'Read the code', state: 'done', started: t0, ended: t0 + min, estimateMin: 3, correctedMin: 1 },
+      { name: 'Apply sites and opening apps', state: 'running', started: t0 + min, ended: null, estimateMin: 40, correctedMin: 12 },
+      { name: 'Apply home, Library and notices', state: 'pending', started: null, ended: null, estimateMin: 40, correctedMin: 12 },
+      // No correction on record yet: the estimate as sent.
+      { name: 'Apply the player', state: 'pending', started: null, ended: null, estimateMin: 25, correctedMin: null },
+      // Added after the estimate: the chat's average finished point, as before.
+      { name: 'Apply the settings', state: 'pending', started: null, ended: null },
+    ],
+    tasks: [], actions: [], log: [], side: [], finishedAt: null, phase: 'working', phaseAt: t0, turn: 1, listTurn: 1, closedJobs: {},
+  } as never
+  expect(pointWeight(m, 2, now)).toBe(12 * min)
+  expect(pointWeight(m, 3, now)).toBe(25 * min)
+  expect(pointWeight(m, 4, now)).toBe(min)
+  // Running with no count, a point is as big as its estimate until it runs past it, then as big as its time so far.
+  expect(pointWeight(m, 1, now)).toBe(30 * min)
+  expect(pointWeight(m, 1, t0 + 5 * min)).toBe(12 * min)
+})

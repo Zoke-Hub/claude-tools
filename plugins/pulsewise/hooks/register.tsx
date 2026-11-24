@@ -202,7 +202,7 @@ const COUNT_SPEC: ToolSpec = {
 const ESTIMATE_SPEC: ToolSpec = {
   name: 'estimate',
   description:
-    "Your estimate for a new task list, sent once, in the same message as its first call: minutes for the whole list and for each point, in list order, as long as they will really take you (waits for the person left out). The list's total is clock time: points that run side by side count once. Decimals are fine (0.5 is half a minute). PulseWise corrects it by how your past estimates turned out and logs both against the real times; the bar doesn't show it yet.",
+    "Your estimate for a new task list, sent once, in the same message as its first call: minutes for the whole list and for each point, in list order, as long as they will really take you (waits for the person left out). The list's total is clock time: points that run side by side count once. Decimals are fine (0.5 is half a minute). PulseWise corrects it by how your past estimates turned out, sizes each point on the bar by it until the point is done, and logs both against the real times.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -481,10 +481,17 @@ const LONG_WORDS = new Set([
   'rig', 'cut', 'source', 'research', 'draw', 'port', 'migrate', 'test', 'fix', 'redo', 'rewrite', 'develop', 'train',
 ])
 
-/** How long a point not yet done is expected to take: by its first word, scaled by this chat's own pace. */
-function expectedMs(m: Model, name: string): number {
+/**
+ * How long a point not yet done is expected to take: Claude's own estimate for it (the estimate tool), as PulseWise
+ * corrected it by how past estimates turned out, or as sent before there are enough of those; a point with no estimate,
+ * by its first word, scaled by this chat's own pace. So a point not started is drawn as big as the work Claude expects
+ * in it, not as big as the points that happened to finish first.
+ */
+function expectedMs(m: Model, p: Point): number {
+  const minutes = p.correctedMin ?? p.estimateMin
+  if (minutes != null && minutes > 0) return Math.max(1000, minutes * 60_000)
   const average = averageDone(m)
-  const first = (name.trim().split(/\s+/)[0] ?? '').toLowerCase().replace(/[^a-z]/g, '')
+  const first = (p.name.trim().split(/\s+/)[0] ?? '').toLowerCase().replace(/[^a-z]/g, '')
   if (QUICK_WORDS.has(first)) return Math.min(45_000, Math.max(5000, average * 0.3))
   if (LONG_WORDS.has(first)) return Math.max(60_000, average * 1.5)
   return average
@@ -566,7 +573,7 @@ function projectedFrom(m: Model, p: Point, now: number): number {
 export function pointWeight(m: Model, index: number, now: number): number {
   const p = m.points[index]
   if (!p) return averageDone(m)
-  const expected = expectedMs(m, p.name)
+  const expected = expectedMs(m, p)
   const start = p.started ?? p.seenAt ?? null
   if (start === null) return expected
   const own = ownNow(m, now)
@@ -778,7 +785,7 @@ function detailSegs(m: Model, key: string, now: number): Seg[] {
     segs.unshift({
       key: `c:${index}`,
       name: 'Claude',
-      weight: Math.max(1000, p.state === 'pending' && p.seenAt == null ? expectedMs(m, p.name) : f !== null && f >= 0.03 && isOpen && !isStill ? projected / f : elapsed),
+      weight: Math.max(1000, p.state === 'pending' && p.seenAt == null ? expectedMs(m, p) : f !== null && f >= 0.03 && isOpen && !isStill ? projected / f : elapsed),
       fill: p.state === 'done' ? 1 : (f ?? 0),
       state: isOpen ? 'running' : p.state,
       // Uncounted work shows as moving; counted work fills instead.

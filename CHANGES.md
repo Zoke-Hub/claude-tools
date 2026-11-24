@@ -3,6 +3,22 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-25 · PulseWise (number unchanged)
+
+- **PulseWise, points sized by Claude's estimate:** a point not yet done is drawn as big as Claude's estimate for it
+  (corrected by how past estimates turned out), so the points ahead show the work they hold instead of taking the
+  size of whichever point finished first. A running point grows past its estimate once it takes longer; a point with
+  no estimate takes the chat's typical point length, as before.
+
+## 2026-11-25 · MarkRoom 1.0.0 (number unchanged), later
+
+- **MarkRoom, notes move along the video timeline:** drag a note's pin sideways to move its moment, or a range note's in
+  or out end to move that end; Shift + drag slides the whole range at the same length. The frame follows while
+  dragging, and ⌘Z / Ctrl+Z undoes a move. A range note now shows an in wedge and an out wedge, each pointing outward
+  from its time, with the bar between.
+- **MarkRoom, the open tab stays in view:** when the tabs are wider than the board, the tab row scrolls to keep the
+  open tab in view when the board opens or updates (a new round, a closed tab, the window resized).
+
 ## 2026-11-25 · MarkRoom 1.0.0 (number unchanged)
 
 - **MarkRoom, versions in the order they were made:** a tab's Version dropdown lists its files newest first by when each

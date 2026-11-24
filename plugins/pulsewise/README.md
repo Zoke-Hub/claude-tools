@@ -100,7 +100,10 @@ Each task list that ran is written, once finished (or when a new list replaces i
 `~/.claude/progress/eta-log.jsonl`: Claude's estimate beside the real time, for the list and for each point, with the
 time spent waiting for your replies left out, the point's count, which computer and which model. Once three lists
 are on record, PulseWise corrects each new estimate itself by how past ones turned out (the median of real time over
-estimated) and logs the corrected time beside it. The bar doesn't show estimates or time left from them yet.
+estimated) and logs the corrected time beside it. The bar sizes each point not yet done by that point's estimate,
+corrected (as sent until there are enough on record), so the points ahead show the work they hold; a running point
+grows past its estimate once it takes longer. A point with no estimate takes the chat's typical point length. The bar
+shows no time left.
 
 To bring in the log from another computer, append its lines to this file: each line names its computer.
 

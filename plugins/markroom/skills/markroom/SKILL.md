@@ -127,7 +127,9 @@ the turn, and in a short message too. Never open the board for the user: the lin
 **Several images, and rounds.** A board can hold several images and videos and shows them as tabs. Alt/Option + ←/→
 opens the tab to the left or right, on any tab (Shift + ←/→ does too on an image tab), and a link ending in
 `#open-<id>` (the links Claude sends), or in a plain `#<id>` (older links), opens one file directly. Drag a tab, or press Alt/Option + Shift + ←/→, to move the
-open tab along the row. Numbers run across the whole board, so "#7" is unambiguous.
+open tab along the row. When the tabs are wider than the board, the row scrolls, and it keeps the open tab in view: when
+the board opens, when another tab opens, and when the row changes under it (a new round or tab arriving, the window
+resized); a row the reviewer scrolled stays where it is until then. Numbers run across the whole board, so "#7" is unambiguous.
 Rounds of the same thing (built with `--group`) share **one tab**: the tab opens the latest round, and a **Version** dropdown
 at the far right of the header (outside the tab row, so it never scrolls away) opens an older one (each option shows its
 open-note count); Alt/Option + ↑/↓ steps to the newer or older
@@ -188,9 +190,13 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
   written: the note joins the cards (and the full-screen list) only once it is saved, never as a draft card while it is being
   drawn or typed. It is still stored as you go, so nothing is lost on a reload.
 - Under the frame, a transport: previous / next note, −1 / +1 frame, play, timecode MM:SS:FF, **Set in (I)** for a note that
-  covers a range, an optional lane of named beats (scene sections), and the scrub track with a pin per note
-  (and a bar for a range). Click a pin to open its note. Dragging the playhead shows the frames as it goes (one seek at a
-  time, always to the newest spot) and never selects text.
+  covers a range, an optional lane of named beats (scene sections), and the scrub track with a pin per note at one
+  moment, and for a range note an in wedge and an out wedge (each with its flat side on its time, pointing outward) with
+  a bar between. Click a pin or a wedge to open its note. Drag a pin, or a wedge, sideways to move that note's moment or
+  that end of its range (an end never passes the other); Shift + drag on a wedge or the bar slides the whole range,
+  keeping its length. The frame follows while dragging; the move saves the note's times (a note Claude replied to is
+  marked edited, a done note opens again) and ⌘Z / Ctrl+Z undoes it. A plain press on the bar moves the playhead.
+  Dragging the playhead shows the frames as it goes (one seek at a time, always to the newest spot) and never selects text.
 - The notes panel on the right holds the cards, the same as images (timecode instead of x/y; **Show on the video** seeks to the note).
 - A note's marks show on its frame (or across its range, and 0.4 s after a single frame), and whenever the note is selected.
   Moving the playhead and marking again starts a new note.

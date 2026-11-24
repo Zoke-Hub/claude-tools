@@ -311,7 +311,7 @@ textarea::placeholder { color: var(--muted); }
 .pop.docked { position: static; width: auto; max-width: none; box-shadow: none; z-index: auto; }
 .pop.docked textarea { min-height: 96px; }
 .pop.is-new .num, .pop.is-new #popDel, .pop.is-new #popSw { display: none; }
-.transport { display: grid; gap: 6px; margin-top: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 8px 10px; }
+.transport { display: grid; gap: 6px; margin-top: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 8px 14px; }   /* 14: room for a range's wedge at the clip's very start or end */
 .trow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .vtc { font: 500 16px var(--f-mono); font-variant-numeric: tabular-nums; margin-inline: 2px; }
 .vtc small { color: var(--muted); font-size: 12px; }
@@ -324,10 +324,21 @@ textarea::placeholder { color: var(--muted); }
 .vtrack, .vbeats { user-select: none; -webkit-user-select: none; }
 .vtrack .tick { position: absolute; top: 0; height: 6px; border-left: 1px solid var(--line); }
 .vtrack .tlab { position: absolute; bottom: 1px; transform: translateX(-50%); font: 10px var(--f-mono); color: var(--muted); pointer-events: none; }
+/* a note at one moment is a pin; a range note is its in and out icons with a bar between. Pins and ends drag sideways
+   (a press that doesn't move opens the note); Shift + drag on an end or the bar slides the whole range */
 .vpin { position: absolute; top: 6px; width: 13px; height: 13px; margin-left: -6.5px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: var(--c);
-  box-shadow: 0 0 0 1.5px var(--surface); cursor: pointer; }
+  box-shadow: 0 0 0 1.5px var(--surface); cursor: ew-resize; }
 .vpin.done { opacity: .45; } .vpin.sel { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
-.vrng { position: absolute; top: 10px; height: 5px; border-radius: 3px; background: var(--c); opacity: .55; pointer-events: none; }
+.vrng { position: absolute; top: 10px; height: 5px; border-radius: 3px; background: var(--c); opacity: .55; }
+.vrng::before { content: ""; position: absolute; left: 0; right: 0; top: -5px; bottom: -5px; }   /* an easier target for Shift + drag */
+.vend { position: absolute; top: 2px; width: 20px; height: 22px; margin-left: -16px; cursor: ew-resize; }
+.vend.out { margin-left: -4px; }                     /* each wedge's flat side (x 14 in, x 2 out) on the time, its point outward */
+.vend svg { position: absolute; left: 2px; top: 1px; width: 16px; height: 20px; overflow: visible; }
+.vend path { fill: var(--c); stroke: var(--surface); stroke-width: 1.5; paint-order: stroke; }
+.vend.done { opacity: .45; } .vrng.sel { opacity: .9; }
+.vend.sel svg { filter: drop-shadow(0 0 1px var(--accent)) drop-shadow(0 0 1px var(--accent)) drop-shadow(0 0 .5px var(--accent)); }   /* a ring that follows the icon */
+.vtrack.shift .vrng, .vtrack.shift .vend { cursor: grab; }
+.ro .vpin, .ro .vend { cursor: pointer; }
 .vhead { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; }
 .vin { position: absolute; top: 0; bottom: 0; border-left: 2px dashed var(--accent); pointer-events: none; }
 .app.full { position: fixed; inset: 0; z-index: 15; min-height: 0; overflow: hidden; background: var(--bg); grid-template-rows: auto minmax(0, 1fr);
@@ -856,7 +867,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (nav.hidden) return;
     const solo = gs.length < 2 || RO, sig = JSON.stringify([gs, gs.map((g) => latestOf(g).id), closed.length, solo]);
     if (nav.dataset.sig !== sig) {
-      nav.dataset.sig = sig; delete nav.dataset.shown;
+      nav.dataset.sig = sig;
       nav.innerHTML = gs.map((gid) => { const im = latestOf(gid), name = tabName(gid);
         return `<span class="tabw${solo ? " solo" : ""}" data-group="${esc(gid)}"><button class="imgtab" data-group="${esc(gid)}"${solo ? "" : ' title="Alt/Option + ← / → opens the tab beside it. Drag to move this tab, or Alt/Option + Shift + ← / →."'}><img src="${esc(im.poster || im.src)}" alt="" loading="lazy"><span>${esc((isVid(im) ? "▶ " : "") + name)}</span><span class="cnt"></span></button>`
           + (solo ? "" : `<button class="tabx" data-close="${esc(gid)}" title="Close this tab" aria-label="Close tab ${esc(name)}">×</button>`) + `</span>`; }).join("")
@@ -888,17 +899,31 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       if (sel.innerHTML !== want) sel.innerHTML = want;
       sel.value = cur.id;
     }
-    // the selected tab scrolls into view whenever the selection moves to another tab: the newest round's tab is often far
-    // along the row
-    const on = cur && nav.querySelector('.imgtab[aria-current="true"]');
-    if (on && nav.dataset.shown !== groupOf(cur)) {
-      nav.dataset.shown = groupOf(cur);
-      requestAnimationFrame(() => {
-        const nr = nav.getBoundingClientRect(), t = (on.closest(".tabw") || on).getBoundingClientRect();
-        if (t.left < nr.left || t.right > nr.right) nav.scrollLeft += Math.min(t.left - nr.left - 8, t.right - nr.right + 8);
-      });
-    }
+    showActiveTab();
   }
+  // The open tab is kept in view along the tab row (the newest round's tab is often far along it): when the board opens,
+  // when the selection moves to another tab, and whenever the row's layout changes under it (live rounds or closed tabs
+  // arriving after the first draw, the web font replacing the fallback and changing the tabs' widths, the row shown after
+  // being hidden, the window resized). While neither the tab nor the row's layout changes, the row stays where the viewer
+  // scrolled it.
+  // The check waits for the next frame and reads the row's layout there once, so a redraw never forces a layout of its own.
+  const tabRow = $("#imgtabs");
+  let tabRowSeen = "", tabRowQueued = false;
+  function showActiveTab() {
+    if (tabRowQueued) return;
+    tabRowQueued = true;
+    requestAnimationFrame(() => {
+      tabRowQueued = false;
+      const on = cur && !tabRow.hidden && tabRow.querySelector('.imgtab[aria-current="true"]'); if (!on) return;
+      const key = groupOf(cur) + " " + tabRow.dataset.sig + " " + tabRow.scrollWidth + " " + tabRow.clientWidth;
+      if (key === tabRowSeen) return;
+      tabRowSeen = key;
+      const nr = tabRow.getBoundingClientRect(), t = (on.closest(".tabw") || on).getBoundingClientRect();
+      if (t.left < nr.left || t.right > nr.right) tabRow.scrollLeft += Math.min(t.left - nr.left - 8, t.right - nr.right + 8);
+    });
+  }
+  if (window.ResizeObserver) new ResizeObserver(() => showActiveTab()).observe(tabRow);
+  if (document.fonts) document.fonts.ready.then(() => showActiveTab());
   $("#versSel").addEventListener("change", (e) => switchVersion(imgById(e.target.value)));
   // the in-page confirm for closing a tab, and the Closed tabs list (window.confirm doesn't work in artifacts)
   const tabPop = $("#tabPop");
@@ -1290,6 +1315,10 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       if (i < 0) toast("That mark has changed since, so it stays.");
       else { m.items.splice(i, 1); if (!m.items.length && m.t == null) deleteNote(m.id, false); else saveNow(m.id, "items"); }
     } else if (op.t === "items") { m.items = op.before; saveNow(m.id, "items"); }
+    else if (op.t === "time") {                                    // a note moved along the timeline goes back
+      m.t = op.before.t; m.t2 = op.before.t2; m.tc = op.before.tc; saveNow(m.id, "time");
+      if (VID() && cur.id === m.img) seekTo(m.t);
+    }
     renderAll();
   }
   function setText(m, value) { m.text = value; touched(m); saveSoon(m.id, "text"); }
@@ -2594,15 +2623,30 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     bl.querySelectorAll(".vbeat").forEach((el) => el.addEventListener("click", () => seekTo(beats[+el.dataset.i].a)));
     renderPins();
   }
+  // A range note's in and out icons on the timeline: rounded wedges in a 16 × 20 box, each with its flat side on its time
+  // (the in wedge's at x 14, the out wedge's at x 2) and its point outward, away from the range.
+  const RANGE_ICON = {
+    in: '<path d="M14 3.2c0-1-1.1-1.6-1.9-1L3.5 8.8c-.7.5-.7 1.6 0 2.1l8.6 6.6c.8.6 1.9 0 1.9-1z"/>',
+    out: '<path d="M2 3.2c0-1 1.1-1.6 1.9-1l8.6 6.6c.7.5.7 1.6 0 2.1l-8.6 6.6c-.8.6-1.9 0-1.9-1z"/>',
+  };
   function renderPins() {
     if (!VID()) return;
-    const d = cur.dur || vdur() || 1;
+    const d = cur.dur || vdur() || 1, at = (t) => t / d * 100 + "%";
+    const how = RO ? "" : " · drag to move";
     let p = "", r = "";
     for (const m of onImage()) {
       if (m.t == null) continue;
       const c = noteColor(m), cls = (m.status === "done" ? " done" : "") + (m.id === activeId || m.id === focusId ? " sel" : "");
-      if (m.t2 != null) r += `<span class="vrng" style="left:${m.t / d * 100}%;width:${(m.t2 - m.t) / d * 100}%;--c:${c}"></span>`;
-      p += `<span class="vpin${cls}" data-id="${esc(m.id)}" title="#${m.n} · ${esc(whereText(m, false))}${m.text ? " · " + esc(m.text.slice(0, 80)) : ""}" style="left:${m.t / d * 100}%;--c:${c}"></span>`;
+      const id = esc(m.id), about = m.text ? " · " + esc(m.text.slice(0, 80)) : "";
+      if (m.t2 == null) {
+        p += `<span class="vpin${cls}" data-id="${id}" data-end="t" title="#${m.n} · ${esc(whereText(m, false))}${about}${how}" style="left:${at(m.t)};--c:${c}"></span>`;
+        continue;
+      }
+      r += `<span class="vrng${cls}" data-id="${id}" style="left:${at(m.t)};width:${at(m.t2 - m.t)};--c:${c}"></span>`;
+      for (const [end, side, word] of [["t", "in", "starts"], ["t2", "out", "ends"]]) {
+        p += `<span class="vend ${side}${cls}" data-id="${id}" data-end="${end}" title="#${m.n} ${word} at ${tcOf(m[end])}${about}${RO ? "" : " · drag to move this end; Shift + drag moves the whole range"}"`
+          + ` style="left:${at(m[end])};--c:${c}"><svg viewBox="0 0 16 20" aria-hidden="true">${RANGE_ICON[side]}</svg></span>`;
+      }
     }
     $("#vranges").innerHTML = r; $("#vpins").innerHTML = p;
   }
@@ -2624,18 +2668,62 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   vid.addEventListener("play", () => { if (!vraf) vraf = requestAnimationFrame(loopVideo); });
   ["pause", "seeked", "ended", "durationchange"].forEach((ev) => vid.addEventListener(ev, () => { if (ev === "durationchange" && VID()) buildTrack(); tickVideo(); }));
   let vdrag = false;
-  const trackSeek = (e) => { const r = vtrack.getBoundingClientRect(); scrubTo(clamp((e.clientX - r.left) / r.width, 0, 1) * (cur.dur || vdur())); };
+  const trackTime = (e) => { const r = vtrack.getBoundingClientRect(); return clamp((e.clientX - r.left) / r.width, 0, 1) * (cur.dur || vdur()); };
+  const trackSeek = (e) => scrubTo(trackTime(e));
   const endScrub = () => { if (vdrag) { vdrag = false; dragLock(false); } };
+  // A note on the timeline moves by dragging it: a pin moves its note's moment; a range note's in or out icon moves that
+  // end (never past the other: a range stays at least a frame long); Shift + drag on either end or on the bar between them
+  // slides the whole range, keeping its length. The frame follows the end being moved. A press that doesn't move (less
+  // than DRAG_PX) opens the note, as a click on a pin always did; the bar without Shift moves the playhead, as before.
+  // The note is looked up by id on every move: a reply or another viewer's change arriving mid-drag puts a fresh copy of
+  // it in marks, and the move goes on that copy.
+  const DRAG_PX = 3;
+  let pinDrag = null;                                            // { id, end: "t" | "t2" | "both", x0, grab, before, moved }
+  const dragEndAt = (p, m) => (p.end === "t2" ? m.t2 : m.t);     // the time the frame follows: the end being moved
   vtrack.addEventListener("pointerdown", (e) => {
-    const pin = e.target.closest(".vpin");
-    if (pin) { const m = marks.get(pin.dataset.id); if (m) { seekTo(m.t); openComment(m.id, false); } return; }
+    const hit = e.target.closest(".vpin, .vend, .vrng"), m = hit && marks.get(hit.dataset.id);
+    if (m && (e.shiftKey || !hit.classList.contains("vrng"))) {
+      if (e.button !== 0) return;
+      e.preventDefault(); getSelection()?.removeAllRanges(); dragLock(true);
+      const end = e.shiftKey && m.t2 != null ? "both" : hit.dataset.end || "t";
+      pinDrag = { id: m.id, end, x0: e.clientX, grab: trackTime(e), before: { t: m.t, t2: m.t2, tc: m.tc }, moved: false };
+      try { vtrack.setPointerCapture(e.pointerId); } catch (_) {}
+      return;
+    }
     getSelection()?.removeAllRanges();                             // a selection made before goes too
     vdrag = true; dragLock(true);
     try { vtrack.setPointerCapture(e.pointerId); } catch (_) {} trackSeek(e);
   });
+  function dragPin(e) {
+    const p = pinDrag, m = marks.get(p.id), b = p.before;
+    if (!m || RO || (!p.moved && Math.abs(e.clientX - p.x0) < DRAG_PX)) return;
+    p.moved = true;
+    const d = cur.dur || vdur(), f1 = 1 / fps(), t = snapT(trackTime(e));
+    if (p.end === "both") { const len = b.t2 - b.t; m.t = clamp(snapT(b.t + t - p.grab), 0, Math.max(0, snapT(d - len))); m.t2 = snapT(m.t + len); }
+    else if (p.end === "t2") m.t2 = clamp(t, m.t + f1, d);
+    else m.t = m.t2 != null ? clamp(t, 0, m.t2 - f1) : clamp(t, 0, d);
+    m.tc = tcOf(m.t);
+    renderPins(); scrubTo(dragEndAt(p, m));
+  }
+  // the button comes up (or the window loses it): a move is saved and can be undone; a press that didn't move opens the note
+  function endPinDrag() {
+    const p = pinDrag; if (!p) return;
+    pinDrag = null; dragLock(false);
+    const m = marks.get(p.id);
+    if (!m) return;                                                // deleted elsewhere meanwhile
+    if (!p.moved) { seekTo(dragEndAt(p, m)); openComment(m.id, false); return; }
+    if (m.t === p.before.t && m.t2 === p.before.t2) return;        // dragged back to where it was
+    undo.push({ t: "time", id: m.id, before: p.before });
+    touched(m); saveNow(m.id, "time");
+    renderAll();
+  }
   // the drag follows the pointer and ends wherever the button comes up, also where the track couldn't capture the pointer
-  window.addEventListener("pointermove", (e) => { if (vdrag) trackSeek(e); });
-  for (const ev of ["pointerup", "pointercancel", "blur"]) window.addEventListener(ev, endScrub);
+  window.addEventListener("pointermove", (e) => { if (pinDrag) dragPin(e); else if (vdrag) trackSeek(e); });
+  for (const ev of ["pointerup", "pointercancel", "blur"]) window.addEventListener(ev, () => { endPinDrag(); endScrub(); });
+  // with Shift held, a range's ends and bar show the grab cursor: Shift + drag slides the whole range
+  addEventListener("keydown", (e) => { if (e.key === "Shift") vtrack.classList.add("shift"); });
+  addEventListener("keyup", (e) => { if (e.key === "Shift") vtrack.classList.remove("shift"); });
+  addEventListener("blur", () => vtrack.classList.remove("shift"));
   $("#vplay").addEventListener("click", togglePlay);
   $("#vback").addEventListener("click", () => scrubTo(shownT() - 1 / fps()));
   $("#vfwd").addEventListener("click", () => scrubTo(shownT() + 1 / fps()));
