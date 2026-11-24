@@ -234,6 +234,9 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
    - `files`: the image map
    - `capabilities: {"db": {}, "user": {"scopes": ["profile"]}, "comments": {}, "assets": {}}` (`comments` powers **Send notes to Claude**; `assets`
      holds pictures pasted into notes and lets later rounds arrive live, without a republish: §5)
+   - `contract: "0.2.96"`, on every publish. On the app's newer runtimes 0.2.98 and 0.2.99, Send notes to Claude is refused
+     (`claude_unavailable` just after `canSendToClaude` says "available"); on 0.2.96 it sends. Move to a newer runtime only
+     once a real Send has gone through on it.
    - `icon: "pencil"`
    - A one-line `description`
 
@@ -356,7 +359,7 @@ Review rounds are 1080p previews; render 4K only when the user asks. After a tem
 `build_board.mjs --append --out <board>` (no files). After setup (§2) and adding `assets` (above), a template update is the
 only reason to republish: ask the user first, because it reloads every open view and brings the board to the front of their screen.
 Republish the same `file_path`. Pass `files` with only the new image (the page is sent anyway), no icon, and **always the
-full capability set** `{"db": {}, "user": {"scopes": ["profile"]}, "comments": {}, "assets": {}}`, exactly as the script prints it. A board
+full capability set** `{"db": {}, "user": {"scopes": ["profile"]}, "comments": {}, "assets": {}}` and `contract: "0.2.96"` (§2), exactly as the script prints them. A board
 published without `comments` shows the Send button but can't send: it says so and copies the notes instead. Passing the full
 set every time is harmless and keeps that from happening (a non-empty set replaces the stored one, so never leave out `db`
 or `user`). Publish from the chat that works on the board's notes: publishing makes that chat the one watching the board, so

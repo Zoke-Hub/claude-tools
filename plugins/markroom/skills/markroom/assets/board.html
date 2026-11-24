@@ -829,8 +829,9 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const known = tabOrder.filter((x) => g.includes(x)); return known.concat(g.filter((x) => !known.includes(x))); };
   // a tab's versions, oldest first by the time each was added (live rounds arrive in the database's order, by id, so the
   // order they were pushed in is not the order they were made); files with the same time keep the board's order
+  const addedOf = ([im]) => im.added || "";                   // ISO times sort as text; none counts as oldest
   const versionsOf = (gid) => IMAGES.map((im, i) => [im, i]).filter(([im]) => groupOf(im) === gid)
-    .sort((a, b) => ((a[0].added || "") < (b[0].added || "") ? -1 : (a[0].added || "") > (b[0].added || "") ? 1 : a[1] - b[1])).map((x) => x[0]);
+    .sort((a, b) => (addedOf(a) < addedOf(b) ? -1 : addedOf(a) > addedOf(b) ? 1 : a[1] - b[1])).map(([im]) => im);
   const latestOf = (gid) => { const v = versionsOf(gid); return v[v.length - 1]; };
   const tabName = (gid) => { const im = latestOf(gid); return (im && (im.group || im.label)) || gid; };
   // closed tabs: tabs/<tabDocId(group)> = { id: <group or image id>, label, hidden: true | false, at, by }. Closing hides the tab and

@@ -296,13 +296,17 @@ const files = Object.fromEntries(added.flatMap((im) => [[im.src, path.join(out, 
 console.log(`Board: ${board.title} (${board.subtitle})`);
 for (const im of added) console.log(`  + ${im.id}: ${im.type === "video" ? "video · " : ""}${im.label} · ${im.w}×${im.h}${im.type === "video" ? ` · ${im.dur}s @ ${im.fps}fps` : ""} · ${(fs.statSync(path.join(out, im.src)).size / 1048576).toFixed(1)} MB${im.scale !== 1 ? ` · scaled ${im.scale}` : ""}`);
 const CAPS = '{"db": {}, "user": {"scopes": ["profile"]}, "comments": {}, "assets": {}}';   // comments: Send to Claude; assets: live rounds and pictures pasted into notes
+// The Claude app's artifact runtime every board is published on. On 0.2.98 and 0.2.99 the app refuses Send notes to Claude
+// (claude_unavailable just after canSendToClaude says "available"); on 0.2.96 it sends. Move it only once a newer one is
+// checked with a real Send.
+const RUNTIME = "0.2.96";
 if (opt.live) {
   const up = added.flatMap((im) => [path.join(out, im.src), ...(im.poster ? [path.join(out, im.poster)] : [])]);
   console.log("\nLive round (no republish). 1) Upload with the Artifact tool:");
   console.log(`  url: ${board.url}\n  asset: true\n  file_paths: ${JSON.stringify(up)}`);
   console.log("2) Then record the ids the upload returns:");
   for (const im of added) console.log(`  node "${fileURLToPath(import.meta.url)}" --out "${out}" --asset ${im.id}=<id of ${path.basename(im.src)}>${im.poster ? `,<id of ${path.basename(im.poster)}>` : ""}`);
-  console.log('   (the board must declare "assets": if the upload is refused for that, republish it once with ' + CAPS + ")");
+  console.log('   (the board must declare "assets": if the upload is refused for that, republish it once with ' + CAPS + ' and contract: "' + RUNTIME + '")');
   process.exit(0);
 }
 if (liveDocs.length) {
@@ -315,6 +319,6 @@ console.log("\nPublish with the Artifact tool:");
 console.log("  file_path: " + path.join(out, "index.html"));
 console.log("  files: " + JSON.stringify(files));
 console.log(board.url
-  ? `  url: ${board.url}  (redeploy: same file_path; pass url from another conversation; omit icon)\n  capabilities: ${CAPS}  (pass the full set on EVERY publish: a board missing "comments" can't send to Claude)`
-  : `  capabilities: ${CAPS}\n  icon: "pencil"\nThen save the artifact URL into board.json ("url") so later rounds reuse it.`);
+  ? `  url: ${board.url}  (redeploy: same file_path; pass url from another conversation; omit icon)\n  capabilities: ${CAPS}  (pass the full set on EVERY publish: a board missing "comments" can't send to Claude)\n  contract: "${RUNTIME}"  (on EVERY publish: Send notes to Claude fails on the app's newer runtime)`
+  : `  capabilities: ${CAPS}\n  contract: "${RUNTIME}"  (Send notes to Claude fails on the app's newer runtime)\n  icon: "pencil"\nThen save the artifact URL into board.json ("url") so later rounds reuse it.`);
 console.log(`Right after it is published, record the page it runs (for the links: --link <file id>):\n  node "${fileURLToPath(import.meta.url)}" --out "${out}" --published`);

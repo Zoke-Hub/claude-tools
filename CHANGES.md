@@ -9,6 +9,10 @@ date: the entries after the date a tool's copy was installed on a computer are n
   was added, so "· latest", the tab's name, the file the tab opens and Alt+Up/Down all follow it. Live rounds arrive from
   the board's database in the order of their ids, which could put an older round above a newer one. A board picks this
   up once its page is refreshed and republished.
+- **MarkRoom, boards publish on the Claude app's runtime 0.2.96:** on the app's newer runtimes 0.2.98 and 0.2.99, Send
+  notes to Claude is refused (`claude_unavailable`, right after the app says a send is available); the same board on
+  0.2.96 sends. The build script and the skill now give `contract: "0.2.96"` for every publish. A board keeps the
+  runtime it was published with, so a board already on 0.2.98 or 0.2.99 needs one republish to move back.
 
 ## 2026-11-25 · Folio 1.0.0 (number unchanged)
 
