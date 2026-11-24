@@ -254,6 +254,8 @@ const BAR_INSET = 8
 // The layer a gliding line is drawn in: wider than any line, so the line
 // keeps its whole width and the box around it cuts it to the room.
 const GLIDE_LAYER = 1000
+// Under Saves to, before the default folder's path.
+const DEFAULT_LABEL = 'Default path: '
 // The Custom ceiling at which the slider's fill turns amber.
 const CUSTOM_HIGH = 650_000
 const SLIDER_EMPTY = DIM
@@ -1742,7 +1744,7 @@ async function packSection(
         <Box flexDirection="row" alignItems="flex-end" gap="sm">
           <Box flexGrow={1}>
             {draws.input ? (
-              <elements.Input key="pack-save-to" label="Saves to" placeholder="The folder below, or another" value={saveTo} onInput={setSaveTo} onSubmit={setSaveTo} />
+              <elements.Input key="pack-save-to" label="Saves to" placeholder="Enter path here" value={saveTo} onInput={setSaveTo} onSubmit={setSaveTo} />
             ) : (
               <Text size="footnote" weight="medium">
                 Saves to {saveTo || shownDefault}
@@ -1751,18 +1753,24 @@ async function packSection(
           </Box>
           {saveTo !== '' && <Button key="pack-save-reset" label="Reset" plain dimColor onPress={() => setSaveTo('')} />}
         </Box>
-        {/* The default folder's whole path, from the project's folder; too
-            long for the box, it glides to its end and back. */}
+        {/* Where an empty box packs to (and Reset goes back to): the default
+            folder's whole path, from the project's folder. Too long for its
+            room, the path glides to its end and back; its label stays put. */}
         {draws.input &&
-          saveTo === '' &&
           (Client !== null ? (
-            <Box key="pack-default-window" position="relative" overflow="hidden" width="100%" height={1}>
-              <Box position="absolute" top={0} left={0} width={GLIDE_LAYER} height={1} flexDirection="row">
-                <Client key="folio-pack-default" module="./glide.tsx" props={{ text: shownDefault, room }} />
+            <Box key="pack-default-line" flexDirection="row" width="100%" height={1}>
+              <Text size="caption" dimColor>
+                {DEFAULT_LABEL}
+              </Text>
+              <Box key="pack-default-window" position="relative" overflow="hidden" flexGrow={1} minWidth={0} height={1}>
+                <Box position="absolute" top={0} left={0} width={GLIDE_LAYER} height={1} flexDirection="row">
+                  <Client key="folio-pack-default" module="./glide.tsx" props={{ text: shownDefault, room: Math.max(1, room - DEFAULT_LABEL.length) }} />
+                </Box>
               </Box>
             </Box>
           ) : (
             <Text size="caption" dimColor>
+              {DEFAULT_LABEL}
               {shownDefault}
             </Text>
           ))}

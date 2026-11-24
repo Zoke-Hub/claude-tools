@@ -360,7 +360,8 @@ test('the form names each file by its path in the project, and the pack finds it
   expect(packed?.[1]).toBe('# Plan\nCut A19 first.')
 })
 
-test('a big listing is read in batches: each names the categories so far, and only a changed batch is asked again', async ($, on) => {
+// A big listing takes about 4 s of real time here, near the 5 s default.
+test('a big listing is read in batches: each names the categories so far, and only a changed batch is asked again', { timeoutMs: 15_000 }, async ($, on) => {
   const tree = shots()
   const answer = (prompt: string) => {
     const ids = [...prompt.matchAll(/^d(\d+) /gm)].map(m => `d${m[1]}`)

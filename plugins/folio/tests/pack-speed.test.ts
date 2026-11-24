@@ -71,7 +71,8 @@ test("the walk reads several folders at once and lists each folder's files where
   expect((await walk(disk, '/p', { isStopped: () => true })).files).toEqual([])
 })
 
-test('Close while FolioPack is still looking stops the look: Haiku is asked no more, Folio keeps working, and opened again it looks afresh', async ($, on) => {
+// A big project's look takes about 5 s of real time here, near the 5 s default.
+test('Close while FolioPack is still looking stops the look: Haiku is asked no more, Folio keeps working, and opened again it looks afresh', { timeoutMs: 15_000 }, async ($, on) => {
   const packState = packStateOf(on)
   const { clock, asked, release } = heldHaiku(on, bigProject())
   await start($)

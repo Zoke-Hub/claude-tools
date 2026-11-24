@@ -3,6 +3,12 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-25 · Folio 1.0.0 (number unchanged)
+
+- **FolioPack, Saves to says what it takes:** the empty box reads "Enter path here", and the line under it reads
+  "Default path:" and the default folder, which still glides when it is too long. The line stays when you type a path,
+  so you can see where Reset goes back to.
+
 ## 2026-11-24 · Folio 1.0.0 (number unchanged), later still
 
 - **Folio, Claude Code's window follows Automatic:** pressing Automatic runs `/autocompact 1000000`, so Claude Code's

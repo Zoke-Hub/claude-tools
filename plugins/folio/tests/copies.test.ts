@@ -190,6 +190,31 @@ test('Saves to defaults to ~/FolioPacks in a code repository', async ($, on) => 
   expect(await savesToDefault($, on, new Map([['/w/.git/HEAD', 'ref']]))).toBe('~/FolioPacks')
 })
 
+test('the Saves to box says "Enter path here", and the line under it reads "Default path:" and the default, typed path or not', async ($, on) => {
+  stubEngine(on, { tree: { '/w': [entry('Script', 'dir')], '/w/Script': [entry('script.docx', 'file')] }, model: () => null })
+  await start($)
+  const ui = await mountPanel($, { columns: 110, rows: 60 })
+  await ui.press({ key: 'folio-pack' })
+  const box = (await ui.find({ key: 'pack-save-to' })) as { props?: { placeholder?: string } } | undefined
+  expect(box?.props?.placeholder).toBe('Enter path here')
+  const defaultLine = async () => {
+    const label = await ui.find({ type: 'Text', text: 'Default path: ' })
+    const path = (await ui.find({ key: 'folio-pack-default' })) as { props?: { props?: { text?: string; room?: number } } } | undefined
+
+    return { label: label !== undefined, text: path?.props?.props?.text, room: path?.props?.props?.room ?? 0 }
+  }
+  const before = await defaultLine()
+  expect(before.label).toBe(true)
+  expect(before.text).toBe('w/Work/Folio/Folio packs')
+  // The path glides in what the label leaves of the room.
+  expect(before.room).toBeGreaterThan(0)
+  // A path typed: the default stays under it, where Reset goes back to.
+  await ui.input({ key: 'pack-save-to', text: 'D:/Elsewhere/Packs' })
+  expect(await defaultLine()).toEqual(before)
+  expect(await ui.find({ key: 'pack-save-reset' })).toBeTruthy()
+  await ui.unmount()
+})
+
 test("with a Renders folder, Haiku's guesses at renders elsewhere go back to their folders", async ($, on) => {
   const tree: Record<string, FsEntry[]> = {
     '/w': [entry('Renders', 'dir'), entry('Animations', 'dir')],
