@@ -3,6 +3,13 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-25 · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom, versions in the order they were made:** a tab's Version dropdown lists its files newest first by when each
+  was added, so "· latest", the tab's name, the file the tab opens and Alt+Up/Down all follow it. Live rounds arrive from
+  the board's database in the order of their ids, which could put an older round above a newer one. A board picks this
+  up once its page is refreshed and republished.
+
 ## 2026-11-25 · Folio 1.0.0 (number unchanged)
 
 - **FolioPack, Saves to says what it takes:** the empty box reads "Enter path here", and the line under it reads

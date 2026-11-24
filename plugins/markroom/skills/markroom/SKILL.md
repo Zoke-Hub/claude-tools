@@ -345,6 +345,9 @@ app doesn't bring the board to the front, so the user isn't pulled off another b
 5. In the chat's finishing message, give the link to the new round (`build_board.mjs --out <board> --link <round id>`
    prints it; it is the button the user clicks to go there) and say which round is new; never open the board for them.
 
+A rounds doc changes only a round that isn't baked into the page yet. To rename or regroup a file that is baked in, edit
+`board.json` and republish: a stale rounds doc that could override a baked file would undo later `board.json` changes.
+
 If the upload is refused because the board doesn't declare `assets`, the board needs ONE republish with the full set
 (below), at a moment the user agrees to, since that republish opens the board on their screen. Every live round after that
 is silent. A brand-new board (no url yet) is built and published normally (§2).
