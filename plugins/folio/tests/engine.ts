@@ -17,6 +17,25 @@ import { HISTORY_BLOCK } from '../hooks/fold'
 
 export type { Engine, On }
 
+// A folder's entry and a file's, as the disk lists them.
+export const entry = (name: string, kind: FsEntry['kind'], size = 0): FsEntry => ({ name, kind, size, mtimeMs: 0, isLink: false })
+export const file = (name: string, size = 100) => entry(name, 'file', size)
+// Whether a light-model prompt is Haiku's sorting of the project's files.
+export const isSorting = (prompt: string) => prompt.includes('Sort these files into categories')
+export const near = (a: number, b: number) => Math.abs(a - b) < 1e-9
+
+// A project big enough for Haiku to sort in several batches.
+export function bigProject(): Record<string, FsEntry[]> {
+  const tree: Record<string, FsEntry[]> = { '/w': [] }
+  for (let d = 0; d < 30; d++) {
+    const folder = `folder_with_a_long_name_${String(d).padStart(2, '0')}`
+    tree['/w']!.push(entry(folder, 'dir'))
+    tree[`/w/${folder}`] = Array.from({ length: 120 }, (_, i) => file(`a_file_with_a_long_descriptive_name_${String(i).padStart(3, '0')}.bin`, 2000))
+  }
+
+  return tree
+}
+
 export const HOME = '/tmp/folio-test-home'
 // Where Folio keeps the test chat.
 export const DIR = `${HOME}/.claude/folio/sessions/test-session`
@@ -183,6 +202,40 @@ export function stubEngine(on: On, o: StubOptions = {}) {
   return { files, clock: mock.clock(on), toasts, commands, prompts, systems, calls, opened, respondWith, forks }
 }
 
+// The engine over the project `tree`, with Haiku held on its sorting: each
+// ask is counted (`asked()`) and waits until `release()`, then answers nothing.
+export function heldHaiku(on: On, tree: Record<string, FsEntry[]>) {
+  let release = () => {}
+  const held = new Promise<void>(go => (release = go))
+  let asked = 0
+  const engine = stubEngine(on, {
+    tree,
+    exists: () => false,
+    model: async prompt => {
+      if (!isSorting(prompt)) return null
+      asked += 1
+      await held
+
+      return null
+    },
+  })
+
+  return { ...engine, asked: () => asked, release: () => release() }
+}
+
+// FolioPack's state as Folio last wrote it: where the pack stands, and `rev`,
+// which moves on with each draw it asks for.
+export function packStateOf(on: On): () => { rev: number; phase: string } | null | undefined {
+  let last: { rev: number; phase: string } | null | undefined
+  on('state.set', (_, e, next) => {
+    if (e.plugin === 'folio' && e.key === 'pack') last = e.value as typeof last
+
+    return next(e)
+  })
+
+  return () => last
+}
+
 // One request of the main chat, its response reporting `tokens` of context
 // (`cacheRead` of them read from the cache), as a turn's step makes it.
 export async function request($: Engine, engine: { respondWith: (tokens: number, cacheRead?: number) => void }, tokens: number, cacheRead = 0, turnId = 't1') {
@@ -275,12 +328,13 @@ export async function openChat($: Engine, on: On, files: Map<string, string>, me
 
 export const saved = (files: Map<string, string>) => JSON.parse(files.get(`${DIR}/index.json`)!) as PickerView
 
-// Folio's panel, mounted as a surface draws it (the desktop's, unless given).
-export function mountPanel<P extends RenderSurface = 'desktop'>($: Engine, o: { surface?: P; columns?: number; rows?: number } = {}) {
+// Folio's panel, mounted as a surface draws it (the desktop's, unless given);
+// `requestId` names a second instance beside the first.
+export function mountPanel<P extends RenderSurface = 'desktop'>($: Engine, o: { surface?: P; columns?: number; rows?: number; requestId?: string } = {}) {
   return $.ui.mount({
     plugin: 'folio',
     component: 'Pane',
-    requestId: 'folio-panel',
+    requestId: o.requestId ?? 'folio-panel',
     surface: (o.surface ?? 'desktop') as P,
     props: { title: 'Folio', isFocused: false, bodyColumns: o.columns ?? 100, placement: 'dock', scroll: { offset: 0, bodyRows: o.rows ?? 80 }, view: {} },
   })

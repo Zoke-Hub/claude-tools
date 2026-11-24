@@ -335,7 +335,7 @@ export async function loadChat($: EngineInterface, chat: string, isWanted: (save
 // can't be read at all stops the load, so nothing is written over it (SB1).
 type Found<T> = { text: string | null; value: T | null }
 
-const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
+export const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
 const isIndex = (x: unknown): x is Partial<PickerView> => isRecord(x) && (x.chunks === undefined || Array.isArray(x.chunks))
 const isLedger = (x: unknown): x is Ledger => isRecord(x) && Array.isArray(x.items)
 const isTasks = (x: unknown): x is TaskList => isRecord(x) && Array.isArray(x.tasks)
@@ -663,7 +663,7 @@ export async function readOriginal($: EngineInterface, id: string, chat = openDi
 }
 
 // A JSON text's value; null when it can't be read.
-function parsed<T>(text: string): T | null {
+export function parsed<T>(text: string): T | null {
   try {
     return JSON.parse(text) as T
   } catch {

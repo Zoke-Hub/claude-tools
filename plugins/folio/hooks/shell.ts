@@ -24,7 +24,7 @@ export type Where = { cwd: string; root: string; home: string; isWindows: boolea
 const SHELLS = new Set(['Bash', 'PowerShell'])
 // More values than this for one word (a loop's, a pattern's) is guessing.
 const MAX_VALUES = 50
-const MAX_COMMANDS = 5000
+export const MAX_COMMANDS = 5000
 const MAX_INNER = 20
 // Words that keep a command's first word to come.
 const LEAD = /^(then|do|else|elif|\{|!|time|nohup|exec|sudo|export|local|declare|readonly|typeset)$/

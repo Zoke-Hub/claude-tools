@@ -5,10 +5,12 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { BriefDigest, ChunkRecord, Ledger, PackChat, PackDraft, PackFile, PackGroup, PickerView, TaskList } from '../types'
+import type { ScanStep, ScanStepName, ScanSteps } from '../types'
 import { NAME_NOTE, outlineText, RECALL_TOOL } from './fold'
 import type { BriefLists } from './measure'
 import { briefLines, digestOf } from './brief'
-import { importLedger, withPointValues } from './ledger'
+import { addRule, importLedger, withPointValues } from './ledger'
+import { BOARD_FOLDER, BOARD_RULE, boardFiles, boardsStep, OLD_PACK_NOTE, zippedByPath } from './boards'
 import { catchUp } from './sync'
 import { parkTasks, tasksFromTopics, withParts } from './tasks'
 import { houseRules } from './house'
@@ -20,11 +22,12 @@ import { base, expandHome, relative, slash } from './paths'
 import { isClaudeReplying } from './actions'
 import { errorText, logEvent } from './debug'
 import { currentChat } from './chunks'
-import { namedPaths, shellCommandsIn, shellCommandsOf } from './shell'
+import { MAX_COMMANDS, namedPaths, shellCommandsIn, shellCommandsOf } from './shell'
 import { categorise, JUNK, STILL_EXT, TEXT_EXT } from './categories'
 import { isFilesProject, workFolders } from './work'
 import type { Category } from './categories'
 import type { NamedPath, ShellCommand } from './shell'
+import { gate, inTurns } from './pool'
 
 const view = atom({ plugin: 'folio', key: 'view' } as const, EMPTY_VIEW)
 
@@ -38,6 +41,10 @@ const VERSION = 3
 // listed as far as it got.
 const SCAN_LIMIT = 30_000
 const SCAN_DEPTH = 8
+// Folders listed at once by the scan, and parts' words read at once for their
+// shell commands.
+const WALK_AT_ONCE = 8
+const READ_AT_ONCE = 6
 // Text files the chat touched go in the FolioPack itself up to this size.
 const TEXT_BYTES = 1024 * 1024
 // A personal rule or skill travels when this many chunks used it.
@@ -113,8 +120,25 @@ export async function writeSaveTo($: EngineInterface, saveTo: string): Promise<v
 }
 
 // The folder as the person reads it: the home folder as ~.
-export function shortFolder(folder: string, home: string): string {
+function shortFolder(folder: string, home: string): string {
   return home !== '' && (folder === home || folder.startsWith(`${home}/`)) ? `~${folder.slice(home.length)}` : folder
+}
+
+// A folder as the pack form shows it: from the project's own folder when it is
+// inside the project (My Project/Work/Folio/Folio packs), from the home folder
+// otherwise. Letters' case is ignored, as Windows and a Mac's disks do.
+export function projectFolderText(folder: string, root: string, home: string): string {
+  const top = root.replace(/\/+$/, '')
+  const isInside = top !== '' && (folder.toLowerCase() === top.toLowerCase() || folder.toLowerCase().startsWith(`${top.toLowerCase()}/`))
+
+  return isInside ? `${base(top)}${folder.slice(top.length)}` : shortFolder(folder, home)
+}
+
+// What a scan stopped by Close throws, so it ends at once and gives nothing.
+class ScanStopped extends Error {
+  constructor() {
+    super('stopped: FolioPack was closed')
+  }
 }
 
 // The local date, as the person's own calendar has it (an ISO date is UTC's).
@@ -143,25 +167,42 @@ export function bytesText(n: number): string {
 // The project's files and cache folders, down to SCAN_DEPTH and up to SCAN_LIMIT
 // entries (`isCut` when it stopped there). Folders whose names `skip` matches
 // are not gone into.
-export async function walk($: EngineInterface, root: string, skip?: RegExp): Promise<{ files: Found[]; caches: Found[]; isCut: boolean }> {
-  const files: Found[] = []
-  const caches: Found[] = []
+export async function walk(
+  $: EngineInterface,
+  root: string,
+  {
+    skip,
+    isStopped = () => false,
+    // Told the number of files found so far, as each is found.
+    onFound = () => {},
+  }: { skip?: RegExp; isStopped?: () => boolean; onFound?: (files: number) => void } = {},
+): Promise<{ files: Found[]; caches: Found[]; isCut: boolean }> {
+  let filesFound = 0
   const copyFolders = new Set([`${root}/work/folio`, `${root}/work/backup/folio`, `${root}/backup/folio`].map(p => p.toLowerCase()))
   // Where packs go by default: an earlier pack is never packed again. Compared
   // in small letters, as the copies' folders are, whatever the project's name.
   const packsFolder = `${root}/work/folio/folio packs`.toLowerCase()
   let seen = 0
-  const visit = async (dir: string, depth: number) => {
-    if (depth > SCAN_DEPTH) return
+  // A few folders are read at once (one by one, a project of 16,000 files
+  // took 23 s), and each folder's files still come in the order the one-by-one
+  // walk gave them, a folder's own where the folder is listed, so Haiku's
+  // batches and the answers kept for them stay the same.
+  const engine = gate(WALK_AT_ONCE)
+  type Walked = { files: Found[]; caches: Found[] }
+  type Entry = { file: Found } | { cache: Found } | { inside: Promise<Walked> }
+  const visit = async (dir: string, depth: number): Promise<Walked> => {
+    const out: Walked = { files: [], caches: [] }
+    if (depth > SCAN_DEPTH || isStopped()) return out
     let entries: Awaited<ReturnType<EngineInterface['fs']['list']>>
     try {
-      entries = await $.fs.list(dir)
+      entries = await engine(() => $.fs.list(dir))
     } catch {
-      return
+      return out
     }
+    const found: Entry[] = []
     for (const entry of entries) {
       seen += 1
-      if (seen > SCAN_LIMIT) return
+      if (seen > SCAN_LIMIT) break
       const path = `${dir}/${entry.name}`
       if (entry.name.startsWith(`${PACK_PREFIX} - `) || entry.name.startsWith(`${FILES_PREFIX} - `)) continue
       // The system's own files (.DS_Store, Thumbs.db) are never listed or packed.
@@ -171,7 +212,7 @@ export async function walk($: EngineInterface, root: string, skip?: RegExp): Pro
       let mtimeMs = entry.mtimeMs
       if (kind === 'other') {
         try {
-          const stat = await $.fs.stat(path, { resolve: true })
+          const stat = await engine(() => $.fs.stat(path, { resolve: true }))
           kind = stat.kind
           size = stat.size
           mtimeMs = stat.mtimeMs
@@ -184,12 +225,26 @@ export async function walk($: EngineInterface, root: string, skip?: RegExp): Pro
       // from Folio's store. Anything else kept beside them stays listed.
       if (kind === 'dir' && copyFolders.has(dir.toLowerCase()) && CHAT_ID.test(entry.name)) continue
       if (kind === 'dir' && path.toLowerCase() === packsFolder) continue
-      if (kind === 'dir' && CACHE_DIR.test(entry.name)) caches.push({ path, bytes: 0, mtimeMs: 0 })
-      else if (kind === 'dir' && skip?.test(entry.name) !== true) await visit(path, depth + 1)
-      else if (kind === 'file') files.push({ path, bytes: size, mtimeMs })
+      if (kind === 'dir' && CACHE_DIR.test(entry.name)) found.push({ cache: { path, bytes: 0, mtimeMs: 0 } })
+      else if (kind === 'dir' && skip?.test(entry.name) !== true) found.push({ inside: visit(path, depth + 1) })
+      else if (kind === 'file') {
+        found.push({ file: { path, bytes: size, mtimeMs } })
+        onFound(++filesFound)
+      }
     }
+    for (const e of found) {
+      if ('file' in e) out.files.push(e.file)
+      else if ('cache' in e) out.caches.push(e.cache)
+      else {
+        const inside = await e.inside
+        for (const f of inside.files) out.files.push(f)
+        for (const c of inside.caches) out.caches.push(c)
+      }
+    }
+
+    return out
   }
-  await visit(root, 0)
+  const { files, caches } = await visit(root, 0)
 
   return { files, caches, isCut: seen > SCAN_LIMIT }
 }
@@ -475,13 +530,27 @@ export async function projectFolder($: EngineInterface, cwd: string, home: strin
 // come from every chunk's saved original, so a chat from before Folio read
 // them gets its files too, and from the chat as it stands. A chunk brought in
 // from a FolioPack is another chat's work, as its file paths are.
-async function shellTouched($: EngineInterface, v: PickerView, files: Found[], root: string, home: string): Promise<string[]> {
+async function shellTouched($: EngineInterface, v: PickerView, files: Found[], root: string, home: string, isStopped: () => boolean = () => false): Promise<string[]> {
   try {
-    const commands: ShellCommand[] = []
-    for (const c of [...v.chunks].filter(c => c.order >= 0).sort((a, b) => a.order - b.order)) {
-      const original = await readOriginal($, c.id)
-      if (original !== null) commands.push(...shellCommandsIn(original.text))
+    // Only the last MAX_COMMANDS commands name paths, so the parts' words are
+    // read from the newest back, a few parts at once, until there are that
+    // many: a long chat's words run to hundreds of MB, and reading them all
+    // took minutes and most of Folio's memory.
+    const parts = [...v.chunks].filter(c => c.order >= 0).sort((a, b) => b.order - a.order)
+    const newestFirst: ShellCommand[][] = []
+    let count = 0
+    for (let i = 0; i < parts.length && count < MAX_COMMANDS && !isStopped(); i += READ_AT_ONCE) {
+      const lists = await inTurns(parts.slice(i, i + READ_AT_ONCE), READ_AT_ONCE, async c => {
+        const original = await readOriginal($, c.id)
+
+        return original === null ? [] : shellCommandsIn(original.text)
+      })
+      for (const list of lists) {
+        newestFirst.push(list)
+        count += list.length
+      }
     }
+    const commands: ShellCommand[] = newestFirst.reverse().flat()
     const keyOf = (c: ShellCommand) => `${c.tool}\u0000${c.command}`
     const seen = new Set(commands.map(keyOf))
     const live = await $.session.messages().then(currentChat, () => [])
@@ -663,7 +732,29 @@ async function stage<T>($: EngineInterface, kind: string, name: string, work: ()
   }
 }
 
-export async function scanProject($: EngineInterface): Promise<PackDraft> {
+export async function scanProject(
+  $: EngineInterface,
+  isStopped: () => boolean = () => false,
+  // Told how far the scan has got, for FolioPack's loading bar: often while
+  // it lists files, at each step's start and end, and as Haiku answers.
+  report: (steps: ScanSteps) => void = () => {},
+): Promise<PackDraft> {
+  // Close while it runs: the scan stops at its next step and gives nothing.
+  const goOn = () => {
+    if (isStopped()) throw new ScanStopped()
+  }
+  const steps: ScanSteps = { startedAt: await $.clock.now() }
+  const put = (name: ScanStepName, step: ScanStep) => {
+    steps[name] = step
+    report({ ...steps })
+  }
+  const begin = async (name: ScanStepName) => put(name, { startedAt: await $.clock.now(), count: 0 })
+  // A step ends at its own count unless told another.
+  const end = async (name: ScanStepName, count = steps[name]!.count) => {
+    const step = steps[name]!
+    put(name, { ...step, count, ms: (await $.clock.now()) - step.startedAt })
+  }
+  const counted = (name: ScanStepName) => (count: number, total?: number) => put(name, { ...steps[name]!, count, ...(total === undefined ? {} : { total }) })
   const v = await read($, view)
   const cwd = v.cwd
   const home = await homeDir($)
@@ -672,11 +763,20 @@ export async function scanProject($: EngineInterface): Promise<PackDraft> {
   const opened = await stage($, 'pack-scan', 'project folder', async () => projectFolder($, cwd, home, await $.session.id()))
   const root = opened === home ? projectRoot(v, opened) : opened
   const touched = new Set(v.chunks.flatMap(c => c.paths.map(slash)))
-  const { files, caches } = await stage($, 'pack-scan', 'files', () => walk($, root), r => ({ files: r.files.length, caches: r.caches.length }))
-  // What the chat's shell commands made or used counts as touched too.
-  const named = await stage($, 'pack-scan', 'shell paths', () => shellTouched($, v, files, root, home), r => ({ paths: r.length }))
+  goOn()
+  await begin('files')
+  const { files, caches } = await stage($, 'pack-scan', 'files', () => walk($, root, { isStopped, onFound: counted('files') }), r => ({ files: r.files.length, caches: r.caches.length }))
+  await end('files', files.length)
+  goOn()
+  // What the chat's shell commands made or used counts as touched too; the
+  // project's other chats go with this step on the bar.
+  await begin('shell')
+  const named = await stage($, 'pack-scan', 'shell paths', () => shellTouched($, v, files, root, home, isStopped), r => ({ paths: r.length }))
   for (const path of named) touched.add(path)
+  goOn()
   const chats = await stage($, 'pack-scan', 'chats', async () => projectChats($, root, await $.session.id()), r => ({ chats: r.length }))
+  await end('shell', named.length)
+  goOn()
   const { rules: used, skills } = usedRules(v, home)
   // Each rule's own one-line description, from its front matter.
   const rules = await Promise.all(
@@ -697,7 +797,10 @@ export async function scanProject($: EngineInterface): Promise<PackDraft> {
   const rendersTop = topRenders(files, root)
   const toSort = rendersTop === null ? files : files.filter(f => relative(f.path, root).split('/')[0] !== rendersTop)
   // Haiku's categories, the same for both scopes; none when it gave no answer.
-  const sorted = (await stage($, 'pack-scan', 'categories', () => categorise($, toSort, root)).catch(() => null))?.categories ?? []
+  await begin('sorting')
+  const sorted = (await stage($, 'pack-scan', 'categories', () => categorise($, toSort, root, { isStopped, onBatch: counted('sorting') })).catch(() => null))?.categories ?? []
+  await end('sorting')
+  goOn()
 
   return {
     name: base(root),
@@ -864,7 +967,8 @@ function md(v: PickerView, name: string, others: SavedChat[]): { brief: string; 
   return { brief, outline }
 }
 
-function startHere(name: string, v: PickerView, draft: PackDraft, files: { name: string; bytes: number; groups: string[] } | null): string {
+// `boards`: the folders of the MarkRoom boards the pack holds (boards.ts).
+function startHere(name: string, v: PickerView, draft: PackDraft, files: { name: string; bytes: number; groups: string[] } | null, boards: readonly string[]): string {
   const chunks = v.chunks.filter(c => c.isSummarised).length
   const rules = draft.rules.filter(r => r.isChecked)
 
@@ -893,7 +997,8 @@ ${rules.length > 0 ? `- \`rules/\` holds ${rules.length} of the person's own rul
       : ''
   }- \`files/\` holds the small text files the chat worked on, at their paths inside the project.
 - Paths in the brief and outline are relative to the project folder.
-
+- ${BOARD_RULE}
+${boards.map(f => `- \`${f === '' ? '.' : f}/\`: ${BOARD_FOLDER}\n`).join('')}
 Once that is done, ask the person whether to delete the zip file${files ? 's' : ''}, keeping the unzipped folder you work from.
 
 Private items (keys, passwords, numbers, addresses) were left out of this pack on purpose; ask the person if the work needs one.
@@ -1088,17 +1193,47 @@ async function writePack($: EngineInterface, draft: PackDraft, epoch: number): P
     }
   }
   const groups = groupsOf(draft)
+  // A MarkRoom board's files go without the board's link (boards.ts).
+  const boards = boardFiles($, draft.root)
+  // The boards whose board.json or page the FolioPack holds.
+  const boardsInPack = new Set<string>()
   // The form names each file by its path in the project.
   for (const { path } of tickedFiles(groups, 'pack')) {
     try {
-      await $.fs.write(`${dir}/files/${path}`, clean(await $.fs.read(`${draft.root}/${path}`)))
+      const text = await $.fs.read(`${draft.root}/${path}`)
+      const copy = await boards.copyOf(path, text)
+      // A board's live doc is left out.
+      if (copy === 'left-out') continue
+      if (copy !== 'as-is') boardsInPack.add(copy.folder)
+      await $.fs.write(`${dir}/files/${path}`, clean(copy === 'as-is' ? text : copy.text))
     } catch {
       // Unreadable as text: left out.
     }
   }
-  const chosen = tickedFiles(groups, 'files')
+  // The FolioFiles zip: a board's board.json and page as copies Folio writes
+  // beside the list (the project's own files never change), its live docs not at all.
+  const zipped = await boards.zipOf(tickedFiles(groups, 'files'))
+  const listed = zipped.listed
+  const filesTitle = filesName(name)
+  const isWin = await isWindows($, home)
+  // The board copies, at their paths in the project. One too big to write
+  // stays behind, out of folio.json's list and size as it is out of the zip.
+  const boardsDir = `${outDir}/${filesTitle} (boards)`
+  const staged: string[] = []
+  const unwritten = new Set<string>()
+  for (const [path, text] of zipped.copies) {
+    try {
+      await $.fs.write(`${boardsDir}/${path}`, clean(text))
+      staged.push(path)
+    } catch {
+      unwritten.add(path)
+    }
+  }
+  const chosen = zipped.chosen.filter(f => !unwritten.has(f.path))
   const kinds = groups.filter(g => isPackable(g, 'files') && tickOf(g) !== 'none').map(g => g.label)
-  const files = chosen.length > 0 ? { name: filesName(name), bytes: tickedBytes(draft, 'files'), groups: kinds } : null
+  const files = chosen.length > 0 ? { name: filesTitle, bytes: bytesOf(chosen), groups: kinds } : null
+  const zipPath = `${outDir}/${filesTitle}.zip`
+  const listPath = `${outDir}/${filesTitle}.txt`
   const chats: SavedChat[] = [{ id: 'this', version: v.version, chunks: v.chunks, tasks: v.tasks, ledger: v.ledger, briefDigest: v.briefDigest }, ...others]
   const exported = {
     folio: VERSION,
@@ -1112,9 +1247,11 @@ async function writePack($: EngineInterface, draft: PackDraft, epoch: number): P
     files: files ? { ...files, paths: chosen.map(f => f.path) } : null,
   }
   for (const [path, text] of [['folio.json', cleanJson(exported, clean)] as [string, string], ...chatFiles(chats, draft.root, clean)]) await $.fs.write(`${dir}/${path}`, text)
-  await $.fs.write(`${dir}/START-HERE.md`, clean(startHere(name, v, draft, files)))
+  // Every board the pack holds, from the FolioPack's files and the zip's.
+  await $.fs.write(`${dir}/START-HERE.md`, clean(startHere(name, v, draft, files, [...new Set([...boardsInPack, ...zipped.folders])].sort())))
   await savePrivate($)
-  if (files) await $.fs.write(`${outDir}/${files.name}.txt`, exported.files!.paths.join('\n'))
+  // Windows' tar reads "-C" on a line of its own in the list as a change of folder.
+  if (files) await $.fs.write(listPath, [...listed, ...(isWin && staged.length > 0 ? ['-C', boardsDir, ...staged] : [])].join('\n'))
   stopIfEnded(epoch)
   await change($, x =>
     addActivity(x, {
@@ -1126,15 +1263,12 @@ async function writePack($: EngineInterface, draft: PackDraft, epoch: number): P
   )
   // Windows has no zip command. Its own tar (Windows 10 and later) writes zips;
   // Git Bash's tar can't, so it is named by its full path.
-  const isWin = await isWindows($, home)
   const TAR = 'C:/Windows/System32/tar.exe'
   const zipPack = isWin ? `${TAR} -a -c -f "${packName(name)}.zip" "${packName(name)}"` : `zip -qr "${packName(name)}.zip" "${packName(name)}"`
-  const zipList = (zipPath: string, list: string) => (isWin ? `${TAR} -a -c -f "${zipPath}" -T "${list}"` : `zip -q "${zipPath}" -@ < "${list}"`)
-  const zipFiles = files
-    ? `\n2. Make \`${outDir}/${files.name}.zip\` from the files listed in \`${outDir}/${files.name}.txt\` (paths relative to \`${draft.root}\`): \`cd "${draft.root}" && ${zipList(`${outDir}/${files.name}.zip`, `${outDir}/${files.name}.txt`)}\`. Follow links to the real files. Then delete the .txt list.`
-    : ''
+  const fromList = isWin ? `${TAR} -a -c -f "${zipPath}" -T "${listPath}"` : `zip -q "${zipPath}" -@ < "${listPath}"`
+  const zipFiles = files ? boardsStep({ zip: zipPath, list: listPath, root: draft.root, boards: staged.length > 0 ? boardsDir : null, isListed: listed.length > 0, isWin, fromList }) : ''
   packCount += 1
-  packRun = { kind: 'awaiting', zips: [`${dir}.zip`, ...(files ? [`${outDir}/${files.name}.zip`] : [])], folder: packName(name), id: packCount }
+  packRun = { kind: 'awaiting', zips: [`${dir}.zip`, ...(files ? [zipPath] : [])], folder: packName(name), id: packCount }
   watchPack($, packCount)
   await $.prompt.submit({
     text: `${PACK_ASK} \`${dir}\`. Please finish it:\n1. Zip that folder into \`${dir}.zip\` (\`cd "${outDir}" && ${zipPack}\`). Check the zip opens, then move the folder to the ${isWin ? 'Recycle Bin' : 'Trash'}: only the zip is kept.${zipFiles}\n${files ? '3' : '2'}. Tell me each zip's size and where they are. Don't change anything else.`,
@@ -1302,8 +1436,10 @@ export async function importPack($: EngineInterface, folder: string): Promise<{ 
     const merged = mergePack(v, chats, name)
     added = merged.added
     wasKept = added.filter(c => keptThere.has(c.id)).length
+    // The rule for the pack's boards, in the ledger so it stays in the folded brief after compactions.
+    const ledger = addRule(merged.view.ledger, BOARD_RULE, merged.view.nextPart)
 
-    return addActivity(merged.view, {
+    return addActivity({ ...merged.view, ledger }, {
       kind: 'import',
       text: `Opened the FolioPack “${name}”`,
       detail: `${added.length} parts as summaries${wasKept > 0 ? `; ${wasKept} kept word for word there, back from Browse` : ''}`,
@@ -1315,7 +1451,7 @@ export async function importPack($: EngineInterface, folder: string): Promise<{ 
     added.length === 0
       ? 'no new parts (every one of them is here already)'
       : `${added.length === 1 ? '1 part as a summary' : `${added.length} parts as summaries`}, numbered ${numbers.length === 1 ? numbers[0] : `${numbers[0]} to ${numbers.at(-1)}`} in this chat`
-  const text = `Folio opened the FolioPack "${name}": ${parts}${wasKept > 0 ? ` (${wasKept} were kept word for word in their chat; the person can put them back from Folio's Browse)` : ''}, with their tasks and ledger. They go into your context as one folded history once this reply ends, brief included, so don't read the pack's brief.md or outline.md; recall (${RECALL_TOOL}) reaches them by those numbers and searches every original.`
+  const text = `Folio opened the FolioPack "${name}": ${parts}${wasKept > 0 ? ` (${wasKept} were kept word for word in their chat; the person can put them back from Folio's Browse)` : ''}, with their tasks and ledger. They go into your context as one folded history once this reply ends, brief included, so don't read the pack's brief.md or outline.md; recall (${RECALL_TOOL}) reaches them by those numbers and searches every original. ${BOARD_RULE} ${OLD_PACK_NOTE}`
 
   return { text, isOpened: true }
 }
@@ -1338,9 +1474,15 @@ function tickedFiles(groups: PackGroup[], into: PackGroup['into']): PackFile[] {
   return filesOf(groups.filter(g => isPackable(g, into))).filter(f => f.isChecked)
 }
 
-// What the ticked files come to, in the FolioPack ('pack') or the FolioFiles zip ('files').
+// What files come to, before zipping.
+const bytesOf = (files: readonly PackFile[]) => files.reduce((s, f) => s + f.bytes, 0)
+
+// What the ticked files come to, in the FolioPack ('pack') or the FolioFiles
+// zip ('files'). The zip leaves boards' live docs out, so its size does too.
 export function tickedBytes(draft: PackDraft, into: PackGroup['into']): number {
-  return tickedFiles(groupsOf(draft), into).reduce((s, f) => s + f.bytes, 0)
+  const ticked = tickedFiles(groupsOf(draft), into)
+
+  return bytesOf(into === 'files' ? zippedByPath(ticked, filesOf([...draft.groups, ...draft.chatGroups]).map(f => f.path)) : ticked)
 }
 
 // The pack's name: the Name as typed, or when it's emptied, the project folder's.

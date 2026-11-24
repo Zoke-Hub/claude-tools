@@ -6,7 +6,7 @@ import { expect, test } from 'claude-code/testing'
 import type { FsEntry } from 'claude-code'
 
 import { packFolder, projectFolder } from '../hooks/pack'
-import { HOME, openPanel, savedView, stubEngine, start } from './engine'
+import { entry, HOME, openPanel, savedView, stubEngine, start } from './engine'
 import type { Engine, On } from './engine'
 
 // The panel as the app opens it, wide enough for FolioPack's rows.
@@ -14,7 +14,6 @@ const panel = ($: Engine) => openPanel($, { columns: 110, rows: 60 })
 
 // A project whose one folder, p, holds three folders, each holding two folders
 // of files: p is a section of FolioPack's list, a, b and c its rows.
-const entry = (name: string, kind: FsEntry['kind'], size = 0): FsEntry => ({ name, kind, size, mtimeMs: 0, isLink: false })
 const tree: Record<string, FsEntry[]> = { '/w': [entry('p', 'dir')], '/w/p': [] }
 for (const top of ['a', 'b', 'c']) {
   tree['/w/p']!.push(entry(top, 'dir'))

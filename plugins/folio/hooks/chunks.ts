@@ -627,3 +627,8 @@ export function shortTokens(n: number): string {
 
   return String(n)
 }
+
+// A count with its thousands marked: 12,345.
+export function countText(n: number): string {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}

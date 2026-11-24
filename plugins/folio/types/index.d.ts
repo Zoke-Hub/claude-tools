@@ -420,6 +420,15 @@ export type PackDraft = {
 // memory; `rev` changes whenever it does.
 export type PackStatus = { rev: number; phase: 'scanning' | 'ready' | 'failed'; error: string } | null
 
+// How far a FolioPack scan has got, for its loading bar. Each step: when it
+// started, its count so far (files listed, files made by shell commands,
+// Haiku's batches done), the count it is going to (batches only, once known)
+// and, once done, how long it took. A step not started yet is missing.
+export type ScanStep = { startedAt: number; count: number; total?: number; ms?: number }
+export type ScanSteps = { startedAt: number; files?: ScanStep; shell?: ScanStep; sorting?: ScanStep }
+// A scan's steps by name.
+export type ScanStepName = Exclude<keyof ScanSteps, 'startedAt'>
+
 declare module 'claude-code' {
   interface PluginState {
     folio: {

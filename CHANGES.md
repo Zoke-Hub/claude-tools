@@ -3,6 +3,34 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-24 · MarkRoom 1.0.0 (number unchanged)
+
+- **MarkRoom, more room for the board's name:** a board of several files no longer shows a count of its images and
+  videos beside its name (its tabs show the files). A board of one file still says what it is. A board published
+  before drops the count the next time a round is added to it.
+
+## 2026-11-24 · Folio 1.0.0 (number unchanged), later
+
+- **FolioPack, the default folder in full:** under Saves to, the default folder's whole path, from the project's own
+  folder (My Project/Work/Folio/Folio packs); a path too long for the box rests, glides along to its end, rests and
+  glides back.
+- **FolioPack in a big project and a long chat:** it looks through the project much faster: several folders read at
+  once, a long chat's words read from the newest part back only as far as the commands Folio uses, and Haiku's
+  batches after the first asked four at a time. Close while it is still looking stops the look (the Haiku answers it
+  already has are kept), and opened again it looks afresh.
+- **FolioPack, a loading box while it looks:** a look that takes over 2 seconds shows what it is doing, the time since
+  it started and a bar, then its three steps (listing the project's files, finding the files shell commands made,
+  Haiku sorting them by kind), each with its count and its own time: a tick and the time it took once done, a clock
+  counting up while it runs.
+- **FolioPack never carries the sender's MarkRoom board:** a board travels as its files and notes, never as the board.
+  Its files are known by what they hold: `board.json` goes without its `url` and `page` and without each file's
+  `asset`, `posterAsset` and `live`; the page goes with `"url":""` and its `/_blob/` files turned back into the board's
+  own; the live round docs stay behind. In the FolioFiles zip the stripped copies come from a `(boards)` folder beside
+  the list (a second `zip -qr` on a Mac, `-C` lines at the list's end on Windows). START-HERE.md and `import_pack` say
+  that links to claude.ai artifacts in a pack belong to the computer that sent it (make a new board from the files),
+  and the rule goes into the chat's brief once, so it outlasts compactions. A pack made before this fix may still
+  carry a board's link: take it out before using that board.
+
 ## 2026-11-24 · Folio 1.0.0 (number unchanged)
 
 - **Folio, a note never stands in for real text:** a tool call whose text is one of Folio's "[Folio stripped this …]"

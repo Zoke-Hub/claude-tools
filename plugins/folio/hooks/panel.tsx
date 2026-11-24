@@ -3,19 +3,21 @@
 
 import { errorText, note } from './debug'
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, RenderChildren } from 'claude-code'
+import type { ClientProps, ElementConstructor, EngineInterface, RenderChildren, Timer } from 'claude-code'
 
 import type { Activity, ChunkRecord, LedgerItem, PackDraft, PackGroup, PackStatus, PickerView, Strategy, TaskStatus } from '../types'
 import { compactNow, decide, FOLD_ASK, isFoldPending, isUndoable, snooze, summariseNow, undo, undoChoice, undoEntry, undoSnooze } from './actions'
-import { shortTokens } from './chunks'
+import { countText, shortTokens } from './chunks'
 import { keptAndFolded, keptParts, realContext, realOf, summaryTokens, tokensOf, workChunks, workTokens } from './measure'
-import { drawBar, MIN_PART_COLUMNS, PART_PX } from './bars'
+import { drawBar, drawProgress, MIN_PART_COLUMNS, PART_PX } from './bars'
+import { elapsedText } from './clock'
+import type { ScanStepName, ScanSteps } from '../types'
 import type { Tick } from './pack'
-import { alwaysLines, bytesText, filesName, filesOf, folderState, groupsOf, isPackBusy, packFolder, packName, packTitle, packUp, privateLine, privateList, scanProject, shortFolder, tickedBytes, tickOf, toggleGroup, writeSaveTo } from './pack'
+import { alwaysLines, bytesText, filesName, filesOf, folderState, groupsOf, isPackBusy, packFolder, packName, packTitle, packUp, privateLine, privateList, scanProject, projectFolderText, tickedBytes, tickOf, toggleGroup, writeSaveTo } from './pack'
 import { cappedBrief } from './brief'
 import type { BriefLines } from './brief'
 import { partNo, partNos, runs } from './fold'
-import { ACTIVITY_ICONS, checkboxSvg, chunkState, chunkTitle, contextParts, drawsOf, FIXED, FULL, heavyTextSvg, HIGH, insetSvg, KEPT, miniSvg, OVER, stripKey, stripParts, TRIMMED, WARN, ZIP_ICON } from './pictures'
+import { ACTIVITY_ICONS, ROOM, STEP_ICONS, checkboxSvg, chunkState, chunkTitle, contextParts, drawsOf, FIXED, FULL, heavyTextSvg, HIGH, insetSvg, KEPT, miniSvg, OVER, stripKey, stripParts, TRIMMED, WARN, ZIP_ICON } from './pictures'
 import { change, chunkOf, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, homeDir, sessionEpoch, setSettings, settingsOf, STRATEGIES } from './store'
 import type { Suggestion } from './suggest'
 import { suggestionsFor } from './suggest'
@@ -248,6 +250,9 @@ const SLIDER_MIN_COLUMNS = 52
 const MIN_PANEL_COLUMNS = 46
 // The body's frame and the cards' padding around a bar, in cells.
 const BAR_INSET = 8
+// The layer a gliding line is drawn in: wider than any line, so the line
+// keeps its whole width and the box around it cuts it to the room.
+const GLIDE_LAYER = 1000
 // The Custom ceiling at which the slider's fill turns amber.
 const CUSTOM_HIGH = 650_000
 const SLIDER_EMPTY = DIM
@@ -1145,7 +1150,7 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
       {/* Pinned, FolioPack sits at the very bottom of the panel under its rule and grows upward. */}
       {isPinned && <Box flexGrow={1} />}
       {isPinned && rule}
-      {await packSection($, elements, draws, v, status, draft, opened, toggle, pager, isPinned)}
+      {await packSection($, elements, draws, Client, v, status, draft, opened, toggle, pager, isPinned, barColumns)}
     </Box>
   )
 }
@@ -1155,6 +1160,115 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
 // says where it stands, and changes whenever the form does, to redraw.
 let packForm: PackDraft | null = null
 let isScanning = false
+// Which scan is the live one: Close while one runs moves this on, so that
+// scan stops at its next step and its result is dropped.
+let scanRun = 0
+
+// Close: a scan still looking through the project stops; the Haiku answers it
+// already has are kept for the next look. Its steps go at once, so FolioPack
+// opened again meanwhile never shows the stopped scan's.
+function stopScan() {
+  if (!isScanning) return
+  scanRun += 1
+  scanSteps = null
+}
+
+// How far the scan running now has got, for the loading box; null before its
+// first news, once it is stopped and once it ends.
+let scanSteps: ScanSteps | null = null
+// A look through the project shows its loading box once it has taken this
+// long; until then the box keeps its one line.
+const LOADING_AFTER_MS = 2000
+// The panel is drawn again for the scan's news at most this often: the news
+// that comes meanwhile is drawn together, the newest of it.
+const LOADING_DRAW_MS = 500
+// A draw waiting its turn, since `dueAt` (Infinity until the clock is read).
+// Its timer can be refused, and then never fires: a draw due for twice the
+// wait counts as lost, and the next news asks for a new one. Each scan starts
+// with none due.
+let isDrawDue = false
+let dueAt = 0
+let lastDrawAt = 0
+// Whether the loading box was last drawn where the surface has no region to
+// count its times (the terminal): the scan then draws it again each second.
+let isClockless = false
+
+function drawScan($: EngineInterface) {
+  if (isDrawDue) {
+    void $.clock.now().then(now => {
+      if (!isDrawDue || now - dueAt < 2 * LOADING_DRAW_MS) return
+      isDrawDue = false
+      drawScan($)
+    }, () => {})
+
+    return
+  }
+  isDrawDue = true
+  dueAt = Infinity
+  void (async () => {
+    const now = await $.clock.now()
+    dueAt = now
+    const wait = lastDrawAt + LOADING_DRAW_MS - now
+    if (wait > 0) {
+      await new Promise<void>(go =>
+        $.clock.after(wait, () => {
+          isDrawDue = false
+          go()
+        }),
+      )
+    } else isDrawDue = false
+    lastDrawAt = await $.clock.now()
+    if (isScanning) await update($, pack, s => (s === null || s.phase !== 'scanning' ? s : { ...s, rev: s.rev + 1 }))
+  })().catch(() => {
+    isDrawDue = false
+  })
+}
+
+// The loading bar's share done. Measured on a project of 14,000 files, the
+// listing took 11 s, the shell commands 3 s and Haiku's sorting 90 s: a tenth,
+// a twentieth and the rest of the bar. The listing's end isn't known while it
+// runs, so its part nears its tenth without reaching it (half of it at
+// FILES_HALF files).
+const FILES_HALF = 5000
+export function scanShare(s: ScanSteps): number {
+  const files = s.files === undefined ? 0 : s.files.ms !== undefined ? 1 : s.files.count / (s.files.count + FILES_HALF)
+  const shell = s.shell?.ms !== undefined ? 1 : 0
+  const sorting = s.sorting === undefined ? 0 : s.sorting.ms !== undefined ? 1 : s.sorting.total ? s.sorting.count / s.sorting.total : 0
+
+  return 0.1 * files + 0.05 * shell + 0.85 * sorting
+}
+
+type StepLine = { key: ScanStepName; state: 'done' | 'running' | 'waiting'; text: string; since?: number; ms?: number }
+
+// The loading box's three steps, each with what it says now.
+export function stepLines(s: ScanSteps): StepLine[] {
+  const line = (key: StepLine['key'], waiting: string, running: string, done: string): StepLine => {
+    const step = s[key]
+    if (step === undefined) return { key, state: 'waiting', text: waiting }
+    if (step.ms !== undefined) return { key, state: 'done', text: done, ms: step.ms }
+
+    return { key, state: 'running', text: running, since: step.startedAt }
+  }
+  const files = s.files?.count ?? 0
+  const shell = s.shell?.count ?? 0
+  const sorting = s.sorting
+
+  return [
+    line('files', "List the project's files", files > 0 ? `Listing the project's files · ${countText(files)} so far` : "Listing the project's files", `Listed ${countText(files)} files`),
+    line('shell', 'Find files made by shell commands', 'Finding files made by shell commands', shell > 0 ? `Found ${countText(shell)} files made by shell commands` : 'No files made by shell commands'),
+    line(
+      'sorting',
+      'Sort the files by kind with Haiku',
+      sorting?.total === undefined
+        ? "Reading the files' first lines for Haiku"
+        : `Sorting the files by kind with Haiku · ${sorting.count} of ${sorting.total} ${sorting.total === 1 ? 'batch' : 'batches'}`,
+      'Sorted the files by kind',
+    ),
+  ]
+}
+
+// A finished step's time: 0.4 s, 3.2 s, 11 s, or 1:30 from a minute up.
+export const stepTime = (ms: number) => (ms < 10_000 ? `${(ms / 1000).toFixed(1)} s` : ms < 60_000 ? `${Math.round(ms / 1000)} s` : elapsedText(ms))
 
 // A new session: nothing open (no FolioPack, no task or part of the old chat,
 // whose task ids the new one uses again), no FolioPack form from the old
@@ -1184,19 +1298,45 @@ async function rescan($: EngineInterface) {
 async function scan($: EngineInterface) {
   if (isScanning) return
   isScanning = true
-  // A scan of a session that ended meanwhile is dropped. FolioPack opened in
-  // the new session meanwhile waits on it, so it looks again once it ends.
+  // A scan of a session that ended meanwhile, or closed, is dropped.
+  // FolioPack opened again meanwhile waits on it, so it looks again once it
+  // ends.
   const epoch = sessionEpoch()
+  const run = ++scanRun
+  const isStopped = () => run !== scanRun || sessionEpoch() !== epoch
+  let due: Timer | undefined
+  let tick: Timer | undefined
   try {
+    scanSteps = null
+    isDrawDue = false
     await setForm($, null, 'scanning')
-    const found = await scanProject($)
-    if (sessionEpoch() === epoch) await setForm($, found)
+    // Drawn again when the loading box is due, as the scan gets on, and each
+    // second where the surface can't count the times itself.
+    due = $.clock.after(LOADING_AFTER_MS, () => {
+      if (!isStopped()) drawScan($)
+    })
+    tick = $.clock.every(1000, () => {
+      if (isClockless && !isStopped()) drawScan($)
+    })
+    const found = await scanProject($, isStopped, steps => {
+      if (isStopped()) return
+      scanSteps = steps
+      drawScan($)
+    })
+    if (!isStopped()) await setForm($, found)
   } catch (err) {
-    if (sessionEpoch() === epoch) await setForm($, null, 'failed', errorText(err))
+    if (!isStopped()) await setForm($, null, 'failed', errorText(err))
   } finally {
+    due?.cancel()
+    tick?.cancel()
     isScanning = false
+    scanSteps = null
   }
-  if (sessionEpoch() !== epoch && (await read($, open)).includes('pack')) await scan($)
+  if (!isStopped()) return
+  // A stopped scan: FolioPack opened again meanwhile looks again; shut, it
+  // stands as it did before it was opened, no scan running.
+  if ((await read($, open)).includes('pack')) await scan($)
+  else await update($, pack, s => (s?.phase === 'scanning' ? null : s))
 }
 
 // FolioPack: everything this project's work needs, packed for another chat on
@@ -1207,6 +1347,8 @@ async function packSection(
   $: EngineInterface,
   elements: ReturnType<EngineInterface['ui']['resolve']>,
   draws: ReturnType<typeof drawsOf>,
+  // The region element, where the surface draws regions (drawPanelBody's).
+  Client: ElementConstructor<ClientProps> | null,
   v: PickerView,
   status: PackStatus,
   draft: PackDraft | null,
@@ -1214,6 +1356,8 @@ async function packSection(
   toggle: (name: string) => () => void,
   pager: (name: string, total: number, first: number, page: number) => { start: number; end: number; controls: RenderChildren },
   isPinned: boolean,
+  // The box's inside width, in cells: the room a gliding line shows.
+  room: number,
 ) {
   const { Box, Button, Text } = elements
   const edge = edgeOf(elements, draws)
@@ -1227,6 +1371,11 @@ async function packSection(
   const openPack = async () => {
     toggle('pack')()
     if (draft === null && !isScanning) await scan($)
+  }
+  // Close stops a scan still looking through the project.
+  const closePack = () => {
+    stopScan()
+    toggle('pack')()
   }
   const patch = (fn: (d: PackDraft) => PackDraft) => {
     if (packForm !== null) void setForm($, fn(packForm))
@@ -1243,7 +1392,7 @@ async function packSection(
   const folder = isOpen && draft !== null ? packFolder(saveTo, home, fallback) : ''
   // The default Work/Folio may not be there yet: it is made inside the project.
   const reach = folder === '' ? 'ready' : await folderState($, folder, saveTo === '' ? draft?.root : undefined)
-  const shownDefault = shortFolder(fallback, home)
+  const shownDefault = projectFolderText(fallback, draft?.root ?? '', home)
   const line = (left: RenderChildren, right?: string) => (
     <Box flexDirection="row" justifyContent="space-between" alignItems="flex-start" gap="sm">
       <Box flexShrink={1}>{left}</Box>
@@ -1255,11 +1404,74 @@ async function packSection(
     </Box>
   )
 
+  // A look that takes a while: what it is doing, the time since it started and
+  // a bar, then its steps, each with its time. The times count up in the app
+  // on their own; where the surface has no such region, the scan draws the
+  // panel again each second while it looks.
+  const loadingBox = (steps: ScanSteps, now: number) => {
+    isClockless = Client === null
+    const clock = (since: number, size: 'footnote' | 'caption', key: string) =>
+      Client !== null ? (
+        <Box width={6} flexShrink={0} flexDirection="row" justifyContent="flex-end">
+          <Client key={key} module="./clock.tsx" props={{ since, size }} />
+        </Box>
+      ) : (
+        <Text size={size} dimColor tabular>
+          {elapsedText(now - since)}
+        </Text>
+      )
+    const MARK = { done: '✓', running: '›', waiting: '·' }
+
+    return (
+      <Box flexDirection="column" borderStyle="round" borderDimColor paddingX="md" paddingY="sm" marginTop={above}>
+        {edge(
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
+            <Text size="footnote" wrap="truncate-end">
+              Looking through the project
+            </Text>
+            <Box flexDirection="row" alignItems="center" gap="md" flexShrink={0}>
+              {clock(steps.startedAt, 'footnote', 'pack-loading-clock')}
+              <Button key="pack-close" label="Close" onPress={closePack} />
+            </Box>
+          </Box>,
+          <Box key="pack-loading-bar" flexDirection="column">{drawProgress(elements, Svg !== null, scanShare(steps), room, { fill: FULL, track: ROOM })}</Box>,
+          ...stepLines(steps).map(s => (
+            <Box key={`pack-step-${s.key}`} flexDirection="row" alignItems="center" gap="sm">
+              {Svg !== null ? (
+                <Box height={1} flexDirection="row" alignItems="center" flexShrink={0}>
+                  <Svg source={STEP_ICONS[s.state]} alt={s.state} width={14} height={14} />
+                </Box>
+              ) : (
+                <Text size="caption" dimColor>
+                  {MARK[s.state]}
+                </Text>
+              )}
+              <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                <Text size="caption" color={s.state === 'waiting' ? DIM : undefined} dimColor={s.state === 'done'} wrap="truncate-end">
+                  {s.text}
+                </Text>
+              </Box>
+              {s.ms !== undefined && (
+                <Text size="caption" dimColor tabular>
+                  {stepTime(s.ms)}
+                </Text>
+              )}
+              {s.since !== undefined && clock(s.since, 'caption', `pack-step-clock-${s.key}`)}
+            </Box>
+          )),
+        )}
+      </Box>
+    )
+  }
+
   // Open with no form: scanning, failed, or not started yet (the mod reloaded).
   // A failed scan waits for Look again.
   if (isOpen && draft === null) {
     if (!isScanning && status?.phase !== 'failed') void scan($)
     const isFailed = status?.phase === 'failed'
+    const now = await $.clock.now()
+    const steps = isFailed ? null : scanSteps
+    if (steps !== null && now - steps.startedAt >= LOADING_AFTER_MS) return loadingBox(steps, now)
 
     return (
       <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm" borderStyle="round" borderDimColor paddingX="md" paddingY="sm" marginTop={above}>
@@ -1270,7 +1482,7 @@ async function packSection(
         )}
         <Box flexDirection="row" gap="xs">
           {isFailed && <Button key="pack-rescan" label="Look again" onPress={() => void scan($)} />}
-          <Button key="pack-close" label="Close" onPress={toggle('pack')} />
+          <Button key="pack-close" label="Close" onPress={closePack} />
         </Box>
       </Box>
     )
@@ -1528,7 +1740,7 @@ async function packSection(
         <Box flexDirection="row" alignItems="flex-end" gap="sm">
           <Box flexGrow={1}>
             {draws.input ? (
-              <elements.Input key="pack-save-to" label="Saves to" placeholder={shownDefault} value={saveTo} onInput={setSaveTo} onSubmit={setSaveTo} />
+              <elements.Input key="pack-save-to" label="Saves to" placeholder="The folder below, or another" value={saveTo} onInput={setSaveTo} onSubmit={setSaveTo} />
             ) : (
               <Text size="footnote" weight="medium">
                 Saves to {saveTo || shownDefault}
@@ -1537,6 +1749,21 @@ async function packSection(
           </Box>
           {saveTo !== '' && <Button key="pack-save-reset" label="Reset" plain dimColor onPress={() => setSaveTo('')} />}
         </Box>
+        {/* The default folder's whole path, from the project's folder; too
+            long for the box, it glides to its end and back. */}
+        {draws.input &&
+          saveTo === '' &&
+          (Client !== null ? (
+            <Box key="pack-default-window" position="relative" overflow="hidden" width="100%" height={1}>
+              <Box position="absolute" top={0} left={0} width={GLIDE_LAYER} height={1} flexDirection="row">
+                <Client key="folio-pack-default" module="./glide.tsx" props={{ text: shownDefault, room }} />
+              </Box>
+            </Box>
+          ) : (
+            <Text size="caption" dimColor>
+              {shownDefault}
+            </Text>
+          ))}
         {reach === 'missing' && (
           <Text size="caption" color={WARN}>
             Can't reach this folder now: connect the drive, or change it.

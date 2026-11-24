@@ -133,6 +133,43 @@ test("an old chat's pack lists its renders from the commands its saved originals
   ])
 })
 
+test("a long chat's saved words are read from its newest part back, only until they hold the commands that name paths", async ($, on) => {
+  // The disk, noting the parts' words read.
+  class Reads extends Map<string, string> {
+    read: string[] = []
+
+    override get(path: string) {
+      this.read.push(path)
+
+      return super.get(path)
+    }
+  }
+  const disk = savedView(
+    {
+      settings: { mode: 'watch', strategy: 'balanced' },
+      chunks: [
+        { id: 'old0', order: 0, title: 'Rendered A20', topic: 'renders', summary: 'rendered', tokens: 5000, isSummarised: true, status: 'folded', paths: [] },
+        ...NEWER.map((id, i) => ({ id, order: i + 1, title: 'Many checks', topic: 'checks', summary: 'checked', tokens: 5000, isSummarised: true, status: 'folded', paths: [] })),
+      ],
+    },
+    new Reads(),
+  ) as Reads
+  const render = 'npx hyperframes render "work/segments/A20/anim" --output "work/segments/A20/anim/renders/r03_final_4k.mp4"'
+  savedOriginal(disk, 'old0', { text: ['User: render A20', `Claude called Bash ${JSON.stringify({ command: render, description: 'Render' })}`, 'Result: done'].join('\n') })
+  // The newer parts, read together, hold as many commands as Folio reads paths from.
+  for (const [n, id] of NEWER.entries()) {
+    const checks = Array.from({ length: 840 }, (_, i) => `Claude called Bash ${JSON.stringify({ command: `echo check ${n}-${i}`, description: 'Check' })}`)
+    savedOriginal(disk, id, { text: ['User: check everything', ...checks].join('\n') })
+  }
+  disk.read = []
+  await scan($, on, { files: [...SEGMENTS, ['work/segments/A20/anim/renders/r03_final_4k.mp4', NEW]], disk })
+  for (const id of NEWER) expect(disk.read.some(p => p.includes(id))).toBe(true)
+  expect(disk.read.some(p => p.includes('old0'))).toBe(false)
+})
+
+// The newer parts' ids, as many as the scan reads at once.
+const NEWER = ['new1', 'new2', 'new3', 'new4', 'new5', 'new6']
+
 test('a file that changed in the project while the chat ran is not listed when no command named it', async ($, on) => {
   const messages: SessionMessage[] = [
     { role: 'user', text: 'check the project', toolUses: [] },

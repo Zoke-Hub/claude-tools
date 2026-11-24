@@ -9,7 +9,7 @@ import type { Original } from './store'
 import { reveal } from './private'
 import { addActivity, change, chunkOf, EMPTY_VIEW, patchChunk, privateVault, readOriginal } from './store'
 import { NAME_NOTE, OTHER_CHATS, partNo, partRef, RECALL_TOOL, runs, sectionLetter } from './fold'
-import { currentChat, shortTokens } from './chunks'
+import { countText, currentChat, shortTokens } from './chunks'
 import { complete } from './summarize'
 import { newestFirst } from './ledger'
 import { linksNote } from './links'
@@ -481,7 +481,7 @@ function cutAt(text: string, middle: number, most: number, ref: string): string 
   if (start > 0) start = back(start, Math.max(0, start - 400))
   let end = Math.min(text.length, start + most)
   if (end < text.length) end = Math.max(start + 1, back(end, start + Math.floor(most / 2)) - 1)
-  const shown = `characters ${start + 1}–${end} of ${text.length.toLocaleString('en')}`
+  const shown = `characters ${start + 1}–${end} of ${countText(text.length)}`
 
   return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}\n[Folio cut this message: ${shown} shown. All of it: part "${ref}" with depth "full" and amount "large"${text.length > AMOUNTS.large ? ', or a query with words from the stretch you need' : ''}.]`
 }

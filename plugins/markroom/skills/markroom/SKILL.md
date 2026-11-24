@@ -220,7 +220,8 @@ Shift + ←/→, the "All files" note filter and **Copy all notes** (which names
      when no tab on the board has that name.
    - A first visit opens on the newest render (the last file added); later, a new round comes forward where it belongs
      (see above).
-   - `--subtitle` is optional. With one image it defaults to "label · W × H px". `--key` sets the browser-storage key
+   - `--subtitle` is optional. With one image it defaults to "label · W × H px"; with several there is none, so the
+     board's name has the room (no count of images and videos). `--key` sets the browser-storage key
      (default: from the title; a rebuilt board keeps the one in `board.json`).
    - Size handling:
      - JPEGs and small PNGs are copied as they are.

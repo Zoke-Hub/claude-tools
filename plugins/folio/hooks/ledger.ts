@@ -274,6 +274,16 @@ export function importLedger(
   return { ledger: done(w), added: made.length }
 }
 
+// A rule Folio itself gives the chat (opening a FolioPack), added as any rule
+// is, from part `order`; left out when an open or parked rule has its words.
+export function addRule(ledger: Ledger, text: string, order: number): Ledger {
+  const w = workOn(ledger)
+  if (repeatOf(w, 'rule', text) !== undefined) return ledger
+  add(w, 'rule', text, { from: order, touched: order })
+
+  return done(w)
+}
+
 // Open tasks nobody has touched for PARK_AFTER parts, as of part `newest`, parked.
 function parkStale(ledger: Ledger, newest: number): { ledger: Ledger; count: number } {
   let count = 0

@@ -175,14 +175,15 @@ async function savesToDefault($: Engine, on: On, files: Map<string, string>) {
   await start($)
   const ui = await mountPanel($, { columns: 110, rows: 60 })
   await ui.press({ key: 'folio-pack' })
-  const box = (await ui.find({ key: 'pack-save-to' })) as { props?: { placeholder?: string } } | undefined
+  // The default folder shows in the line under Saves to, from the project's folder.
+  const line = (await ui.find({ key: 'folio-pack-default' })) as { props?: { props?: { text?: string } } } | undefined
   await ui.unmount()
 
-  return box?.props?.placeholder
+  return line?.props?.props?.text
 }
 
 test("Saves to defaults to the project's Work/Folio/Folio packs", async ($, on) => {
-  expect(await savesToDefault($, on, new Map())).toBe('/w/Work/Folio/Folio packs')
+  expect(await savesToDefault($, on, new Map())).toBe('w/Work/Folio/Folio packs')
 })
 
 test('Saves to defaults to ~/FolioPacks in a code repository', async ($, on) => {

@@ -4,6 +4,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { FOLD_ASK } from '../hooks/actions'
+import { BOARD_RULE } from '../hooks/boards'
 import { outputId, shorten } from '../hooks/shorten'
 import { chunksOf, messageTexts, splitChunks, TIDY_MARK, toolResultsOf, TRIM_MARK } from '../hooks/chunks'
 import type { Original } from '../hooks/store'
@@ -158,7 +159,8 @@ test("a FolioPack's brief starts an empty ledger, and its parts are given tasks 
   await callTool($, { tool: 'mcp__folio__import_pack', path: '/p' })
   await clock.advance(1000)
   const ledger = JSON.parse(files.get(`${DIR}/ledger.json`)!) as Ledger
-  expect(ledger.items.map(x => [x.text, x.isOld])).toEqual([['Number every render', true], ['check the legend', true]])
+  // The pack's brief, kept as old; then the rule every opened pack adds, that the sender's boards stay theirs.
+  expect(ledger.items.map(x => [x.text, x.isOld])).toEqual([['Number every render', true], ['check the legend', true], [BOARD_RULE, undefined]])
   const of = (id: string) => saved(files).chunks.find(c => c.id === id)!
   // The chat's own parts are in T1 already.
   expect([of('a').task, of('b').task, of('c').task]).toEqual(['T2', 'T2', 'T3'])

@@ -9,10 +9,11 @@ import type { SavedPart } from './chunks'
 import { compactPoint, hasHistory, ratioOf, realOf, summaryTokens } from './measure'
 import { reveal } from './private'
 import { privateVault, readOriginal, settingsOf } from './store'
-import { bigResultsOf, hasInputNote, isStripNote, mapStrings, resultNote, stripInput, stripSaving } from './strip'
+import { bigResultsOf, hasInputNote, isStripNote, mapStrings, RECALL_TOOL, resultNote, stripInput, stripSaving } from './strip'
 
-// The tool this mod gives Claude, as the model sees it.
-export const RECALL_TOOL = 'mcp__folio__recall'
+// The recall tool's name lives in strip.ts, whose refusal names it too; the
+// modules that read it here keep reading it here.
+export { RECALL_TOOL }
 
 // How Claude names this mod, in what only Claude reads (tool descriptions and
 // the folded history), never in the panel or a reply.

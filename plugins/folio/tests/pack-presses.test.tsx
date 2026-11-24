@@ -6,14 +6,13 @@ import { expect, test } from 'claude-code/testing'
 import type { FsEntry } from 'claude-code'
 
 import { packFolder, projectFolder } from '../hooks/pack'
-import { HOME, mountPanel, stubEngine, start } from './engine'
+import { entry, HOME, mountPanel, stubEngine, start } from './engine'
 import type { Engine, On } from './engine'
 
 // The panel wide enough for FolioPack's rows.
 const panel = ($: Engine) => mountPanel($, { columns: 110, rows: 60 })
 
 // A project of three folders, each holding two folders of files.
-const entry = (name: string, kind: FsEntry['kind'], size = 0): FsEntry => ({ name, kind, size, mtimeMs: 0, isLink: false })
 const tree: Record<string, FsEntry[]> = { '/w': [] }
 for (const top of ['a', 'b', 'c']) {
   tree['/w']!.push(entry(top, 'dir'))

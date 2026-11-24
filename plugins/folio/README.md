@@ -71,6 +71,11 @@ original stays on your computer word for word, and Claude can bring any of it ba
   ledger. Its parts take the next numbers of the chat that opens it, so recall reaches them by number. With **Saves
   to** left empty, a pack goes to the project's `Work/Folio/Folio packs` folder (made when needed), or to `~/FolioPacks`
   for a chat with no project folder or in a code repository; earlier packs in that folder are never packed again.
+  Looking through a big project can take a minute or two: past 2 seconds, the box shows what it is doing, the time
+  since it started, a bar and each step with its own time.
+  A MarkRoom board travels as its files and notes, never as the board: its `board.json` and page go without the
+  board's link and uploaded files, its live round docs stay behind, and Claude on the other computer is told to make a
+  board of its own from the files.
 - **Project folders.** Folio gives every chat a short rule for laying out a project's folders: `Animations`,
   `Renders/Drafts` and `Renders/Final` by animation, `Segments` by animation, sorted `References`, and `Work` for
   everything else (`Work/Scripts` for the script and breakdown, `Work/Backup`, and a folder for each tool), with a README

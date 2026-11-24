@@ -267,10 +267,12 @@ for (const spec of opt.assets) {
 if (opt.subtitle) board.subtitleAuto = false;
 if (!board.subtitle || board.subtitleAuto !== false) {
   board.subtitleAuto = true;
-  const one = board.images[0], nv = board.images.filter((im) => im.type === "video").length, ni = board.images.length - nv;
+  // A board of one file says what it is; a board of several says nothing beside its name (its tabs show the files): a
+  // count of images and videos took the name's room.
+  const one = board.images[0];
   board.subtitle = board.images.length === 1
     ? (one.type === "video" ? `${one.label} · ${one.w} × ${one.h} · ${one.dur.toFixed(1)} s at ${one.fps} fps` : `${one.label} · ${one.w} × ${one.h} px`)
-    : [ni ? ni + " image" + (ni > 1 ? "s" : "") : "", nv ? nv + " video" + (nv > 1 ? "s" : "") : ""].filter(Boolean).join(" · ");
+    : "";
 }
 
 // ---------- page ----------

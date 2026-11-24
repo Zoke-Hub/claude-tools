@@ -51,6 +51,7 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(-
 .brand h1 { margin: 0; min-width: 0; font: 500 21px/1.2 var(--f-display); letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brand p { margin: 0; flex: none; color: var(--muted); font: 12px/1.3 var(--f-mono); white-space: nowrap; }
 .brand .by { font: 500 10px/1.3 var(--f-mono); letter-spacing: .14em; text-transform: uppercase; opacity: .75; }
+.brand .sub:empty { display: none; }                                      /* a board of several files has no subtitle */
 .top #save { flex: none; margin-left: auto; }
 
 /* the tool bar sits on the frame's top edge, in the frame's own dark */

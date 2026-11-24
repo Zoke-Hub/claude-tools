@@ -10,7 +10,7 @@ import { chatFiles } from '../hooks/pack'
 import { freeNumbers } from '../hooks/sync'
 import { normaliseChunk } from '../hooks/store'
 import type { ChunkRecord, Ledger, PickerView, TaskList } from '../types'
-import { callTool, DIR, HOME, mountPanel, openChat, PACKS, packUpNow, saved, savedView, seed, stubEngine, start, talk } from './engine'
+import { callTool, DIR, entry, file, HOME, isSorting, mountPanel, openChat, PACKS, packUpNow, saved, savedView, seed, stubEngine, start, talk } from './engine'
 import type { Engine } from './engine'
 
 // FolioPack's categories (Haiku's, with the rules for what it leaves out) and
@@ -18,8 +18,6 @@ import type { Engine } from './engine'
 // numbers its parts take where it is opened.
 
 const panel = ($: Engine) => mountPanel($, { columns: 110, rows: 60 })
-const entry = (name: string, kind: FsEntry['kind'], size = 0): FsEntry => ({ name, kind, size, mtimeMs: 0, isLink: false })
-const file = (name: string, size = 100) => entry(name, 'file', size)
 
 // A project of two animations' segment renders, the final renders, a script
 // and notes, one of them Folio's private file.
@@ -50,8 +48,6 @@ class Disk extends Map<string, string> {
     return super.get(path)
   }
 }
-
-const isSorting = (prompt: string) => prompt.includes('Sort these files into categories')
 
 // Haiku's answer for the project above, from the folder and file ids its
 // prompt gives; `isA19Out` leaves A19's renders to the rules.
@@ -423,10 +419,11 @@ test("a whole project's pack carries the other chats' tasks and ledgers too", as
   expect((JSON.parse(packed.get('chats/2/ledger.json')!) as Ledger).items[0]!.text).toBe('Shoot at 25 fps')
 })
 
-// A project of 300 folders of ten shots each: more than one batch.
-function shots(): Record<string, FsEntry[]> {
+// A project of 300 folders of ten shots each (or as many folders as asked):
+// more than one batch.
+function shots(folders = 300): Record<string, FsEntry[]> {
   const tree: Record<string, FsEntry[]> = { '/w': [entry('shots', 'dir')], '/w/shots': [] }
-  for (let d = 0; d < 300; d++) {
+  for (let d = 0; d < folders; d++) {
     tree['/w/shots']!.push(entry(`s${String(d).padStart(3, '0')}`, 'dir'))
     tree[`/w/shots/s${String(d).padStart(3, '0')}`] = Array.from({ length: 10 }, (_, f) => file(`frame_${f}.png`, 2000))
   }
@@ -446,28 +443,49 @@ test('sorting stops asking after two calls with no answer, and the rules place t
   await ui.unmount()
 })
 
-test('sorting asks no more after three minutes, and keeps what came', async ($, on) => {
-  let clock: { advance: (ms: number) => Promise<unknown> } | null = null
+// The clock moves 200 s here, and the scan's one-second redraw timer ticks
+// through all of it, so it takes longer than most.
+test('sorting asks no more after three minutes, and keeps what came', { timeoutMs: 15_000 }, async ($, on) => {
+  // Each answer comes when the test lets it, so the clock between asks is the test's own.
+  const waiting: Array<() => void> = []
+  const askedAt: number[] = []
+  const answerAll = () => waiting.splice(0).forEach(go => go())
   const engine = stubEngine(on, {
-    tree: shots(),
+    tree: shots(600),
     exists: () => false,
     model: async p => {
       if (!isSorting(p)) return null
-      // Each answer takes 200 seconds.
-      await clock?.advance(200_000)
+      askedAt.push(engine.clock.now())
+      await new Promise<void>(go => waiting.push(go))
 
       return JSON.stringify({ categories: [{ path: ['Shots'], about: '', members: [...p.matchAll(/^d(\d+) /gm)].map(m => `d${m[1]}`) }] })
     },
   })
-  clock = engine.clock
   await start($)
   const ui = await panel($)
-  await ui.press({ key: 'folio-pack' })
-  for (let i = 0; i < 10 && !(await ui.find({ key: 'scope-project' })); i++) await engine.clock.advance(1000)
+  const t0 = engine.clock.now()
+  void ui.press({ key: 'folio-pack' })
+  const settle = async (n: number) => {
+    for (let i = 0; i < 60 && askedAt.length < n; i++) await engine.clock.advance(50)
+  }
+  // The first batch is asked alone. Its answer comes 100 s in, and the next
+  // four are asked together.
+  await settle(1)
+  expect(askedAt).toHaveLength(1)
+  await engine.clock.advance(100_000)
+  answerAll()
+  await settle(5)
+  expect(askedAt).toHaveLength(5)
+  // Their answers come 200 s in, past the three minutes: no other batch is asked.
+  await engine.clock.advance(100_000)
+  answerAll()
+  for (let i = 0; i < 20 && !(await ui.find({ key: 'scope-project' })); i++) await engine.clock.advance(1000)
+  answerAll()
+  expect(askedAt.length).toBe(5)
+  expect(askedAt.every(at => at - t0 < 180_000)).toBe(true)
+  // The five answers that came are kept; the folders list every shot either way.
+  expect(Object.keys(JSON.parse(engine.files.get(categoriesPath(HOME, '/w'))!).batches)).toHaveLength(5)
   await ui.press({ key: 'scope-project' })
-  expect(engine.prompts.filter(isSorting)).toHaveLength(2)
-  // The two answers that came are kept; the folders list every shot either way.
-  expect(Object.keys(JSON.parse(engine.files.get(categoriesPath(HOME, '/w'))!).batches)).toHaveLength(2)
   expect(await ui.find({ type: 'Button', text: /^s000 · 10 / })).toBeTruthy()
   await ui.unmount()
 })

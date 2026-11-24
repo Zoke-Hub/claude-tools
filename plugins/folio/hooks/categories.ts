@@ -6,6 +6,7 @@ import type { EngineInterface } from 'claude-code'
 import { hash } from './chunks'
 import { logEvent } from './debug'
 import { base, relative, safeName } from './paths'
+import { inTurns } from './pool'
 import { redact } from './private'
 import type { Vault } from './private'
 import { folioDir, homeDir, privateVault, readJson } from './store'
@@ -83,6 +84,9 @@ const CALL_MS = 60_000
 // asks for those batches again.
 const SORT_MS = 180_000
 const MISSES_MOST = 2
+// Batches asked at once after the first, and files' starts read at once.
+const ASKS_AT_ONCE = 4
+const HEADS_AT_ONCE = 8
 // A category's names and its line, at most.
 const NAME_CHARS = 60
 const ABOUT_CHARS = 200
@@ -343,18 +347,33 @@ type Sorted = { categories: Category[]; batches: number; asked: number; reused: 
 // reused where a batch's listing is the same as when it was asked. Null when
 // no batch has an answer: the rules place everything. Each call is a line in
 // the log (task "categories"), and so is the whole run.
-export async function categorise($: EngineInterface, files: readonly ListedFile[], root: string, project = base(root)): Promise<Sorted | null> {
+export async function categorise(
+  $: EngineInterface,
+  files: readonly ListedFile[],
+  root: string,
+  {
+    isStopped = () => false,
+    // Told how many batches are done of how many, for FolioPack's loading bar:
+    // once the batches are made (the ones kept from last time already done),
+    // then as each ask ends.
+    onBatch = () => {},
+  }: { isStopped?: () => boolean; onBatch?: (done: number, total: number) => void } = {},
+): Promise<Sorted | null> {
   if (files.length === 0) return null
+  const project = base(root)
   const start = await $.clock.now()
   const heads = new Map<string, string>()
   const vault = { ...privateVault() }
-  for (const path of headsWanted(files, root)) {
+  // Read a few at once, then kept in the listing's order.
+  const read = await inTurns(headsWanted(files, root), HEADS_AT_ONCE, async path => {
     try {
-      heads.set(path, maskedHead(await $.fs.read(path), vault))
+      return [path, await $.fs.read(path)] as const
     } catch {
       // A file that can't be read as text is listed without its start.
+      return null
     }
-  }
+  })
+  for (const r of read) if (r !== null) heads.set(r[0], maskedHead(r[1], vault))
   const all = listingBatches(files, root, heads, vault)
   const batches = all.slice(0, MAX_BATCHES)
   const path = categoriesPath(await homeDir($), root)
@@ -363,32 +382,61 @@ export async function categorise($: EngineInterface, files: readonly ListedFile[
   const kept: Record<string, Answer[]> = {}
   const wasFailed = saved?.version === CATEGORY_VERSION && saved.root === root && typeof saved.failed === 'object' && saved.failed !== null ? saved.failed : {}
   const failed: Record<string, number> = {}
-  const found: Category[] = []
   let waiting = 0
   let asked = 0
   let reused = 0
   let answered = 0
   let misses = 0
+  // Set once misses reach MISSES_MOST and never reset: no new ask starts after
+  // that, even when an ask already running answers later.
+  let isUnreachable = false
+  // Each batch's answer: kept from last time, or asked for now.
+  const answers: Array<Answer[] | null> = batches.map(() => null)
+  const toAsk: number[] = []
   for (const [i, b] of batches.entries()) {
-    let answer: Answer[] | null = Array.isArray(old[b.sig]) ? answerOf({ categories: old[b.sig] }, b) : null
+    const answer: Answer[] | null = Array.isArray(old[b.sig]) ? answerOf({ categories: old[b.sig] }, b) : null
     const failedAt = wasFailed[b.sig]
-    if (answer !== null) reused += 1
-    else if (typeof failedAt === 'number' && start - failedAt < RETRY_MS) {
+    if (answer !== null) {
+      reused += 1
+      answers[i] = answer
+    } else if (typeof failedAt === 'number' && start - failedAt < RETRY_MS) {
       // No answer last time and the same files: the rules place them for now.
       failed[b.sig] = failedAt
       waiting += 1
-    } else if (misses < MISSES_MOST && (await $.clock.now()) - start < SORT_MS) {
-      asked += 1
-      const json = await complete($, 'categories', SYSTEM, categoryPrompt(project, b, found, i + 1, batches.length), ANSWER_TOKENS, CALL_MS, EFFORT)
-      misses = json === null ? misses + 1 : 0
-      answer = answerOf(json, b)
-      if (answer !== null) answered += 1
-      else failed[b.sig] = start
-    }
-    if (answer === null) continue
-    kept[b.sig] = answer
-    mergeInto(found, filesOfAnswer(answer, b, root))
+    } else toAsk.push(i)
   }
+  let done = batches.length - toAsk.length
+  onBatch(done, batches.length)
+  // The categories named so far, in the batches' order, so each new ask uses
+  // the same names.
+  const named = () => {
+    const so: Category[] = []
+    for (const [i, a] of answers.entries()) if (a !== null) mergeInto(so, filesOfAnswer(a, batches[i]!, root))
+
+    return so
+  }
+  const ask = async (i: number) => {
+    if (isUnreachable || isStopped() || (await $.clock.now()) - start >= SORT_MS) return
+    asked += 1
+    const b = batches[i]!
+    const json = await complete($, 'categories', SYSTEM, categoryPrompt(project, b, named(), i + 1, batches.length), ANSWER_TOKENS, CALL_MS, EFFORT)
+    misses = json === null ? misses + 1 : 0
+    if (misses >= MISSES_MOST) isUnreachable = true
+    const answer = answerOf(json, b)
+    if (answer !== null) {
+      answered += 1
+      answers[i] = answer
+    } else failed[b.sig] = start
+    onBatch(++done, batches.length)
+  }
+  // One at a time until Haiku answers, so the others build on the names it
+  // gives and an unreachable Haiku is asked only twice; then the rest a few at
+  // once (one by one, eight took three minutes).
+  let next = 0
+  while (next < toAsk.length && answered === 0 && !isUnreachable) await ask(toAsk[next++]!)
+  await inTurns(toAsk.slice(next), ASKS_AT_ONCE, ask)
+  const found = named()
+  for (const [i, a] of answers.entries()) if (a !== null) kept[batches[i]!.sig] = a
   // Only this listing's answers are kept: a batch whose files changed is asked again.
   const sameKeys = (a: object, b: object) => Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => k in b)
   if (!sameKeys(kept, old) || !sameKeys(failed, wasFailed)) {

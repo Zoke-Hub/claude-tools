@@ -242,7 +242,7 @@ export function readLayout($: EngineInterface, cwd: string): void {
     if (!isProject(root, home)) return null
     // Folders set aside are not gone into; a read cut short by the scan's limit
     // could take a part of the project for its layout, so it gives no note.
-    const { files, isCut } = await walk($, root, ASIDE_DIR)
+    const { files, isCut } = await walk($, root, { skip: ASIDE_DIR })
     const made = isCut ? null : placesIn(files, root)
     await $.fs.write(savedPath(home, root), `${JSON.stringify({ places: made, at: Date.now() })}\n`).catch(() => undefined)
 

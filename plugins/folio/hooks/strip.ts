@@ -3,7 +3,10 @@
 
 import type { SessionMessage } from 'claude-code'
 
-import { TRIM_MARK } from './chunks'
+import { countText, escapeRegExp, TRIM_MARK } from './chunks'
+
+// The tool this mod gives Claude, as the model sees it.
+export const RECALL_TOOL = 'mcp__folio__recall'
 
 // The stripped stage (3.2, F8, section 7): a part between word for word and
 // folded. Zoke's words and Claude's words stay exactly as they are. Each big
@@ -28,14 +31,15 @@ export function isStripNote(text: string): boolean {
   return text.startsWith(STRIP_MARK) || text.startsWith(TRIM_MARK)
 }
 
-// A count with its thousands marked: 12,345.
-function count(n: number): string {
-  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-}
+// How every note ends: the part to recall, around its number. The guard
+// (WHOLE_NOTE) is built from the same words, so it matches whatever they say.
+const TAIL_START = 'Recall part'
+const TAIL_END = "for it word for word; don't rebuild it from memory.]"
+const recallTail = (part: number) => `${TAIL_START} ${part} ${TAIL_END}`
 
 // The note in place of one of an input's long values.
 export function inputNote(chars: number, part: number): string {
-  return `${STRIP_MARK} input to save room: ${count(chars)} characters. Recall part ${part} for it word for word; don't rebuild it from memory.]`
+  return `${STRIP_MARK} input to save room: ${countText(chars)} characters. ${recallTail(part)}`
 }
 
 // The note in place of a big result: the same words, with the tool and the
@@ -43,7 +47,7 @@ export function inputNote(chars: number, part: number): string {
 export function resultNote(tool: string, text: string, part: number): string {
   const first = text.split('\n').find(l => l.trim() !== '') ?? ''
 
-  return `${STRIP_MARK} ${tool} result to save room: ${count(text.length)} characters. It began: "${first.slice(0, 160)}". Recall part ${part} for it word for word; don't rebuild it from memory.]`
+  return `${STRIP_MARK} ${tool} result to save room: ${countText(text.length)} characters. It began: "${first.slice(0, 160)}". ${recallTail(part)}`
 }
 
 // Whether an input still holds something a strip would take: its JSON is big
@@ -102,7 +106,7 @@ export function stripInput(input: Record<string, unknown>, part: number): { inpu
 // stood, and can take one for the call's text and write it into a new call:
 // the note then reaches whoever gets the call (an agent's brief, a file), who
 // can't recall it, and the words were never written anywhere.
-const WHOLE_NOTE = /\[Folio stripped this [^\]\n]{1,80}? to save room: [\d,]+ characters\.[\s\S]{0,400}?Recall part (\d+) for it word for word; don't rebuild it from memory\.\]/
+const WHOLE_NOTE = new RegExp(`${escapeRegExp(STRIP_MARK)} [^\\]\\n]{1,80}? to save room: [\\d,]+ characters\\.[\\s\\S]{0,400}?${escapeRegExp(TAIL_START)} (\\d+) ${escapeRegExp(TAIL_END)}`)
 
 /** The part a whole note in a call's input names, the first one found; null when the input holds none. */
 export function noteInCall(input: unknown): number | null {
@@ -131,7 +135,7 @@ export function noteRefusal(tool: string, input: unknown): string | null {
   const part = noteInCall(input)
   if (part === null) return null
 
-  return `Folio refused this call: its input holds a Folio note ("${STRIP_MARK} … Recall part ${part} …]") where text should be. A note only stands in, in your own context, for words shortened there; it is not the text, and whoever gets this call can't recall it. Write the text out in full and call again. If you need the words the note stood for, get them first with mcp__folio__recall (part ${part}).`
+  return `Folio refused this call: its input holds a Folio note ("${STRIP_MARK} … Recall part ${part} …]") where text should be. A note only stands in, in your own context, for words shortened there; it is not the text, and whoever gets this call can't recall it. Write the text out in full and call again. If you need the words the note stood for, get them first with ${RECALL_TOOL} (part ${part}).`
 }
 
 // Every text value of a value through `fn` (a mask, or the reverse), its

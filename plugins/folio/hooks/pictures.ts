@@ -66,6 +66,14 @@ export const ACTIVITY_ICONS = {
   // A FolioPack packed or opened: a box.
   pack: icon('<path d="M2.5 5L8 2.5 13.5 5v6.5L8 14l-5.5-2.5z"/><path d="M2.5 5L8 7.5 13.5 5M8 7.5V14"/>'),
 } as const
+// FolioPack's loading steps: a step done is Recent activity's tick, one
+// running a dim ring a quarter drawn in the bars' blue, one waiting the dim
+// ring alone.
+export const STEP_ICONS = {
+  done: ACTIVITY_ICONS.choice,
+  running: icon(`<circle cx="8" cy="8" r="5.75" stroke="${DIM}"/><path d="M8 2.25a5.75 5.75 0 0 1 5.75 5.75" stroke="${FULL}"/>`),
+  waiting: icon(`<circle cx="8" cy="8" r="5.75" stroke="${DIM}"/>`),
+}
 const COMPACTED = DIM
 export function miniSvg(share: number, color: string): string {
   const width = 90
@@ -81,7 +89,8 @@ export function miniSvg(share: number, color: string): string {
 // A part of the work the person marked fine to fold: still in the chat, it
 // goes with the next fold.
 const FINE = '#8d9bb0'
-const ROOM = 'rgba(138,138,138,0.22)'
+// The context bar's room left, and FolioPack's loading bar's track.
+export const ROOM = 'rgba(138,138,138,0.22)'
 
 // The context bar, in real tokens.
 // The work runs from the left: word for word, stripped, then what is fine to
