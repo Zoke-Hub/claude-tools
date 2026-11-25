@@ -23,6 +23,15 @@
 //                     file, the index.html just published (run it right after each publish); with one, a copy of the
 //                     published page saved by the Artifact tool's read (url, path "index.html"), for a board that has
 //                     no "page" yet.
+//   --chat "<name> [<ref>]"   the chat running this, as ListAgents names it ("This session is <name> [<ref>]"): pass it on
+//                     every run. The board records it, and the files this run adds are that chat's tabs: a Send names
+//                     each tab's chat, and each chat works only on its own. The first chat recorded on a board takes the
+//                     files posted before chats were recorded.
+//   --find            lists the boards in this project (the chat's working folder, or --project <folder>) from every
+//                     chat on this computer, with each board's chats and their tabs: before a chat's first board, to offer
+//                     posting in a board another open chat is using (see SKILL.md, "A board another chat is using").
+//
+// Every run records the board in ~/.claude/markroom/boards.json (its folder, title, url and project), which --find reads.
 //
 // Images and videos can share one board (each is a tab). A video (.mp4 .mov .m4v .webm .mkv) is remuxed with
 // faststart, or re-encoded to H.264 (max 1920 px wide, CRF 23 -> 26 -> 29 -> 32) until it fits the 15 MB publish
@@ -34,6 +43,7 @@
 // (a new review round) and prints only the new image files. No dependencies: image sizes are read from the file
 // headers; conversion uses `sips` (macOS) or ffmpeg.
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 import { fileURLToPath } from "url";
@@ -47,7 +57,8 @@ const MAX_SIDE = 16000;                 // browsers draw bigger images unreliabl
 
 // ---------- args ----------
 const args = process.argv.slice(2);
-const opt = { out: null, title: null, subtitle: null, key: null, append: false, group: null, live: false, assets: [], images: [], link: null, published: null };
+const opt = { out: null, title: null, subtitle: null, key: null, append: false, group: null, live: false, assets: [], images: [], link: null, published: null,
+  chat: null, project: null, find: false };
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === "--out") opt.out = args[++i];
@@ -61,11 +72,73 @@ for (let i = 0; i < args.length; i++) {
   else if (a === "--asset") opt.assets.push(args[++i]);
   else if (a === "--link") opt.link = args[++i];
   else if (a === "--published") opt.published = args[i + 1] && !args[i + 1].startsWith("--") ? args[++i] : true;
+  else if (a === "--chat") opt.chat = args[++i];
+  else if (a === "--project") opt.project = args[++i];
+  else if (a === "--find") opt.find = true;
   else if (a === "-h" || a === "--help") {   // the header comment: every line before the first import
     const lines = fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
     console.log(lines.slice(1, lines.findIndex((l) => l.startsWith("import "))).join("\n")); process.exit(0);
   }
   else opt.images.push(a);
+}
+// ---------- chats: which chat posted each tab, and the boards on this computer ----------
+// The chat's key is its session id where the shell has it (CLAUDE_CODE_SESSION_ID), else its ref; its name and ref are the
+// address other chats message it by.
+function chatOf(s) {
+  if (!s || !s.trim()) return null;
+  const m = /^(.*?)\s*\[([0-9a-z]+)\]\s*$/i.exec(s.trim()), name = (m ? m[1] : s).trim(), ref = m ? m[2] : "";
+  return { key: process.env.CLAUDE_CODE_SESSION_ID || ref || name, name, ref };
+}
+const me = chatOf(opt.chat);
+const project = path.resolve(opt.project || process.env.CLAUDE_PROJECT_DIR || process.cwd());
+// the chat is recorded on the board; the first chat recorded takes the files posted before chats were recorded
+function recordChat(b) {
+  if (!me) return;
+  b.chats = b.chats || {};
+  const first = !Object.keys(b.chats).length;
+  b.chats[me.key] = { name: me.name, ref: me.ref, last: new Date().toISOString() };
+  if (first) for (const im of b.images) if (!im.chat) im.chat = me.key;
+  if (!b.project) b.project = project;
+}
+const chatLabel = (b, key) => { const c = (b.chats || {})[key]; return c ? c.name + (c.ref ? " [" + c.ref + "]" : "") : ""; };
+// ~/.claude/markroom/boards.json: every board built on this computer, by folder (its board.json holds the rest), so a chat
+// can find the boards the other chats in its project use
+const REGISTRY = path.join(os.homedir(), ".claude", "markroom", "boards.json");
+function readRegistry() { try { const r = JSON.parse(fs.readFileSync(REGISTRY, "utf8")); return r && r.boards ? r : { boards: {} }; } catch { return { boards: {} }; } }
+function saveRegistry(r) { fs.mkdirSync(path.dirname(REGISTRY), { recursive: true }); fs.writeFileSync(REGISTRY, JSON.stringify(r, null, 2) + "\n"); }
+function register(b, dir) {
+  const r = readRegistry();
+  r.boards[dir] = { title: b.title, url: b.url || "", project: b.project || project, updated: new Date().toISOString() };
+  saveRegistry(r);
+}
+// ---------- --find: the boards in this project, with their chats and each chat's tabs ----------
+if (opt.find) {
+  const norm = (p) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const inside = (a, b) => { a = norm(a); b = norm(b); return a === b || a.startsWith(b.endsWith(path.sep) ? b : b + path.sep); };
+  const found = [], reg = readRegistry(), gone = [];
+  for (const [dir, e] of Object.entries(reg.boards)) {
+    if (!fs.existsSync(path.join(dir, "board.json"))) { gone.push(dir); continue; }   // a board folder since removed: off the list
+    let b; try { b = JSON.parse(fs.readFileSync(path.join(dir, "board.json"), "utf8")); } catch { continue; }
+    const p = b.project || e.project || dir;
+    if (inside(project, p) || inside(p, project) || inside(dir, project)) found.push([dir, b, e.updated || ""]);
+  }
+  if (gone.length) { for (const d of gone) delete reg.boards[d]; saveRegistry(reg); }
+  found.sort((x, y) => (y[2] > x[2] ? 1 : -1));
+  if (!found.length) { console.log(`No boards in this project (${project}) yet: make a new one.`); process.exit(0); }
+  console.log(`Boards in this project (${project}), newest first:`);
+  found.forEach(([dir, b, at], i) => {
+    const when = at ? new Date(at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "unknown";
+    console.log(`${i + 1}. ${b.title} · ${b.url || "not published yet"} · last built ${when}\n   folder: ${dir}`);
+    const tabs = (key) => [...new Set(b.images.filter((im) => (im.chat || "") === key).map((im) => im.group || im.label))];
+    for (const key of Object.keys(b.chats || {})) {
+      const mine = me ? key === me.key : key === process.env.CLAUDE_CODE_SESSION_ID;
+      console.log(`   - ${chatLabel(b, key)}${mine ? " (this chat)" : ""}: ${tabs(key).map((t) => `"${t}"`).join(", ") || "no tabs yet"}`);
+    }
+    const none = tabs("");
+    if (none.length) console.log(`   - no chat recorded: ${none.map((t) => `"${t}"`).join(", ")}`);
+  });
+  console.log("\nA chat is open when ListAgents lists it (match its [ref]). Offer only the boards with an open chat other than this one.");
+  process.exit(0);
 }
 // ---------- links: which page the published board runs, and the link form it reads ----------
 // A page's version: its markroom-page stamp, else 2 when it reads #open- links, else 1; null when it isn't a MarkRoom page.
@@ -82,7 +155,7 @@ if (opt.link || opt.published) {
     const src = opt.published === true ? path.join(path.dirname(file), "index.html") : path.resolve(opt.published);
     const page = fs.existsSync(src) ? pageOf(fs.readFileSync(src, "utf8")) : null;
     if (page == null) { console.error(`${src} isn't a MarkRoom page.`); process.exit(1); }
-    b.page = page; save();
+    b.page = page; recordChat(b); save(); register(b, path.dirname(file));
     console.log(`Recorded: the published board runs MarkRoom page ${page}, so its links end in ${page >= 2 ? "#open-<file id>" : "#<file id>"}.`);
   }
   if (opt.link) {
@@ -200,10 +273,19 @@ if (opt.append && fs.existsSync(boardFile)) {
 }
 board.key = board.key || opt.key || slug(board.title);
 if (opt.live && !board.url) { console.error("--live needs a published board (board.json has no url): publish it first."); process.exit(1); }
+recordChat(board);
+// the chat new files belong to: this run's --chat; without it, the board's only chat. On a board several chats post to, a
+// file with no chat would be no chat's to work on, so --chat is needed there.
+const chatKeys = Object.keys(board.chats || {});
+if (!me && opt.images.length && chatKeys.length > 1) {
+  console.error(`Several chats post to this board (${chatKeys.map((k) => chatLabel(board, k)).join(", ")}): add --chat "<name> [<ref>]" so the new files are this chat's.`);
+  process.exit(1);
+}
+const poster = me ? me.key : chatKeys.length === 1 ? chatKeys[0] : null;
 
 const added = [];
-// what every new round gets, image or video: its tab group, the live flag, and a place on the board
-const addRound = (im) => { if (opt.group) im.group = opt.group; if (opt.for) im.for = opt.for; if (opt.live) im.live = true; board.images.push(im); added.push(im); };
+// what every new round gets, image or video: its tab group, the chat that posted it, the live flag, and a place on the board
+const addRound = (im) => { if (opt.group) im.group = opt.group; if (opt.for) im.for = opt.for; if (poster) im.chat = poster; if (opt.live) im.live = true; board.images.push(im); added.push(im); };
 for (const spec of opt.images) {
   const eq = spec.lastIndexOf("=");
   const src = path.resolve(eq > 0 && fs.existsSync(spec.slice(0, eq)) ? spec.slice(0, eq) : spec);
@@ -249,8 +331,8 @@ if (opt.for && added.length) {
 
 // ---------- live rounds, step 2: the uploaded asset ids ----------
 const ASSET_ID = /^[0-9a-f]{32}$/;
-// the `rounds` doc gives the files as asset ids
-const roundDoc = (im) => entryOf(im, (x, k) => (k === "src" ? x.asset : x.posterAsset || ""));
+// the `rounds` doc gives the files as asset ids, and the name of the chat that posted it
+const roundDoc = (im) => Object.assign(entryOf(im, (x, k) => (k === "src" ? x.asset : x.posterAsset || "")), im.chat ? { chatName: chatLabel(board, im.chat) } : {});
 const liveDocs = [];
 for (const spec of opt.assets) {
   const [rid, ids = ""] = spec.split("="), [a, pa] = ids.split(",");
@@ -282,6 +364,8 @@ const inPage = board.images.filter((im) => !im.live || im.asset);
 // a baked-in live round is served from the asset store; the rest from img/. The subtitle goes in through __SUBTITLE__.
 const pageSrc = (im, k) => (!im.asset ? im[k] : k === "src" ? "/_blob/" + im.asset : im.posterAsset ? "/_blob/" + im.posterAsset : "");
 const cfg = { title: board.title, key: board.key, url: board.url || "", images: inPage.map((im) => entryOf(im, pageSrc)) };
+// the chats posting to this board, by key, with the name a Send gives each tab's chat
+if (board.chats && Object.keys(board.chats).length) cfg.chats = Object.fromEntries(Object.keys(board.chats).map((k) => [k, chatLabel(board, k)]));
 // the newest render (the last one added): the board opens on it for every viewer after each new round, and its tab
 // reopens if it had been closed
 const start = inPage.reduce((a, im) => (!a || (im.added || "") >= (a.added || "") ? im : a), null);
@@ -290,10 +374,11 @@ const first = cfg.images.find((i) => i.id === start.id);
 const html = fillTemplate(templateHtml, cfg, { title: board.title, subtitle: board.subtitle, firstSrc: first.poster || first.src });
 fs.writeFileSync(path.join(out, "index.html"), html);
 fs.writeFileSync(boardFile, JSON.stringify(board, null, 2) + "\n");
+register(board, out);
 
 // ---------- publish hints ----------
 const files = Object.fromEntries(added.flatMap((im) => [[im.src, path.join(out, im.src)], ...(im.poster ? [[im.poster, path.join(out, im.poster)]] : [])]));
-console.log(`Board: ${board.title} (${board.subtitle})`);
+console.log(`Board: ${board.title}${board.subtitle ? ` (${board.subtitle})` : ""}`);
 for (const im of added) console.log(`  + ${im.id}: ${im.type === "video" ? "video · " : ""}${im.label} · ${im.w}×${im.h}${im.type === "video" ? ` · ${im.dur}s @ ${im.fps}fps` : ""} · ${(fs.statSync(path.join(out, im.src)).size / 1048576).toFixed(1)} MB${im.scale !== 1 ? ` · scaled ${im.scale}` : ""}`);
 const CAPS = '{"db": {}, "user": {"scopes": ["profile"]}, "comments": {}, "assets": {}}';   // comments: Send to Claude; assets: live rounds and pictures pasted into notes
 // The Claude app's artifact runtime every board is published on. On 0.2.98 and 0.2.99 the app refuses Send notes to Claude
@@ -321,4 +406,4 @@ console.log("  files: " + JSON.stringify(files));
 console.log(board.url
   ? `  url: ${board.url}  (redeploy: same file_path; pass url from another conversation; omit icon)\n  capabilities: ${CAPS}  (pass the full set on EVERY publish: a board missing "comments" can't send to Claude)\n  contract: "${RUNTIME}"  (on EVERY publish: Send notes to Claude fails on the app's newer runtime)`
   : `  capabilities: ${CAPS}\n  contract: "${RUNTIME}"  (Send notes to Claude fails on the app's newer runtime)\n  icon: "pencil"\nThen save the artifact URL into board.json ("url") so later rounds reuse it.`);
-console.log(`Right after it is published, record the page it runs (for the links: --link <file id>):\n  node "${fileURLToPath(import.meta.url)}" --out "${out}" --published`);
+console.log(`Right after it is published, record the page it runs (for the links: --link <file id>):\n  node "${fileURLToPath(import.meta.url)}" --out "${out}" --published${me ? ` --chat "${opt.chat.trim()}"` : ""}`);

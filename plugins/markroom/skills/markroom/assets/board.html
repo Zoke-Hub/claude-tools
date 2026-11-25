@@ -539,6 +539,11 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
 (() => {
   const CFG = window.MARKROOM_CFG || { images: [] };
   const IMAGES = CFG.images || [];
+  // The chat that posted each file (build_board.mjs --chat): its key on the file, its name in CFG.chats, or for a live
+  // round posted since the page was published, in the round itself. A Send names each file's chat when several chats post
+  // to the board, and each chat works only on its own files.
+  const roundChats = {};
+  const chatName = (im) => (im && im.chat && ((CFG.chats || {})[im.chat] || roundChats[im.chat])) || "";
   const COLORS = { red: "#E0362C", blue: "#1F66E0", green: "#13925A", ink: "#1F1C1A" };
   const COLOR_NAMES = { red: "Red", blue: "Blue", green: "Green", ink: "Black" };
   const KIND = { pin: "Marker", arrow: "Arrow", box: "Box", pen: "Drawing", text: "Text" };
@@ -606,14 +611,20 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   const ovMeta = new Map();                    // image id -> its save record and Claude's side of it (ovRec)
   function renderOverallMeta() {
     if (!cur) return;
-    const m = ovRec(cur.id), txt = (overall.get(cur.id) || "").trim();
-    const st = $("#ovState"); st.hidden = !txt; st.textContent = m.status === "done" ? "Done" : "Open"; st.classList.toggle("done", m.status === "done");
+    const m = ovRec(cur.id), has = ovHas(cur.id);              // words or pictures: a note, with its state and Mark done
+    const st = $("#ovState"); st.hidden = !has; st.textContent = m.status === "done" ? "Done" : "Open"; st.classList.toggle("done", m.status === "done");
     const r = $("#ovReply"); r.hidden = !m.reply; r.querySelector("span").textContent = m.reply || "";
-    $("#ovFoot").hidden = !txt || RO || mode !== "db"; $("#ovToggle").textContent = m.status === "done" ? "Reopen" : "Mark done";
+    $("#ovFoot").hidden = !has || RO || mode !== "db"; $("#ovToggle").textContent = m.status === "done" ? "Reopen" : "Mark done";
     paintOvSaid(m.said);
     paintPics($("#ovPics"), m.atts, { ov: cur.id });
     renderSendBtn();                                           // the whole-image box counts as an open note
   }
+  // a file's whole-file box holds an open note: it has words or pictures, and isn't marked done
+  const ovHas = (id) => !!((overall.get(id) || "").trim() || ((ovMeta.get(id) || {}).atts || []).length);
+  const ovOpen = (id) => ovHas(id) && (ovMeta.get(id) || {}).status !== "done";
+  // a whole-file box changed (typed, pictures, done, a reply from Claude): the box and its tab's count. Opening a file
+  // redraws the tabs anyway, so it uses renderOverallMeta alone.
+  function renderOv() { renderOverallMeta(); renderTabs(); }
 
   const imgById = (id) => IMAGES.find((i) => i.id === id) || IMAGES[0];
   const wide = () => W / H >= 2.2;
@@ -888,13 +899,14 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     }
     for (const b of nav.querySelectorAll(".imgtab")) {
       const gid = b.dataset.group, ids = versionsOf(gid).map((im) => im.id);
-      const list = [...marks.values()].filter((m) => ids.includes(m.img)), open = list.filter((m) => m.status !== "done").length;
-      b.querySelector(".cnt").textContent = list.length ? open + " open" : "";
+      const list = [...marks.values()].filter((m) => ids.includes(m.img)), ovs = ids.filter(ovHas);
+      const open = list.filter((m) => m.status !== "done").length + ovs.filter(ovOpen).length;
+      b.querySelector(".cnt").textContent = list.length || ovs.length ? open + " open" : "";
       b.setAttribute("aria-current", String(!!cur && groupOf(cur) === gid));
     }
     const sel = $("#versSel");
     if (vers.length > 1) {
-      const want = vers.slice().reverse().map((im, i) => { const n = [...marks.values()].filter((m) => m.img === im.id && m.status !== "done").length;
+      const want = vers.slice().reverse().map((im, i) => { const n = [...marks.values()].filter((m) => m.img === im.id && m.status !== "done").length + (ovOpen(im.id) ? 1 : 0);
         return `<option value="${esc(im.id)}">${esc(im.label + (i === 0 ? " · latest" : "") + (n ? " · " + n + " open" : ""))}</option>`; }).join("");
       if (sel.innerHTML !== want) sel.innerHTML = want;
       sel.value = cur.id;
@@ -953,7 +965,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (stillConnecting()) return;
     if (visGroups().length < 2) { toast("A board keeps at least one tab open."); return; }
     const ids = versionsOf(gid).map((im) => im.id), n = ids.length, name = tabName(gid);
-    const open = [...marks.values()].filter((m) => ids.includes(m.img) && m.status !== "done").length;
+    const open = [...marks.values()].filter((m) => ids.includes(m.img) && m.status !== "done").length + ids.filter(ovOpen).length;
     popDialog("close:" + gid, "Close this tab?", `<b>Close “${esc(name)}”?</b>`
       + `<p>It disappears for everyone on this board${n > 1 ? ", with all " + n + " versions" : ""}. ${open ? "Its " + open + " open note" + (open > 1 ? "s stay" : " stays") + " saved" : "Its notes stay saved"}, and <b>Closed tabs</b> brings it back.</p>`,
       [{ act: "cancel", text: "Cancel" }, { act: "close", text: "Close tab", primary: true, run: () => setTabClosed(gid, true) }], anchor);
@@ -1516,7 +1528,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   function setOverallPics(id, atts) {
     ovRec(id).atts = atts;
     ovSave(id, { atts });
-    renderOverallMeta();
+    renderOv();
   }
   document.addEventListener("click", (e) => {
     const im = e.target.closest && e.target.closest("[data-pic]");
@@ -1931,12 +1943,12 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (!cur || RO) return;
     overall.set(cur.id, overallEl.value);
     ovSave(cur.id, { text: overallEl.value }, 600);
-    ovSaid(cur.id, "saving"); renderOverallMeta();
+    ovSaid(cur.id, "saving"); renderOv();
   });
   $("#ovToggle").addEventListener("click", () => {
     if (!cur || mode !== "db") return;
     const id = cur.id, m = ovRec(id);
-    m.status = m.status === "done" ? "open" : "done"; renderOverallMeta();
+    m.status = m.status === "done" ? "open" : "done"; renderOv();
     ovSave(id, { status: m.status });
   });
 
@@ -1965,7 +1977,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (!db) {
       mode = "local"; offline = failedDb;
       if (offline) renderAll(); else loadLocal();               // after a failed connect only this visit's notes show (see saveLocal)
-      flushAll(); renderOverallMeta(); showSave();
+      flushAll(); renderOv(); showSave();
       toast(offline ? "Couldn't reach this board's notes. Notes you make now stay in this browser only; reload to try again."
         : "Notes are kept in this browser only here. Use Copy all notes to send them to Claude.");
       return;
@@ -2035,7 +2047,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     }
     if (!ovSeen && !(snap.metadata && snap.metadata.fromCache)) { ovSeen = true; for (const m of ovMeta.values()) if (m.exists === "unknown") m.exists = "no"; }
     if (cur && document.activeElement !== overallEl) overallEl.value = overall.get(cur.id) || "";
-    renderOverallMeta();
+    renderOv();
   }
   function onTabs(snap) {
     const first = !tabsSeen; tabsSeen = true;
@@ -2075,6 +2087,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const im = { id, label: String(d.label || id), src: blobUrl(d.src), w, h, added: String(d.added || ""), live: true };
     if (d.group) im.group = String(d.group);
     if (d.for) im.for = String(d.for);
+    if (d.chat) { im.chat = String(d.chat); if (d.chatName) roundChats[im.chat] = String(d.chatName); }
     if (d.type === "video") Object.assign(im, { type: "video", poster: blobUrl(d.poster), fps: +d.fps || 25, dur: +d.dur || 0 }, Array.isArray(d.beats) ? { beats: d.beats } : {});
     return im;
   }
@@ -2476,7 +2489,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     const ims = all ? IMAGES.filter((im) => tabShown(im.id)) : cur ? [cur] : [];
     const ids = ims.map((im) => im.id);
     const notes = sorted().filter((m) => m.id !== draftId && m.status !== "done" && ids.includes(m.img));
-    const ovs = ims.filter((im) => ((overall.get(im.id) || "").trim() || ((ovMeta.get(im.id) || {}).atts || []).length) && (ovMeta.get(im.id) || {}).status !== "done");
+    const ovs = ims.filter((im) => ovOpen(im.id));
     return { ims, notes, ovs };
   }
   function renderSendBtn() {
@@ -2491,16 +2504,21 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   const picsNote = (a) => (a && a.length ? " [+" + a.length + (a.length > 1 ? " pictures" : " picture") + "]" : "");
   function sendText(all) {
     const { ims, notes, ovs } = openSet(all);
+    // several chats post to this board: each file is named with its chat, and each chat takes only its own files
+    const chats = [...new Set(IMAGES.filter((im) => tabShown(im.id)).map(chatName).filter(Boolean))], many = chats.length > 1;
+    const by = (im) => (many ? " · chat: " + (chatName(im) || "not recorded") : "");
     const out = ["MarkRoom: please start working on the open notes " + (all ? "across this board" : "on this file") + ".",
       "Board: " + (CFG.title || "MarkRoom") + (CFG.url ? " · " + CFG.url : ""),
-      all ? "Files: every open tab (closed tabs left out)" : "File: " + tabTitle(cur) + " (id " + cur.id + ")",
-      "Open notes: " + notes.length + (ovs.length ? ", plus " + ovs.length + " whole-" + (ovs.length > 1 ? "file notes" : "file note") : ""), ""];
-    const tail = ["", "Read the marks from the board's database (markroom skill, Read the feedback), work on these notes only, then reply to and resolve each one when its change is made."];
+      all ? "Files: every open tab (closed tabs left out)" : "File: " + tabTitle(cur) + " (id " + cur.id + ")" + by(cur)]
+      .concat(many ? ["Chats on this board: " + chats.join(", ") + ". Each chat works only on the files it posted; the chat this reaches passes the others their files."] : [],
+        ["Open notes: " + notes.length + (ovs.length ? ", plus " + ovs.length + " whole-" + (ovs.length > 1 ? "file notes" : "file note") : ""), ""]);
+    const tail = ["", "Read the marks from the board's database (markroom skill, Read the feedback), work on these notes only" + (many ? ", on your own chat's files (pass each other chat its files: markroom skill, A board several chats post to)" : "")
+      + ", then reply to and resolve each one when its change is made."];
     const body = [];
     for (const im of ims) {
       const list = notes.filter((m) => m.img === im.id), ov = ovs.includes(im);
       if (!list.length && !ov) continue;
-      if (all) body.push("— " + tabTitle(im) + " (id " + im.id + ")");
+      if (all) body.push("— " + tabTitle(im) + " (id " + im.id + ")" + by(im));
       if (ov) body.push("Whole " + (isVid(im) ? "video" : "image") + ": " + clip(overall.get(im.id) || "(pictures only)", 220) + picsNote((ovMeta.get(im.id) || {}).atts));
       for (const m of list) body.push("#" + m.n + " at " + whereText(m, false) + ": " + clip(m.text || "(no comment, marks only)", 180) + picsNote(m.atts));
     }

@@ -3,6 +3,19 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-26 · MarkRoom (number unchanged)
+
+- **MarkRoom, one board for several chats:** before a chat makes its first board, it looks for boards that other open
+  chats in the same project are using and asks whether to post there or make a new board. A chat that joins adds its
+  files as tabs of its own and publishes the board once. Send to Claude names each tab's chat; the Claude app hands a
+  Send to one chat, which passes each other chat its part at once, and each chat works only on the tabs it posted. The board builder records which chat posted each file (`--chat`) and
+  lists a project's boards (`--find`) from `~/.claude/markroom/boards.json`.
+- **MarkRoom, whole-file notes counted on their tab:** a note in "Notes on the whole image" or "Notes on the whole
+  video" now counts as an open note on its tab in the tab row, in the Version list and in the close-tab message, the
+  same way the Send button already counted it. Marking it done or reopening it updates the count, and so does a reply
+  from Claude that marks it done. A whole-file note holding only pictures now shows its Open / Done state and the Mark
+  done link too.
+
 ## 2026-11-25 · PulseWise (number unchanged)
 
 - **PulseWise, points sized by Claude's estimate:** a point not yet done is drawn as big as Claude's estimate for it
