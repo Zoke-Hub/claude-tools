@@ -76,9 +76,14 @@ the turn, and in a short message too. Never open the board for the user: the lin
 | Draw | D | Freehand; every stroke is a mark |
 | Text | T | Click and type words onto the image. Enter places them, Shift + Enter adds a line, and a double-click edits them later |
 
-- Four colours, keys 1–4. One note can mix colours; the swatches in its comment box recolour all its marks.
+- Four colours, keys 1–4. One note can mix colours. A note takes its first mark's colour (a note with no marks, the
+  colour picked in the tool bar); the swatches in its comment box change the note's own colour (its number and its
+  marker on the timeline) and leave its marks as they are.
+- Clicking a mark picks its whole note (a drag moves all its marks); clicking one of its marks again picks that mark
+  alone (a drag moves just it; Esc goes back to the whole note).
 - Undo with ⌘Z / Ctrl+Z (it takes back the last mark, move or edit, wherever on the board it was made: a change on another
-  file opens that file first, a video at the note's moment, and a short notice names it). Delete removes the selected note.
+  file opens that file first, a video at the note's moment, and a short notice names it). Delete or Backspace removes
+  the picked mark, or the whole note when no single mark is picked.
 - The eye button hides all marks.
 
 **Notes: marks gather into one note until Done**
@@ -482,7 +487,9 @@ Database collections (the page subscribes to all five):
 - A tab with no `tabs` doc is open. The page reads `id` from the doc (falling back to matching the doc id), and if two docs
   name the same tab, the later `at` wins. Closing a tab changes nothing else on the board.
 - Coordinates are integers in published-image pixels.
-- The page writes only the field groups it changed: `text` + `edited`, `items` + `v`, `t` + `t2` + `tc`, `status`, or `atts`.
+- The page writes only the field groups it changed: `text` + `edited`, `items` + `v`, `color`, `t` + `t2` + `tc`, `status`,
+  or `atts`. `color` is the note's own colour (its number and its timeline marker; `null` or missing: its first mark's),
+  separate from each mark's `color` in `items`.
 - Only user ids are stored. Names come from `user.profiles()` at render time, and are shown only once there's more than one author.
 - Version 1 docs held one mark each (`kind`, `x`, `y`, `x2`, `y2`, `strokes: [{p}]` at the top, and a text mark's words in `text`).
   The page, `render_marks.py` and `snapshot_board.mjs` read them as a one-mark note. The page's first change rewrites the doc as

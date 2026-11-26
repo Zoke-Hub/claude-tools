@@ -15,6 +15,13 @@ date: the entries after the date a tool's copy was installed on a computer are n
   same way the Send button already counted it. Marking it done or reopening it updates the count, and so does a reply
   from Claude that marks it done. A whole-file note holding only pictures now shows its Open / Done state and the Mark
   done link too.
+- **MarkRoom, a note's colour:** a note written on a video with no marks takes the colour picked in the tool bar,
+  instead of always red; a note with marks still takes its first mark's colour. The colour swatches in the note's box
+  now work on every note: picking one changes the note's own colour (its number and its marker on the timeline) and
+  leaves its marks as they are. Undo takes it back.
+- **MarkRoom, one mark at a time:** clicking a mark picks its whole note; clicking one of its marks again picks that
+  mark alone, so a drag moves just it and Delete or Backspace removes just it (Undo brings it back). Esc goes back to
+  the whole note.
 
 ## 2026-11-25 · PulseWise (number unchanged)
 

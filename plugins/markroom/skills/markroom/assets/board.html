@@ -449,7 +449,7 @@ textarea::placeholder { color: var(--muted); }
       <div class="pics" id="popPics" hidden></div>
       <div class="pop-hint" id="popHint"></div>
       <div class="pop-foot">
-        <div class="swatches" id="popSw" role="group" aria-label="Colour of this note's marks"></div>
+        <div class="swatches" id="popSw" role="group" aria-label="Colour of this note"></div>
         <button class="link danger" id="popDel">Delete</button>
         <button class="btn primary" id="popSave">Save</button>
       </div>
@@ -546,6 +546,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   const chatName = (im) => (im && im.chat && ((CFG.chats || {})[im.chat] || roundChats[im.chat])) || "";
   const COLORS = { red: "#E0362C", blue: "#1F66E0", green: "#13925A", ink: "#1F1C1A" };
   const COLOR_NAMES = { red: "Red", blue: "Blue", green: "Green", ink: "Black" };
+  const okColor = (c) => (COLORS[c] ? c : "red");
   const KIND = { pin: "Marker", arrow: "Arrow", box: "Box", pen: "Drawing", text: "Text" };
   const KINDS = { pin: "Markers", arrow: "Arrows", box: "Boxes", pen: "Drawings", text: "Texts" };
   // Kept from the earlier name, so drafts saved in a viewer's browser carry over to rebuilt boards.
@@ -599,6 +600,11 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   let draftId = null;                          // video: the note being drawn or typed, kept out of the list until it is saved (Enter or Save in the note box)
   let activeId = null, ui = null;              // the note being made or edited; ui: "collect" (Done button showing) or "edit" (comment box open)
   let tdraft = null;                           // text being typed on the image: { id, i, x, y, color } (id null: a new text mark)
+  // one mark picked inside the note in hand by a second click on it: { id, i }. Cleared wherever the note in hand changes
+  // or closes (newNote, finish, deleteNote) and wherever its marks are renumbered (Undo, a mark removed).
+  let selMark = null;
+  // the picked mark's place in its note, or -1: counts only while that note is in hand and the mark is still there
+  const selIndex = (m) => (selMark && m && selMark.id === m.id && m.id === activeId && m.items[selMark.i] ? selMark.i : -1);
   let filter = "all", scope = "this", started = false, viewReady = false;
   const undo = [];
   // tomb: notes deleted here (copies arriving later are ignored); queues: one write chain per doc (`retries` holds the docs
@@ -657,7 +663,11 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     for (const it of m.items) n[it.kind] = (n[it.kind] || 0) + 1;
     return Object.entries(n).map(([k, c]) => (c > 1 ? c + " " + KINDS[k] : KIND[k])).join(" + ") || "Note";
   }
-  const noteColor = (m) => COLORS[(m.items[0] || {}).color] || COLORS.red;
+  // a note's colour (its number and its marker on the timeline): set when it is made, from its first mark or, with no
+  // marks, the colour picked in the tool bar; changed only in its box, which leaves the marks' own colours alone.
+  // Notes saved before notes had a colour take their first mark's.
+  const noteKey = (m) => okColor(COLORS[m.color] ? m.color : (m.items[0] || {}).color);
+  const noteColor = (m) => COLORS[noteKey(m)];
   const textsOf = (m) => m.items.filter((it) => it.kind === "text").map((it) => it.label);
   function whereText(m, withImage) {
     const [x, y] = anchorI(m);
@@ -1194,18 +1204,18 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     let s = "", h = "";
     for (const m of onImage()) {
       if (!shownNow(m)) continue;
-      const hl = m.id === activeId || m.id === hoverId || m.id === focusId, op = m.status === "done" && !hl ? 0.45 : 1;
+      const hl = m.id === activeId || m.id === hoverId || m.id === focusId, op = m.status === "done" && !hl ? 0.45 : 1, one = selIndex(m);
       m.items.forEach((it, i) => {
-        const c = COLORS[it.color] || COLORS.red;
-        s += shapeSVG(it, c, hl, `data-id="${esc(m.id)}" data-i="${i}"`, op);
-        if (!(tdraft && tdraft.id === m.id && tdraft.i === i)) h += labelHTML(m, it, i, c, hl);
+        const c = COLORS[it.color] || COLORS.red, lit = hl && (one < 0 || one === i);   // a picked mark is lit alone
+        s += shapeSVG(it, c, lit, `data-id="${esc(m.id)}" data-i="${i}"`, op);
+        if (!(tdraft && tdraft.id === m.id && tdraft.i === i)) h += labelHTML(m, it, i, c, lit);
       });
     }
     if (draft) s += shapeSVG(draft, COLORS[draft.color], false, "", 1);
     labelsEl.innerHTML = h;
     const am = activeId && marks.get(activeId);
-    if (am && cur && am.img === cur.id && am.items.length) {      // a dashed frame shows which marks belong to the note in hand
-      const r = bundleRect(am), box = `x="${f(r.x0)}" y="${f(r.y0)}" width="${f(r.x1 - r.x0)}" height="${f(r.y1 - r.y0)}" rx="10" fill="none"`;
+    if (am && cur && am.img === cur.id && am.items.length) {      // a dashed frame shows which marks belong to the note in hand (or the one picked)
+      const one = selIndex(am), r = one < 0 ? bundleRect(am) : bundleRect(am, [itemRects(am)[one]]), box = `x="${f(r.x0)}" y="${f(r.y0)}" width="${f(r.x1 - r.x0)}" height="${f(r.y1 - r.y0)}" rx="10" fill="none"`;
       s = `<rect ${box} stroke="#fff" stroke-width="3.5" opacity=".55"/><rect ${box} ${HL} stroke-width="1.6" stroke-dasharray="6 5"/>` + s;
     }
     svg.innerHTML = s;
@@ -1265,22 +1275,31 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   }
   // a new note on the file in view, made the active one and saved; on a video it is stamped with the playhead (or the range)
   function newNote(items, mode) {
-    const m = { id: newId(), n: nextN(), img: cur.id, items, text: "", status: "open", at: new Date().toISOString(), by: myId, reply: "", edited: "" };
+    const m = { id: newId(), n: nextN(), img: cur.id, items, color: items[0] ? items[0].color : color, text: "", status: "open", at: new Date().toISOString(), by: myId, reply: "", edited: "" };
     if (VID()) stampTime(m);
     marks.set(m.id, m); undo.push({ t: "create", id: m.id });
-    activeId = m.id; ui = mode;
+    activeId = m.id; ui = mode; selMark = null;
     saveNow(m.id, "all");
     return m;
   }
   // a note written on the right without marking the frame (video tabs only)
   function startTimedNote() {
     const m = newNote([], "edit");
-    draftId = m.id; renderAll();
+    draftId = m.id; paintPopSw(m); renderAll();
     return m;
   }
   function removeNote(id) {
     const m = marks.get(id); if (!m) return;
     deleteNote(id); toast("Note #" + m.n + " deleted. Undo with ⌘Z / Ctrl+Z.");
+  }
+  const keepsEmpty = (m) => m.t != null;                       // a note at a moment of a video stands without marks; on an image it can't
+  // the mark picked inside a note goes and the note stays; its only mark takes the note with it unless it keeps empty
+  function removeMark(m, i) {
+    selMark = null;
+    if (m.items.length === 1 && !keepsEmpty(m)) { removeNote(m.id); return; }
+    undo.push({ t: "items", id: m.id, before: cloneItems(m) });
+    m.items.splice(i, 1); touched(m); saveNow(m.id, "items");
+    setHint(); renderAll(); toast("Mark removed from #" + m.n + ". Undo with ⌘Z / Ctrl+Z.");
   }
   function deleteNote(id, record = true) {
     const m = marks.get(id); if (!m) return;
@@ -1293,7 +1312,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // the note is gone (deleted here or elsewhere): nothing stays in hand on it, so the next mark or keystroke starts a new note
   function release(id) {
     if (tdraft && tdraft.id === id) cancelTextEdit();
-    if (activeId === id) { activeId = null; ui = null; if (document.activeElement === popText) popText.blur(); }
+    if (activeId === id) { activeId = null; ui = null; selMark = null; if (document.activeElement === popText) popText.blur(); }
     if (draftId === id) draftId = null;
     if (focusId === id) focusId = null;
   }
@@ -1311,6 +1330,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   // whose note has gone meanwhile (deleted elsewhere) are passed over.
   function doUndo() {
     if (tdraft) cancelTextEdit();
+    selMark = null;
     let op = null, m = null;
     while (undo.length && !m) { op = undo.pop(); m = op.t === "delete" ? (marks.has(op.m.id) ? null : op.m) : marks.get(op.id) || null; }
     if (!m) { toast("Nothing to undo"); return; }
@@ -1325,8 +1345,9 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       // the mark this step added: the same object, or (once a copy came in from the store) the last mark just like it
       let i = m.items.indexOf(op.it); if (i < 0) i = m.items.map((x) => JSON.stringify(itemDoc(x))).lastIndexOf(op.sig);
       if (i < 0) toast("That mark has changed since, so it stays.");
-      else { m.items.splice(i, 1); if (!m.items.length && m.t == null) deleteNote(m.id, false); else saveNow(m.id, "items"); }
+      else { m.items.splice(i, 1); if (!m.items.length && !keepsEmpty(m)) deleteNote(m.id, false); else saveNow(m.id, "items"); }
     } else if (op.t === "items") { m.items = op.before; saveNow(m.id, "items"); }
+    else if (op.t === "color") { m.color = op.before; saveNow(m.id, "color"); if (activeId === m.id) paintPopSw(m); }
     else if (op.t === "time") {                                    // a note moved along the timeline goes back
       m.t = op.before.t; m.t2 = op.before.t2; m.tc = op.before.tc; saveNow(m.id, "time");
       if (VID() && cur.id === m.img) seekTo(m.t);
@@ -1369,16 +1390,16 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
 
   // ---------- the Done button and the comment box ----------
   function paintPopSw(m) {
-    const c0 = m.items[0] && m.items[0].color, same = m.items.every((it) => it.color === c0);
-    paintSwatches($("#popSw"), same ? c0 : null, (k) => {
-      const mk = marks.get(m.id); if (!mk) return;
-      undo.push({ t: "items", id: mk.id, before: cloneItems(mk) });
-      for (const it of mk.items) it.color = k;
-      saveNow(mk.id, "items"); pickColor(k); paintPopSw(mk); renderAll();
+    paintSwatches($("#popSw"), noteKey(m), (k) => {                 // the note's colour only: its marks keep theirs
+      const mk = marks.get(m.id); if (!mk || noteKey(mk) === k) return;
+      undo.push({ t: "color", id: mk.id, before: mk.color });
+      mk.color = k;
+      saveNow(mk.id, "color"); paintPopSw(mk); renderAll();
     });
   }
   function setHint() {
     $("#popHint").textContent = document.activeElement === popText ? "Enter saves · Shift + Enter adds a line · paste or drop a picture to add it"
+      : selIndex(marks.get(activeId)) >= 0 ? "Delete removes this mark · drag moves it · Esc picks the whole note again"
       : VID() ? "Mark the frame to point at things; the marks join this note · C to type" : "Draw to add more marks to this note · Enter to finish";
   }
   // open a note's comment box. Focused, the reviewer types straight away; unfocused, new marks still join this note.
@@ -1398,7 +1419,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   function finish() {
     if (tdraft) commitTextEdit();
     if (!activeId) return;
-    const id = activeId, wasDraft = draftId === id; activeId = null; ui = null;
+    const id = activeId, wasDraft = draftId === id; activeId = null; ui = null; selMark = null;
     if (wasDraft) draftId = null;                                // saved: the note joins the list now
     if (document.activeElement === popText) popText.blur();
     if (!VID()) pop.hidden = true;
@@ -1662,7 +1683,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   }));
 
   // ---------- saving: the page writes only the fields it changed, so Claude's replies are never overwritten ----------
-  const GROUPS = { text: ["text", "edited"], items: ["items", "v"], status: ["status"], time: ["t", "t2", "tc"], atts: ["atts"] };
+  const GROUPS = { text: ["text", "edited"], items: ["items", "v"], color: ["color"], status: ["status"], time: ["t", "t2", "tc"], atts: ["atts"] };
   function itemDoc(it) {
     const o = { kind: it.kind, color: it.color };
     if (it.kind === "pen") o.p = it.p.map(Math.round);
@@ -1674,6 +1695,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   function toDoc(m) {
     const o = { v: 2, n: m.n, img: m.img, text: m.text || "", status: m.status || "open", at: m.at || new Date().toISOString(), items: m.items.map(itemDoc) };
     if (m.by) o.by = m.by;
+    o.color = COLORS[m.color] ? m.color : null;                 // null clears a colour an undo took back
     if (m.reply) o.reply = m.reply;
     if (m.edited) o.edited = m.edited;
     if (m.t != null) { o.t = +m.t.toFixed(3); o.tc = m.tc || tcOf(m.t, fpsOf(imgById(m.img))); }
@@ -1681,7 +1703,6 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     o.atts = (m.atts || []).slice();
     return o;
   }
-  const okColor = (c) => (COLORS[c] ? c : "red");
   const isNum = (v) => typeof v === "number" && isFinite(v);
   function itemFrom(o) {
     if (!o || !KIND[o.kind]) return null;
@@ -1695,7 +1716,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   }
   function fromDoc(id, d) {
     const m = { id, n: d.n | 0, img: d.img || (IMAGES[0] && IMAGES[0].id), text: "", status: d.status === "done" ? "done" : "open", at: d.at || "",
-      by: d.by || null, reply: d.reply || "", edited: d.edited || "", items: [],
+      by: d.by || null, reply: d.reply || "", edited: d.edited || "", items: [], color: COLORS[d.color] ? d.color : null,
       t: isNum(d.t) ? d.t : null, t2: isNum(d.t2) ? d.t2 : null, tc: d.tc || "", atts: picIds(d.atts) };
     if (Array.isArray(d.items)) {
       m.text = d.text || "";
@@ -2224,9 +2245,11 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       const again = lastDown && now - lastDown.t < 450 && dist(p, lastDown.p) < 6 && lastDown.id === hitId && lastDown.i === i;
       lastDown = { t: now, p, id: hitId, i };
       if (again && !RO && m.items[i] && m.items[i].kind === "text") { act = { type: "retext", id: hitId, i }; return; }   // double-click: edit the words
+      // a first click picks the note (a drag moves all its marks); a second click on one of its marks picks that mark
+      // alone (a drag then moves just it, and Delete removes just it). Alt / Option-drag always moves one mark.
       const was = hitId === activeId;
       if (!was) openComment(hitId, false);
-      act = { type: "drag", id: hitId, i, one: e.altKey, start: p, last: p, before: cloneItems(m), moved: false, was };
+      act = { type: "drag", id: hitId, i, one: e.altKey || selIndex(m) === i, start: p, last: p, before: cloneItems(m), moved: false, was };
       return;
     }
     if (activeId && typing && !VID()) { finish(); return; }       // a click outside the comment box only closes it (on video the box is docked)
@@ -2280,7 +2303,7 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
     if (a.type === "drag") {
       const m = marks.get(a.id); if (!m) return;
       if (a.moved) { m.items.forEach(roundItem); undo.push({ t: "items", id: a.id, before: a.before }); touched(m); saveNow(a.id, "items"); renderAll(); }
-      else if (a.was && !RO) openComment(a.id, true);            // a second click on the note in hand: type its comment
+      else if (a.was && !RO && m.items[a.i]) { selMark = { id: a.id, i: a.i }; setHint(); renderAll(); }   // a second click: that mark alone
       return;
     }
     if (a.type === "retext") {
@@ -2396,7 +2419,11 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
   window.addEventListener("keydown", (e) => {
     const typing = e.target.closest && e.target.closest("textarea, input");
     if (typing) { if (e.key === "Escape" && e.target !== popText && e.target !== tedit) e.target.blur(); return; }   // those two handle their own keys
-    if (e.key === "Escape") { if (activeId) finish(); else if (app.classList.contains("full")) setFull(false); return; }
+    if (e.key === "Escape") {                                     // a picked mark goes back to its whole note, then the note closes
+      if (selIndex(marks.get(activeId)) >= 0) { selMark = null; setHint(); renderAll(); }
+      else if (activeId) finish(); else if (app.classList.contains("full")) setFull(false);
+      return;
+    }
     if (VID() && e.key === "Enter" && !(e.target.closest && e.target.closest("button")) && !RO) { e.preventDefault(); popText.focus(); return; }   // video: Enter goes to the note box
     if (e.key === "Enter" && activeId && !(e.target.closest && e.target.closest("button"))) {                // Enter: Done, then Enter again finishes
       e.preventDefault();
@@ -2425,8 +2452,13 @@ window.MARKROOM_CFG = /*CFG*/{"title":"MarkRoom","subtitle":"","key":"markroom",
       if (vk === "c") { e.preventDefault(); if (!RO) popText.focus(); return; }
     }
     if (e.key === " ") { e.preventDefault(); if (!spaceDown) { spaceDown = true; viewer.classList.add("grab"); } return; }
-    if ((e.key === "Delete" || e.key === "Backspace") && activeId) {
-      e.preventDefault(); removeNote(activeId); return;
+    if ((e.key === "Delete" || e.key === "Backspace") && activeId) {   // the picked mark, else the whole note
+      e.preventDefault();
+      const m = marks.get(activeId), i = selIndex(m);
+      if (i >= 0) removeMark(m, i);
+      else if (selMark) { selMark = null; setHint(); renderAll(); toast("That mark was removed elsewhere, so nothing was deleted. The whole note is picked."); }
+      else removeNote(activeId);
+      return;
     }
     if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && e.shiftKey && IMAGES.length > 1 && !VID()) { stepTab(e.key === "ArrowRight" ? 1 : -1); return; }
     const k = e.key.toLowerCase();
