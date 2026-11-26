@@ -28,7 +28,18 @@ export type Point = {
   startCall?: number | null
   /** Claude's call count when PulseWise last reminded it to count this point. */
   remindedCall?: number | null
+  /**
+   * The point's sub-tasks, as Claude counts them (the count tool's `sub` / `subs`): with them, the point's own count is
+   * theirs (subCount). Shown under the pulse while the point runs: a bar, a list with counts, or names (subForm).
+   */
+  subs?: SubTask[] | null
 }
+
+/**
+ * One sub-task of a point: its pieces done of all it has, and what a piece is ("clips"). `none` when it can't be counted
+ * (shown by name only); `finished` marks such a one done.
+ */
+export type SubTask = { name: string; done: number; total: number; unit: string | null; none?: boolean; finished?: boolean; at: number }
 
 /**
  * Claude's own count for a point, as the count tool last sent it. `peak` is the most pieces it ever counted done for
@@ -109,6 +120,10 @@ export type Task = {
   /** Claude's call count when it started, and when PulseWise last reminded Claude of it running on with no count. */
   startCall?: number
   remindedCall?: number | null
+  /** How many of a job's steps were checked against the list's other points (a step that repeats one is told to Claude). */
+  checkedSteps?: number
+  /** An agent whose brief got PulseWise's progress lines (a working agent, not a look-up one): its follow-ups get them too. */
+  briefed?: boolean
   message: string | null
 }
 
@@ -183,6 +198,8 @@ export type Model = {
   list?: ListInfo | null
   /** Short labels for names longer than the bar shows whole, written by a small model (Haiku): name -> label. */
   labels?: Record<string, string>
+  /** Notes for Claude waiting for its next call (a job's step that repeats another point, a point number past the list). */
+  notes?: string[]
 }
 
 /** The current task list as a whole, for the estimate and the time log. */
@@ -195,6 +212,8 @@ export type ListInfo = {
   heldMs: number
   /** Written to the time log already (finished, or replaced by a new list). */
   logged: boolean
+  /** The request the list is for, in a few words (the estimate tool's `heading`): shown over the pulse. */
+  heading?: string | null
 }
 
 declare module 'claude-code' {

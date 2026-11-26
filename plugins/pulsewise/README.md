@@ -40,6 +40,8 @@ To update, run `claude plugin update pulsewise@zoke` and restart the app.
 | pulse | a chat's main bar |
 | beat | one segment of the pulse: one point of the task list. Click it to open its close-up |
 | readout | the line above the pulse while a beat is open: its name, status and %, with a × to close it |
+| heading | the request the task list is for, in a few words, over the pulse while no beat is open |
+| sub-tasks | a point's parts, in its opened beat's close-up: its bar, a list with their counts, or their names |
 | track | a background job's bar, under "Tracks" |
 | sweep | the light block moving through a bar: work going on that has no count to measure |
 | Other pulses, Done, Nudge | the buttons under the band. Nudge asks Claude to bring the task list and its counts up to date |
@@ -52,6 +54,11 @@ A beat fills from what it is told, never from a guess:
   cases to run) and sends the count through PulseWise's `count` tool as the pieces finish, in the same message as its
   other calls. The close-up shows it as "Claude · 2 / 5 edits". If more pieces turn up, the total grows and the fill
   steps back a little: it stays honest. A point Claude can't size shows as moving, with no fill.
+- **Sub-tasks.** A point with parts of its own (footage rows FF6 to FF9, two notes) gets them as sub-tasks, each with
+  its own count, and the point's count is theirs. They show in the beat's close-up, when you open it: as its bar, one
+  segment per sub-task, when they are counted in one unit with a few pieces each and the point takes 2 minutes or more
+  ("FF8 · 1 / 4 clips"); as a list with their counts when they are short ("Note 2: photo entrance 1 / 2 changes"),
+  done ones bright; by name only when they can't be counted. Either way they take the place of Claude's own part.
 - **Background jobs** fill by the counts their scripts report through the helper. A command and the job it starts
   show as one bar, and a job that names its point (`--point 3`) joins that point. A step's time is measured from the
   start: steps reported late or skipped over share the time since the last report, and a step's numbers count the
@@ -78,18 +85,25 @@ A beat fills from what it is told, never from a guess:
 ## What it tells Claude
 
 - **The standing instruction (always on).** Once per conversation, and again after every compaction, PulseWise gives
-  Claude a short instruction (about 600 tokens): keep the task list current, one point at a time, a point being work
-  ticked on its own; count its own work with the `count` tool; estimate a new list with the `estimate` tool; report
-  any script or command expected to run longer than about half a minute through the helper, naming its point; name
-  things in 32 characters or fewer, the telling words first.
-- **Agents' briefs.** Each background agent that does work gets about 150 tokens of progress lines added to its brief:
-  its job's name, its point's number, and how to name and count its steps.
-- **Count reminders.** A point in progress that has gone 8 of Claude's calls without a count, or a background command
-  still running 20 calls on with none, gets a one-line note at Claude's next step (about 60 tokens), at most once per
+  Claude a short instruction (about 800 tokens): keep the task list current, one point at a time, a point being work
+  ticked on its own; go over a new list for work done twice and say what it merged; count every point from its start
+  with the `count` tool, with sub-tasks for its parts; send a new list's heading and estimate with the `estimate` tool;
+  report any script or command expected to run longer than about half a minute through the helper, naming its point;
+  name things in 32 characters or fewer, the telling words first.
+- **Agents' briefs.** Each background agent that does work gets about 200 tokens of progress lines added to its brief:
+  its job's name, its point's number, how to name and count its steps, and the list's other open points, which it
+  leaves alone. A follow-up message to that agent gets the lines again, with its point's number as the list stands then.
+- **Count reminders.** A point that starts without a count is asked for one at once (about 60 tokens): when its name
+  already holds one ("FF6–FF9", "2 notes"), that count. A count gone 8 of Claude's calls without a change, or a
+  background command still running 20 calls on with none, gets a one-line note at Claude's next step, at most once per
   8 calls a point (40 a command). For background work Claude can answer that it keeps running (a server) or is done.
-- **Estimates.** When Claude writes a new task list of more than three points, or one with background work running,
-  it is asked (about 60 tokens) for its estimate: minutes of clock time for the whole list and for each point,
-  decimals allowed. See "The time log".
+- **Work done twice.** A sub-task, or a step of a job or agent, that names another open point's kind of work ("Check
+  render" in point 2 beside a point 3 "Check r02 frame by frame") is told to Claude in one line, once; so is a job
+  that names a point number the list doesn't have. A sub-task that can't be counted beside ones that can is told to be
+  a point of its own.
+- **Headings and estimates.** When Claude writes a new task list, it is asked for its heading (about 40 tokens); a list
+  of more than three points, or one with background work running, is also asked (about 60 tokens) for its estimate:
+  minutes of clock time for the whole list and for each point, decimals allowed. See "The time log".
 - **Nudge.** When you press Nudge, Claude gets a one-line reminder (about 60 tokens) at its next step: the list, the
   counts and any background work that is done or keeps running.
 - **Side-by-side planning (on unless you turn it off).** When Claude writes a new task list, PulseWise asks it to start the points that need nothing from each other at the same time, as background agents or commands, without being asked. See Settings to turn it off.

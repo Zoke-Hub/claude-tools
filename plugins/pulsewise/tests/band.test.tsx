@@ -5,7 +5,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentStatus, On } from 'claude-code'
 
-import { cleanLabel, etaRecord, jobToTask, pointFill, pointWeight, settleOverdue } from '../hooks/register'
+import { cleanLabel, countInName, etaRecord, jobToTask, pointFill, pointWeight, settleOverdue } from '../hooks/register'
 
 const BAND = {
   plugin: 'pulsewise',
@@ -2133,15 +2133,16 @@ test('a counted point with no jobs fills by its count alone, and a count on a wa
   await ui.unmount()
 })
 
-test('after 8 of its calls without a count Claude is reminded, and again no sooner than 8 calls on; none: true stops it', async ($, on) => {
+test('a point started with no count is asked for one at once, a stale count after 8 calls; none: true stops it', async ($, on) => {
   await countedChat($, on)
   const call = () => $.tool.call({ tool: 'Read', file_path: '/projects/demo/page.html' })
   const said: string[] = []
-  for (let i = 0; i < 8; i += 1) said.push(JSON.stringify(await call()))
-  expect(said.slice(0, 7).some(text => text.includes('PulseWise:'))).toBe(false)
-  expect(said[7]).toContain('has no count yet')
-  expect(said[7]).toContain('Edit the pages')
-  expect(said[7]).toContain('mcp__pulsewise__count')
+  for (let i = 0; i < 2; i += 1) said.push(JSON.stringify(await call()))
+  // The first call may go out in the same message as the tick; the second gets the ask.
+  expect(said[0]).not.toContain('PulseWise:')
+  expect(said[1]).toContain('has no count yet')
+  expect(said[1]).toContain('Edit the pages')
+  expect(said[1]).toContain('mcp__pulsewise__count')
   // Not again straight away.
   expect(JSON.stringify(await call())).not.toContain('PulseWise:')
   // Counted, then 8 more calls without a new count: reminded of the last one.
@@ -2158,7 +2159,9 @@ test('after 8 of its calls without a count Claude is reminded, and again no soon
 
 test('a new list asks for an estimate; the finished list goes to the time log once, its estimates beside its real times', async ($, on) => {
   const { clock, stored, first } = await countedChat($, on)
-  expect(JSON.stringify(first)).not.toContain('send mcp__pulsewise__estimate')
+  // A two-point list is asked for its heading only, not an estimate.
+  expect(JSON.stringify(first)).toContain('send mcp__pulsewise__estimate with its heading')
+  expect(JSON.stringify(first)).not.toContain('clock time')
   expect(JSON.stringify(await $.tool.call({ tool: ESTIMATE, minutes: 10, points: [6, 4] }))).toContain('Noted: 10 min for the list, 2 points.')
   await $.tool.call({ tool: COUNT, point: 1, done: 4, total: 4, unit: 'edits' })
   await $.turn.complete({ answer: 'over to you', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
@@ -2843,4 +2846,187 @@ test("a point not started is drawn as big as Claude's estimate for it, not as th
   // Running with no count, a point is as big as its estimate until it runs past it, then as big as its time so far.
   expect(pointWeight(m, 1, now)).toBe(30 * min)
   expect(pointWeight(m, 1, t0 + 5 * min)).toBe(12 * min)
+})
+
+test('a point name that holds a range or a number gives its count; measures and years do not', () => {
+  expect(countInName('Build FF6–FF9 in Premiere on V7')).toMatchObject({ total: 4, what: 'FF6–FF9' })
+  expect(countInName('Render A17-A30')).toMatchObject({ total: 14 })
+  expect(countInName('Check r01–r05')).toMatchObject({ total: 5 })
+  expect(countInName('Read the 2 notes')).toMatchObject({ total: 2, unit: 'notes' })
+  expect(countInName('Build the six scenes')).toMatchObject({ total: 6, unit: 'scenes' })
+  expect(countInName('Export at 30 fps')).toBeNull()
+  expect(countInName('Sort the 2024–2026 photos')).toBeNull()
+  expect(countInName('Check the render')).toBeNull()
+})
+
+test('sub-tasks counted in one unit that take a while show as a bar under their point, and give the point its count', async ($, on) => {
+  await countedChat($, on)
+  await $.tool.call({ tool: ESTIMATE, heading: 'Footage rows on V7', minutes: 20, points: [15, 5] })
+  const reply = JSON.stringify(
+    await $.tool.call({ tool: COUNT, point: 1, subs: [{ name: 'FF6', total: 3, unit: 'clips' }, { name: 'FF7', total: 2, unit: 'clips' }, { name: 'FF8', total: 4, unit: 'clips' }, { name: 'FF9', total: 2, unit: 'clips' }] }),
+  )
+  expect(reply).toContain('Point 1: 0 / 11 clips over 4 sub-tasks, shown as a bar.')
+  await $.tool.call({ tool: COUNT, point: 1, sub: 'FF6', done: 3, total: 3 })
+  await $.tool.call({ tool: COUNT, point: 1, sub: 'FF7', done: 2, total: 2 })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  // The heading over the pulse; the sub-tasks stay out of sight until the beat is opened.
+  let drawn = await drawnText(ui)
+  expect(drawn).toContain('Footage rows on V7')
+  expect(drawn).not.toContain('FF8')
+  // Opened: the point's count is its sub-tasks' clips, and its close-up bar is the sub-tasks, each with its own count.
+  await ui.press({ key: 'open-p:0' })
+  drawn = await drawnText(ui)
+  expect(drawn).toContain('5 / 11 clips')
+  expect(drawn).toContain('FF6: 3 / 3 clips; FF7: 2 / 2 clips; FF8: 0 / 4 clips; FF9: 0 / 2 clips')
+  expect(drawn).not.toContain('Edit the pages: Claude · 5 / 11 clips; FF6')
+  await ui.unmount()
+})
+
+test('short sub-tasks show as a list with their counts; uncounted ones by name, and beside counted ones are told to be a point of their own', async ($, on) => {
+  await countedChat($, on)
+  await $.tool.call({ tool: ESTIMATE, minutes: 6, points: [5, 1] })
+  const short = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, subs: [{ name: 'Note 1: title timing', total: 1, unit: 'changes' }, { name: 'Note 2: photo entrance', total: 2, unit: 'changes' }] }))
+  expect(short).toContain('Point 1: 0 / 3 changes over 2 sub-tasks, shown as a list.')
+  await $.tool.call({ tool: COUNT, point: 1, sub: 'Note 1: title timing', done: 1 })
+  let ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).not.toContain('Note 2: photo entrance')
+  // Opened: the list alone, with no close-up bar for Claude's part beside it.
+  await ui.press({ key: 'open-p:0' })
+  const listed = await drawnText(ui)
+  expect(listed).toContain('Note 1: title timing 1 / 1 changes; Note 2: photo entrance 0 / 2 changes')
+  expect(listed).not.toMatch(/Edit the pages \d+%\. /)
+  await ui.unmount()
+  // A part that can't be counted beside counted ones: shown by name, and Claude is told to give it a point of its own.
+  const mixed = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, sub: 'Check the sync by eye', none: true }))
+  expect(mixed).toContain('can\'t be counted beside sub-tasks that can: give it a point of its own')
+  // Point 2's parts can't be counted at all: names only, and the point counts them as they finish.
+  await $.tool.call({ tool: COUNT, point: 2, subs: [{ name: 'Read the render log', none: true }, { name: 'Try a smaller batch', none: true }] })
+  const named = JSON.stringify(await $.tool.call({ tool: COUNT, point: 2, sub: 'Read the render log', finished: true }))
+  expect(named).toContain('Point 2: 1 / 2 sub-tasks, shown as names.')
+  ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'open-p:1' })
+  expect(await drawnText(ui)).toContain('Read the render log done; Try a smaller batch')
+  await ui.unmount()
+})
+
+test("a sub-task that names another point's kind of work is told to Claude", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('fs.list', () => ({ value: [] }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build v02', status: 'in_progress' }, { content: 'Check r02 frame by frame', status: 'pending' }] })
+  await clock.advance(50)
+  const reply = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, subs: [{ name: 'Note 1', total: 1 }, { name: 'Check render', total: 1 }] }))
+  expect(reply).toContain('Sub-task \\"Check render\\" looks like point 2 \\"Check r02 frame by frame\\"')
+})
+
+test('a point that starts with no count and names its own count is asked for exactly that, at once', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  on('fs.list', () => ({ value: [] }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build FF6–FF9 in Premiere on V7', status: 'in_progress' }, { content: 'Report back', status: 'pending' }] })
+  await clock.advance(50)
+  const call = () => $.tool.call({ tool: 'Read', file_path: '/projects/demo/edit.prproj' })
+  await call()
+  const said = JSON.stringify(await call())
+  expect(said).toContain('its name names 4 (FF6–FF9): send total: 4')
+  // none: true with no reason is taken, and Claude is told a reason is expected.
+  expect(JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, none: true }))).toContain('say why with why')
+})
+
+test("a job's step that names another point's work, or a point number past the list, is told to Claude with its next call", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  on('tool.call', () => ({ result: {} }))
+  const { files } = jobFolder(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build v02', status: 'in_progress' }, { content: 'Check r02 frame by frame', status: 'pending' }, { content: 'Post r02', status: 'pending' }] })
+  const step = (name: string) => ({ name, state: 'pending', done: null, total: null, unit: null, weight: null, est_ms: null, started: null, ended: null })
+  files.set('j-v02', { mtime: 1, body: () => jobBody({ id: 'j-v02', name: 'Build v02', point: '5', steps: [step('Edit'), step('Render'), step('Check render')] }) })
+  await clock.advance(1100)
+  await $.tool.call({ tool: COUNT, point: 1, done: 0, total: 2, unit: 'notes' })
+  const said = JSON.stringify(await $.tool.call({ tool: 'Read', file_path: '/projects/demo/v02.html' }))
+  expect(said).toContain('says --point 5, but the list has 3 points')
+  expect(said).toContain('Step \\"Check render\\" of job \\"Build v02\\" looks like point 2 \\"Check r02 frame by frame\\"')
+  // Told once.
+  expect(JSON.stringify(await $.tool.call({ tool: 'Read', file_path: '/projects/demo/v02.html' }))).not.toContain('--point 5')
+})
+
+test('a follow-up to a working agent carries fresh progress lines with its point as the list stands, and its brief keeps it to its point', async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  const sent: Record<string, unknown>[] = []
+  on('tool.call', (_, e) => {
+    if (e.tool === 'SendMessage') sent.push(e as unknown as Record<string, unknown>)
+    return { result: {} }
+  })
+  on('fs.list', () => ({ value: [] }))
+  const briefs: string[] = []
+  on('agent.spawn', (_, e) => {
+    briefs.push((e as { prompt: string }).prompt)
+    return { agentId: 'agent-1', model: 'test' }
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Read the notes', status: 'completed' }, { content: 'Build v02', status: 'in_progress' }, { content: 'Check r02', status: 'pending' }] })
+  await $.agent.spawn(spawnOf({ prompt: 'build it', description: 'Build v02', subagentType: 'general-purpose' }))
+  expect(briefs[0]).toContain('--point 2')
+  expect(briefs[0]).toContain('your parts are point 2 "Build v02" only')
+  expect(briefs[0]).toContain('3 "Check r02"')
+  // A new list in which the agent's work is point 1: the follow-up says so.
+  await $.tool.call({ tool: PLAN, scope: 'continuation', items: [{ content: 'Build v02', status: 'in_progress' }, { content: 'Post r02', status: 'pending' }] })
+  await $.tool.call({ tool: 'SendMessage', to: 'agent-1', message: 'One more note: the title is late.' } as never)
+  const message = String(sent[0]?.message ?? '')
+  expect(message).toContain('One more note: the title is late.')
+  expect(message).toContain('progress.py start "Build v02" --point 1')
+})
+
+test('a plain-number range counts only beside a word for the things counted, not as a measure or a date', () => {
+  expect(countInName('Cut rows 1–12')).toMatchObject({ total: 12, unit: 'rows' })
+  expect(countInName('Place 3-5 photos')).toMatchObject({ total: 3, unit: 'photos' })
+  expect(countInName('Wait 2-3 minutes')).toBeNull()
+  expect(countInName('Push the 11-26 build')).toBeNull()
+})
+
+test('a sub-task name or a heading too long to show whole is sent back, never cut short', async ($, on) => {
+  await countedChat($, on)
+  const long = 'Place every archival clip for the footage row'
+  const reply = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, subs: [{ name: long, total: 3, unit: 'clips' }, { name: 'FF7', total: 2, unit: 'clips' }] }))
+  expect(reply).toContain(`is ${long.length} characters: name sub-tasks in 32 or fewer`)
+  expect(reply).toContain('Point 1: 0 / 2 clips over 1 sub-task')
+  const heading = 'A heading far too long to sit on one line over the pulse of the band'
+  expect(JSON.stringify(await $.tool.call({ tool: ESTIMATE, heading, minutes: 5 }))).toContain(`The heading is ${heading.length} characters: send one of 60 or fewer.`)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await drawnText(ui)).not.toContain('A heading far too long')
+  await ui.unmount()
+})
+
+test("a follow-up handing an agent another point's work carries that point's number", async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  mock.env(on, { HOME: '/home/me', CLAUDE_CODE_HOST_SESSION_ID: 'local_x' })
+  inProject(on)
+  const sent: Record<string, unknown>[] = []
+  on('tool.call', (_, e) => {
+    if (e.tool === 'SendMessage') sent.push(e as unknown as Record<string, unknown>)
+    return { result: {} }
+  })
+  on('fs.list', () => ({ value: [] }))
+  on('agent.spawn', () => ({ agentId: 'agent-1', model: 'test' }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Build the v02 scenes', status: 'in_progress' }, { content: 'Export the subtitle files', status: 'pending' }] })
+  await $.agent.spawn(spawnOf({ prompt: 'build it', description: 'Build the v02 scenes', subagentType: 'general-purpose' }))
+  await $.tool.call({ tool: 'SendMessage', to: 'agent-1', message: 'Now export the subtitle files as SRT.' } as never)
+  expect(String(sent[0]?.message ?? '')).toContain('--point 2')
+})
+
+test('sub-tasks in different units are counted as sub-tasks done, said once', async ($, on) => {
+  await countedChat($, on)
+  const reply = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, subs: [{ name: 'Captions', total: 12, unit: 'lines' }, { name: 'Export', total: 1, unit: 'files', done: 1 }] }))
+  expect(reply).toContain('Point 1: 1 / 2 sub-tasks, shown as a list.')
 })

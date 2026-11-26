@@ -3,6 +3,20 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-26 · PulseWise (number unchanged)
+
+- **PulseWise, a heading and sub-tasks:** each task list gets a heading, the request it is for, shown over the bar.
+  A task with parts of its own counts them as sub-tasks, shown when you open its beat: its bar split per part when the
+  work takes a while (footage rows FF6 to FF9 by their clips), a list with their counts when it's short (done ones
+  bright), or their names when they can't be counted.
+- **PulseWise, every task counted:** a task that starts without a count is asked for one at once, and a name that
+  already holds a count ("FF6–FF9", "2 notes") gives it. "No count" is kept for work that can't be sized up front,
+  with a reason.
+- **PulseWise, work done twice:** Claude goes over a new list for work done twice and says what it merged. PulseWise
+  tells Claude when a job's or agent's step names another task's kind of work (an agent's "Check render" beside a
+  "Check r02" task), or names a task number the list doesn't have. An agent gets a follow-up message with fresh
+  progress lines, its task number as the list stands then, and its brief names the list's other tasks to leave alone.
+
 ## 2026-11-26 · MarkRoom (number unchanged)
 
 - **MarkRoom, one board for several chats:** before a chat makes its first board, it looks for boards that other open
