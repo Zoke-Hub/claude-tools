@@ -201,7 +201,7 @@ const AIMS = [
 const COUNT_SPEC: ToolSpec = {
   name: 'count',
   description:
-    "PulseWise's bar for your own work, in the things being worked on (notes, clips, renders, files; never \"steps\" or \"parts\"), so the person sees the whole plan and the truth about now. As a point starts, in the same message as its tick, lay out all its parts: {point, subs: [{name, total, unit}, ...]}, every change, note, clip or file, and every render, upload or check it will run in the background (a job or agent named as its part fills it). A point that is one thing or one kind of piece: {point, done: 0, total, unit} (one part alone is no list). Then, as pieces finish, before your next call and above all before a slow one (a render, an upload, a publish): {point, sub: <name>, done} (or {point, done}). Raise total when more turn up. A part that can't be counted: {point, sub: <name>, none: true}, then finished: true when it is done. {point, none: true, why} only for work that can't be sized up front (tracking down a cause). A point handed whole to one agent or job needs no parts from you: its steps are its parts. Send counts with another call, never on their own. Background work the bar can't follow: {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
+    "PulseWise's bar for your own work, in the things being worked on (notes, clips, renders, files; never \"steps\" or \"parts\"), so the person sees the whole plan and the truth about now. As a point starts, in the same message as its tick, lay out all its parts: {point, subs: [{name, total, unit}, ...]}, every change, note, clip or file, and every render, upload or check it will run in the background (a job or agent named as its part fills it). A point that is one thing or one kind of piece: {point, done: 0, total, unit} (one part alone is no list). Then, as pieces finish, before your next call and above all before a slow one (a render, an upload, a publish): {point, sub: <name>, done} (or {point, done}). Raise total when more turn up. A part that can't be counted: {point, sub: <name>, none: true}, then finished: true when it is done. A search for a cause gets parts too: the code it reads (files), the cause itself by name ({name, none: true}, finished: true once found), the fix (files) and its tests (checks). {point, none: true, why} only for work that can't be split or sized up front. A point handed whole to one agent or job needs no parts from you: its steps are its parts. Send counts with another call, never on their own. Background work the bar can't follow: {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -268,7 +268,7 @@ const isWorthEstimating = (items: unknown[], m: Model) => items.length > 3 || m.
 // Read by Claude when a point in progress has gone a while without its count, or background work runs on with none.
 const progressNote = (points: string[], work: string[]) =>
   [
-    points.length ? `PulseWise: ${points.join('; ')}. Send ${COUNT_TOOL} with your next call (none: true with why only for work that can't be sized up front).` : '',
+    points.length ? `PulseWise: ${points.join('; ')}. Send ${COUNT_TOOL} with your next call (none: true with why only for work that can't be split or sized up front).` : '',
     work.length
       ? `PulseWise: ${work.join('; ')}, so the bar can't show it moving. With your next call send ${COUNT_TOOL} {work: "<its name>"} with service: true if it keeps running (a server, a watcher: it leaves the bar) or finished: true if its work is done; real work runs through the progress helper next time.`
       : '',
@@ -283,6 +283,8 @@ const REMIND_CALLS = 8
 // A point that started with no count at all is asked for one this many calls in: at once, give or take the calls that
 // went out in the same message as its tick.
 const FIRST_REMIND_CALLS = 2
+// A point marked as not counted is asked again after this many calls: by then its cause may be found.
+const NONE_REMIND_CALLS = 16
 
 // Read by Claude (never shown to the person) when points are added to the current list: the new ones get the same check.
 // Sent only while the "sideBySide" setting is on; `rules` is the path of the bundled cheaper-agents.md.
@@ -302,7 +304,7 @@ export const longJobsBlock = (isOrganising: boolean) => ({
     AIMS,
     'How to tell it:',
     `- The task list holds the points, in the order they run; your reply itself, and waiting for the person, are not points.${isOrganising ? ' A new list goes to a small model that lays it out against these aims, and its plan comes back with one of your next calls: send it, keeping whatever you know better.' : ''} Mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch (points running side by side each the moment their work starts).`,
-    `- Counts go through ${COUNT_TOOL}, with another call: a point's parts as it starts ({point, subs: [{name, total, unit}]} for two or more things, or {point, done: 0, total, unit} for one thing or one kind of piece), then each as it moves. none: true (with why) only for work that can't be sized up front. A new list's heading (what it is for) and estimate go through ${ESTIMATE_TOOL}.`,
+    `- Counts go through ${COUNT_TOOL}, with another call: a point's parts as it starts ({point, subs: [{name, total, unit}]} for two or more things, or {point, done: 0, total, unit} for one thing or one kind of piece), then each as it moves. A search for a cause gets parts too (the code it reads, the cause by name, the fix, its tests); none: true (with why) only for work that can't be split or sized up front. A new list's heading (what it is for) and estimate go through ${ESTIMATE_TOOL}.`,
     '- Any script or command you expect to run longer than about half a minute (builds, renders, batch file or image jobs, quick inline scripts too) reports through `~/.claude/progress/progress.py` (`python3`; on Windows `python`, or `py` where only the launcher is installed), with `--point <its point\'s number>`:',
     '  - a command or tool that prints its own progress: `progress.py run --name "<what it does>" --point N -- <command>` (it reads ffmpeg\'s `time=`, `NN%` and `done/total` lines; a quick inline script prints one `done/total` line per item, flushed);',
     '  - a Python script: `sys.path.insert(0, os.path.expanduser("~/.claude/progress")); import progress`, then `with progress.job(name, steps=[...], point="N"):`, `progress.step(name, done, total)`, `progress.track(items, name)`;',
@@ -2180,6 +2182,8 @@ function applySub(p: Point, raw: Record<string, unknown>, now: number): string {
   if (!name) return 'Give each sub-task a name.'
   // Never cut short: a long name is sent back for a shorter one.
   if (name.length > NAME_LIMIT) return `"${name}" is ${name.length} characters: name sub-tasks in ${NAME_LIMIT} or fewer, the telling words first.`
+  const given = typeof raw.unit === 'string' ? raw.unit.trim() : ''
+  if (given && STEP_UNIT.test(given)) return stepUnitText(given)
   const subs = (p.subs ??= [])
   let s = subs.find(one => one.name.toLowerCase() === name.toLowerCase())
   if (!s) {
@@ -2218,10 +2222,6 @@ function applySubs(m: Model, n: number, input: Record<string, unknown>, now: num
   // A point laid out as one part: no list under its beat, so it may as well be counted as one kind of piece.
   if (Array.isArray(input.subs) && subs.length === 1)
     notes.push('One part alone is the point\'s own count, with no list under its beat: list two or more things, or count it as one kind of piece ({point, done, total, unit}).')
-  // A part that can't be counted beside parts that can: it shows nothing on their bar, so it is a point of its own.
-  const blank = subs.filter(s => s.none)
-  if (blank.length && blank.length < subs.length)
-    notes.push(`${blank.map(s => `"${s.name}"`).join(', ')} can't be counted beside sub-tasks that can: give ${blank.length === 1 ? 'it a point' : 'them points'} of ${blank.length === 1 ? 'its' : 'their'} own in the list.`)
   return [head, ...notes].filter(Boolean).join(' ')
 }
 
@@ -2237,17 +2237,22 @@ function applyCount(m: Model, input: Record<string, unknown>, now: number, fx: E
     p.activeAt = now
     p.count = { done: 0, total: 0, unit: null, at: now, call, none: true }
     const why = typeof input.why === 'string' && input.why.trim()
-    return why ? `Point ${n}: no count (${input.why as string}).` : `Point ${n}: no count. A point is counted unless its work can't be sized up front; say why with why: "…".`
+    return why ? `Point ${n}: no count (${input.why as string}). Once it can be split, lay out its parts (the code read, the cause by name, the fix, its tests).` : `Point ${n}: no count. A point is counted unless its work can't be sized up front; say why with why: "…".`
   }
   const total = Math.round(Number(input.total))
   if (!(total >= 1)) return 'Give total: how many pieces the point has (or none: true).'
   const done = Math.min(total, Math.max(0, Math.round(Number(input.done ?? 0)) || 0))
   const unit = typeof input.unit === 'string' && input.unit.trim() ? input.unit.trim().slice(0, 24) : (p.count?.unit ?? null)
+  if (unit && STEP_UNIT.test(unit)) return stepUnitText(unit)
   const peak = Math.max(done, p.count && !p.count.none ? (p.count.peak ?? p.count.done) : 0)
   p.count = { done, total, unit, at: now, call, peak }
   markCounted(p, now)
   return `Point ${n}: ${done} / ${total}${unit ? ` ${unit}` : ''}.`
 }
+
+// Units that count the work's own stages, never the things worked on: sent back.
+const STEP_UNIT = /^(steps?|stages?|phases?|parts?)\b/i
+const stepUnitText = (unit: string) => `"${unit}" counts the work's own stages: count the things worked on (files, tests, clips, renders) instead.`
 
 /** A point Claude just counted: active now, and (counted before the list marked it) under way from now. */
 function markCounted(p: Point, now: number) {
@@ -2297,7 +2302,15 @@ function progressReminder(m: Model): string | null {
   const calls = m.calls ?? 0
   const due: string[] = []
   m.points.forEach((p, i) => {
-    if (p.state !== 'running' || p.count?.none || pointTasks(m, i).some(t => t.state === 'running')) return
+    if (p.state !== 'running' || pointTasks(m, i).some(t => t.state === 'running')) return
+    // Not counted (a cause being tracked down): asked again only after NONE_REMIND_CALLS, for the parts it now has.
+    if (p.count?.none) {
+      const since = calls - (p.count.call ?? calls)
+      if (since < NONE_REMIND_CALLS || (p.remindedCall != null && calls - p.remindedCall < NONE_REMIND_CALLS)) return
+      p.remindedCall = calls
+      due.push(`point ${i + 1} "${p.name}" has had no count for ${since} calls: once its cause is found, lay out what is left as parts ({point: ${i + 1}, subs: [...]}: the fix's files, the tests' checks), or send none again if it is still being tracked down`)
+      return
+    }
     const from = p.count?.call ?? p.startCall ?? calls
     // A point that started with no count is asked for one at once (its count belongs with the tick that starts it);
     // a count gone stale, after REMIND_CALLS.

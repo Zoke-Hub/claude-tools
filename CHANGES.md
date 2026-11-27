@@ -3,6 +3,13 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-27 · PulseWise: bug hunts show their parts (number unchanged)
+
+- **A search for a cause gets parts:** the code it reads (files), the cause by name, the fix and its tests, so an opened
+  beat shows a list instead of a stripe; the cause stays in the list by name until it is found.
+- **A point left uncounted is asked again** after a while, for the parts it has once its cause is found.
+- **Counts in steps, stages or parts are sent back:** count the things worked on (files, tests, clips) instead.
+
 ## 2026-11-27 · Folio and PulseWise: new chats start on the last pick; no one-part beats (numbers unchanged)
 
 - **Folio:** Watch or Automatic, the strategy and Custom's ceiling picked last, in any chat, are what a new chat starts

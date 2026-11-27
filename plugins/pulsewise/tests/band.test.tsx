@@ -2150,10 +2150,10 @@ test('a point started with no count is asked for one at once, a stale count afte
   let last = ''
   for (let i = 0; i < 8; i += 1) last = JSON.stringify(await call())
   expect(last).toContain('was last counted 2 / 5 edits, 8 calls ago')
-  // A point that can't be counted is left alone from then on.
+  // A point that can't be counted is left alone for a good while (then asked once for the parts its cause gave it).
   await $.tool.call({ tool: COUNT, point: 1, none: true })
   const after: string[] = []
-  for (let i = 0; i < 20; i += 1) after.push(JSON.stringify(await call()))
+  for (let i = 0; i < 15; i += 1) after.push(JSON.stringify(await call()))
   expect(after.some(text => text.includes('PulseWise:'))).toBe(false)
 })
 
@@ -2786,9 +2786,9 @@ test("a count whose total is the steps of the point's one stepped job stands asi
   expect(drawn).not.toContain('Claude · 0 / 5 steps')
   expect(beatPct(drawn, 'Fix the chunk store')).toBeGreaterThanOrEqual(55)
   // A count of Claude's own pieces, while its turn runs, keeps its part beside the job.
-  await $.tool.call({ tool: COUNT, point: 1, done: 0, total: 3, unit: 'parts' })
+  await $.tool.call({ tool: COUNT, point: 1, done: 0, total: 3, unit: 'scenes' })
   drawn = await openedBeat($)
-  expect(drawn).toContain('0 / 3 parts')
+  expect(drawn).toContain('0 / 3 scenes')
 })
 
 test("one long call with Claude's count unchanged holds its part where it stood, so the beat doesn't sink", () => {
@@ -2889,9 +2889,14 @@ test('short sub-tasks show as a list with their counts; uncounted ones by name, 
   expect(listed).toContain('Note 1: title timing 1 / 1 changes; Note 2: photo entrance 0 / 2 changes')
   expect(listed).not.toMatch(/Edit the pages \d+%\. /)
   await ui.unmount()
-  // A part that can't be counted beside counted ones: shown by name, and Claude is told to give it a point of its own.
+  // A part that can't be counted beside counted ones (a cause being found): it stays in the list, by name.
   const mixed = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, sub: 'Check the sync by eye', none: true }))
-  expect(mixed).toContain('can\'t be counted beside sub-tasks that can: give it a point of its own')
+  expect(mixed).toContain('shown as a list.')
+  expect(mixed).not.toContain('point of its own')
+  // A count in the work's own stages is sent back, for a point and for a sub-task, and nothing is kept.
+  expect(JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, done: 1, total: 3, unit: 'steps (fix, test, refreeze)' }))).toContain('counts the work\'s own stages')
+  expect(JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, subs: [{ name: 'Refreeze', total: 2, unit: 'steps' }] }))).toContain('counts the work\'s own stages')
+  expect(JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, sub: 'Check the sync by eye', none: true }))).not.toContain('Refreeze')
   // Point 2's parts can't be counted at all: names only, and the point counts them as they finish.
   await $.tool.call({ tool: COUNT, point: 2, subs: [{ name: 'Read the render log', none: true }, { name: 'Try a smaller batch', none: true }] })
   const named = JSON.stringify(await $.tool.call({ tool: COUNT, point: 2, sub: 'Read the render log', finished: true }))
@@ -3290,4 +3295,16 @@ test('a list with no heading keeps the top row, under the chat\'s name, so the c
   expect(drawn).toContain('"alt":"This chat"')
   expect(await ui.find({ key: 'fold' })).toBeTruthy()
   await ui.unmount()
+})
+
+test('a point marked as not counted is asked again after a while, for the parts it has once its cause is found', { options: { organiseLists: false } }, async ($, on) => {
+  await organisedChat($, on)
+  await $.tool.call({ tool: PLAN, scope: 'first_task', items: [{ content: 'Fix the stuck Down key', status: 'in_progress' }, { content: 'Run full retest', status: 'pending' }] })
+  const none = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, none: true, why: 'tracking down why Down stays stuck' }))
+  expect(none).toContain('lay out its parts (the code read, the cause by name, the fix, its tests)')
+  const said: string[] = []
+  for (let i = 0; i < 18; i++) said.push(JSON.stringify(await $.tool.call({ tool: 'Read', file_path: `/projects/demo/f${i}.js` })))
+  const asks = said.filter(one => one.includes('has had no count for'))
+  expect(asks.length).toBe(1)
+  expect(asks[0]).toContain('once its cause is found, lay out what is left as parts')
 })
