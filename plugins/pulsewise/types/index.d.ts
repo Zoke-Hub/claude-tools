@@ -211,8 +211,14 @@ export type Model = {
 /** One part of a point in an organised plan: its pieces and what they are, or none for one that can't be counted. */
 export type PlanPart = { name: string; total?: number; unit?: string; none?: boolean }
 
+/**
+ * A point of an organised plan: its parts when it works through two or more named things; else its own count (total
+ * and unit) when it is one thing or pieces of one kind; neither when the things it works through aren't named yet.
+ */
+export type PlanPoint = { name: string; parts: PlanPart[]; total?: number; unit?: string }
+
 /** A list as the small model laid it out: its heading, and each point with its parts. `list` is the list's start. */
-export type Plan = { list: number; at: number; heading: string; points: { name: string; parts: PlanPart[] }[] }
+export type Plan = { list: number; at: number; heading: string; points: PlanPoint[] }
 
 /** The current task list as a whole, for the estimate and the time log. */
 export type ListInfo = {

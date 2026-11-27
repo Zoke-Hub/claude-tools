@@ -3,6 +3,17 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-27 · Folio and PulseWise: new chats start on the last pick; no one-part beats (numbers unchanged)
+
+- **Folio:** Watch or Automatic, the strategy and Custom's ceiling picked last, in any chat, are what a new chat starts
+  with until another is picked (kept beside FolioPack's Saves to, in `~/.claude/folio/prefs.json`). A chat Folio already
+  knows keeps its own.
+- **PulseWise, beats with real parts:** the small model lays out parts only where a point works through two or more named
+  things. A point that is one thing (one build, one install) is counted as it is, with no one-line list that repeats its
+  name; a point whose things the request never named is asked for them, by name, as it starts.
+- **PulseWise, counts inside a step:** an agent's or a helper's step that runs tests counts their checks, and one that
+  fixes failures counts the failures, so a test step moves instead of standing still.
+
 ## 2026-11-27 · MarkRoom, Folio and PulseWise: work the same without the setup pack (numbers unchanged)
 
 - **MarkRoom on Windows without the setup pack:** `render_marks.py` reads and writes the notes as UTF-8 itself, so notes

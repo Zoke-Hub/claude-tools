@@ -5,7 +5,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, AgentStatus, On } from 'claude-code'
 
-import { cleanLabel, etaRecord, isLayoutLost, jobToTask, organisePrompt, parsePlan, pointFill, pointWeight, settleOverdue } from '../hooks/register'
+import { cleanLabel, etaRecord, isLayoutLost, jobToTask, organisePrompt, parsePlan, pointFill, pointWeight, settleOverdue, subForm } from '../hooks/register'
 
 const BAND = {
   plugin: 'pulsewise',
@@ -2939,6 +2939,8 @@ test('a follow-up to a working agent carries fresh progress lines with its point
   expect(briefs[0]).toContain('--point 2')
   expect(briefs[0]).toContain('your parts are point 2 "Build v02" only')
   expect(briefs[0]).toContain('3 "Check r02"')
+  // A part that runs tests counts their checks, so a test step is never a bar with nothing moving.
+  expect(briefs[0]).toContain('a part that runs tests counts their checks')
   // A new list in which the agent's work is point 1: the follow-up says so.
   await $.tool.call({ tool: PLAN, scope: 'continuation', items: [{ content: 'Build v02', status: 'in_progress' }, { content: 'Post r02', status: 'pending' }] })
   await $.tool.call({ tool: 'SendMessage', to: 'agent-1', message: 'One more note: the title is late.' } as never)
@@ -2952,7 +2954,7 @@ test('a sub-task name or a heading too long to show whole is sent back, never cu
   const long = 'Place every archival clip for the footage row'
   const reply = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, subs: [{ name: long, total: 3, unit: 'clips' }, { name: 'FF7', total: 2, unit: 'clips' }] }))
   expect(reply).toContain(`is ${long.length} characters: name sub-tasks in 32 or fewer`)
-  expect(reply).toContain('Point 1: 0 / 2 clips over 1 sub-task')
+  expect(reply).toContain('Point 1: 0 / 2 clips.')
   const heading = 'A heading far too long to sit on one line over the pulse of the band'
   expect(JSON.stringify(await $.tool.call({ tool: ESTIMATE, heading, minutes: 5 }))).toContain(`The heading is ${heading.length} characters: send one of 60 or fewer.`)
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
@@ -3094,11 +3096,66 @@ test("the small model's answer is read as a plan: parts with no count are names 
   expect(plan?.heading).toBe('A7 notes into r03')
   expect(plan?.points.map(p => p.name)).toEqual(['Read the notes', 'Work the notes into r03', 'Post r03 to the MarkRoom', 'Reply and close the notes'])
   expect(plan?.points[1]?.parts[2]).toEqual({ name: 'r03 render', total: 1, unit: 'renders' })
-  expect(parsePlan('{"heading": "x", "points": [{"name": "Find why it stalls", "parts": [{"name": "Read the log"}]}]}')?.points[0]?.parts).toEqual([{ name: 'Read the log', none: true }])
+  expect(parsePlan('{"heading": "x", "points": [{"name": "Find why it stalls", "parts": [{"name": "Read the log"}, {"name": "Read the trace"}]}]}')?.points[0]?.parts).toEqual([
+    { name: 'Read the log', none: true },
+    { name: 'Read the trace', none: true },
+  ])
   expect(parsePlan('Sorry, I cannot do that.')).toBeNull()
   expect(parsePlan('{"heading": "x", "points": []}')).toBeNull()
   // What the small model is given, with no request known and no work yet.
   expect(organisePrompt('', [{ name: 'Build v02', state: 'pending' }], [])).toBe("The request:\n(not known)\n\nClaude's draft list:\n1. Build v02")
+})
+
+// A plan as the small model gave it for a finishing round: one-thing points laid out as one part each, and points
+// whose things the request never named.
+const ONE_THING_PLAN = JSON.stringify({
+  heading: 'Finish 0.8',
+  points: [
+    { name: 'Do last clean-up item S17', parts: [{ name: 'S17', total: 1, unit: 'items' }] },
+    { name: 'Freeze build g10o', total: 1, unit: 'builds' },
+    { name: 'Update out-of-date tests', parts: [{ name: 'Out-of-date tests', none: true }] },
+    { name: 'Run full retest' },
+    { name: 'Read the notes', parts: [{ name: 'Note 1', total: 1, unit: 'notes' }, { name: 'Note 2', total: 1, unit: 'notes' }] },
+  ],
+})
+
+test('a plan point that is one thing is its own count, never a one-part list, and one with nothing named has neither', () => {
+  expect(parsePlan(ONE_THING_PLAN)?.points).toEqual([
+    { name: 'Do last clean-up item S17', parts: [], total: 1, unit: 'items' },
+    { name: 'Freeze build g10o', parts: [], total: 1, unit: 'builds' },
+    { name: 'Update out-of-date tests', parts: [] },
+    { name: 'Run full retest', parts: [] },
+    { name: 'Read the notes', parts: [{ name: 'Note 1', total: 1, unit: 'notes' }, { name: 'Note 2', total: 1, unit: 'notes' }] },
+  ])
+  // The brief says so: parts only for two or more named things.
+  const one = { name: 'S17', done: 0, total: 1, unit: 'items', at: 0 }
+  expect(subForm({ subs: [one] } as never)).toBeNull()
+  expect(subForm({ subs: [one, { ...one, name: 'S18' }] } as never)).toBe('list')
+})
+
+test('Claude is told a one-thing point as a plain count, and asked to name the things of a point the plan could not', async ($, on) => {
+  const { clock, asked } = await organisedChat($, on, ONE_THING_PLAN)
+  await $.prompt.submit({ text: 'Finish 0.8 up to the final install.' } as never)
+  const items = ['Do last clean-up item S17', 'Freeze build g10o', 'Update out-of-date tests', 'Run full retest'].map(content => ({ content, status: 'pending' }))
+  await $.tool.call({ tool: PLAN, scope: 'continuation', items })
+  await clock.advance(20)
+  expect(asked[0]?.system).toContain('Never one part alone')
+  const said = JSON.stringify(await $.tool.call({ tool: 'Read', file_path: '/projects/demo/notes.md' }))
+  expect(said).toContain('1. Do last clean-up item S17 · {point: 1, done: 0, total: 1, unit: \\"items\\"}')
+  expect(said).toContain('2. Freeze build g10o · {point: 2, done: 0, total: 1, unit: \\"builds\\"}')
+  expect(said).toContain('4. Run full retest\\n')
+  expect(said).toContain('list them as it starts, each by name')
+  // The plan sent back with points 1 and 3 started: each is asked for its count as the plan has it.
+  await $.tool.call({ tool: PLAN, scope: 'continuation', items: items.map((item, i) => ({ ...item, status: i === 0 || i === 2 ? 'in_progress' : 'pending' })) })
+  await $.tool.call({ tool: 'Read', file_path: '/projects/demo/notes.md' })
+  const asks = JSON.stringify(await $.tool.call({ tool: 'Read', file_path: '/projects/demo/notes.md' }))
+  expect(asks).toContain('point 1 \\"Do last clean-up item S17\\" has no count yet; the plan counts it as one kind of piece: {point: 1, done: 0, total: 1, unit: \\"items\\"}')
+  expect(asks).toContain('point 3 \\"Update out-of-date tests\\" has no count yet; the plan names no parts for it')
+  // One part sent anyway is the point's own count: no list, and Claude is told so.
+  const reply = JSON.stringify(await $.tool.call({ tool: COUNT, point: 1, subs: [{ name: 'S17', total: 1, unit: 'items' }] }))
+  expect(reply).toContain('Point 1: 0 / 1 items.')
+  expect(reply).not.toContain('shown as')
+  expect(reply).toContain('One part alone is the point')
 })
 
 test('the heading stays on its own line over the bar while a beat is open, and the running point shows under it', async ($, on) => {

@@ -153,8 +153,8 @@ keeps the copy you have when an update keeps the version number; the repository'
 
 ## Settings
 
-In the panel: Watch or Automatic, the strategy and Custom's ceiling are kept for each chat. FolioPack's **Saves to** is
-kept for every chat.
+In the panel: Watch or Automatic, the strategy and Custom's ceiling are kept for each chat, and the ones picked last
+are what a new chat starts with until another is picked. FolioPack's **Saves to** is kept for every chat.
 
 Plugin settings:
 

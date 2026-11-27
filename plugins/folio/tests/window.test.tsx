@@ -5,6 +5,7 @@ import { expect } from 'claude-code/testing'
 
 import { HOME, openPanel, savedView, start, stubEngine, test } from './engine'
 import type { Engine } from './engine'
+import { startSettings } from '../hooks/store'
 
 // Claude Code's own auto-compact window follows Folio's mode: a million in
 // Automatic (`/autocompact 1000000`), and in Watch what it was before.
@@ -152,5 +153,22 @@ test("a Watch pressed while Automatic's command still waits for the chat to be i
   await e.settle(2)
   expect(e.runs()).toEqual(['autocompact 1000000', 'autocompact auto'])
   expect(e.kept()).toEqual({})
+  await ui.unmount()
+})
+
+test('the setting picked last, in any chat, is the one a new chat starts with until another is picked', async ($, on) => {
+  const PREFS = `${HOME}/.claude/folio/prefs.json`
+  const u: Usage = { tokens: 120_000, fixed: 20_000, window: 1_000_000, raw: 1_000_000, source: 'auto' }
+  // A new chat (no index of its own) with Automatic and Lean picked last, and Saves to kept beside them.
+  const files = new Map([[PREFS, JSON.stringify({ saveTo: '/Work/Packs', settings: { mode: 'auto', strategy: 'lean', bogus: 1 } })]])
+  const e = stubEngine(on, { files, usage: u })
+  await start($)
+  const ui = await panel($)
+  // Only the settings Folio knows are taken.
+  expect(startSettings({ mode: 'auto', strategy: 'lean', bogus: 1, customReal: 'x' })).toEqual({ mode: 'auto', strategy: 'lean' })
+  // A pick here is kept for the next new chat, Saves to untouched.
+  await ui.press({ key: 'mode-watch' })
+  for (let i = 0; i < 10; i++) await e.clock.advance(20)
+  expect(JSON.parse(e.files.get(PREFS) ?? '{}')).toEqual({ saveTo: '/Work/Packs', settings: { mode: 'watch', strategy: 'lean', bogus: 1 } })
   await ui.unmount()
 })

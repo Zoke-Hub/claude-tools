@@ -17,7 +17,7 @@ import { drawPanel, layoutOf, resetPanel } from './panel'
 import { fixedBlocks } from './projects'
 import { AGENT_LINE, noteCut, RECALL_DESCRIPTION, RECALL_SCHEMA, recallCall, resetRecall } from './recall'
 import { pointerLine, resetPointers, warmPointers } from './pointers'
-import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, folioDir, homeDir, openStore, sessionsDir, setSettings, storeFailure } from './store'
+import { boundId, change, closeStore, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, folioDir, homeDir, openStore, sessionsDir, pickSettings, storeFailure } from './store'
 import { noteCommand, shortenRow } from './shorten'
 import { noteRefusal } from './strip'
 import { matchWindow } from './window'
@@ -391,7 +391,7 @@ export const register: Register = (on, options) => {
     const v = await read($, view)
     const top = v.context?.customTop ?? CUSTOM_MAX
     if (ceiling >= CUSTOM_MIN && ceiling <= Math.min(top, CUSTOM_MAX) && ceiling % CUSTOM_STEP === 0) {
-      await setSettings($, { customReal: ceiling })
+      await pickSettings($, { customReal: ceiling })
     }
 
     return done

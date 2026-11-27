@@ -4,7 +4,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Activity, Brief, ChunkRecord, Ledger, MapState, PickerView, RealSizes, RowType, Section, Settings, Strategy, Task, TaskList } from '../types'
+import type { Activity, Brief, ChunkRecord, Ledger, MapState, Mode, PickerView, RealSizes, RowType, Section, Settings, Strategy, Task, TaskList } from '../types'
 import type { Vault } from './private'
 import { copyTo } from './copies'
 import { safeName, slash } from './paths'
@@ -496,6 +496,11 @@ export async function openStore($: EngineInterface, id: string): Promise<Opened>
     const loaded = await loadStore($, dir, home)
     const shown = loaded.view
     if (shown !== null) await update($, view, v => ({ ...v, ...shown, working: null }))
+    else {
+      // A new chat starts on the settings picked last, in any chat, until another is picked.
+      const picked = startSettings((await readPrefs($)).settings)
+      if (Object.keys(picked).length > 0) await update($, view, v => ({ ...v, settings: { ...v.settings, ...picked } }))
+    }
     store = { kind: 'open', id, dir, written: loaded.written, vault: loaded.vault }
     // An upgrade, or a file found missing or damaged, is written before the
     // chat goes on. A write that fails is tried again at the next change.
@@ -690,6 +695,58 @@ export function sessionsDir(home: string): string {
 // Changes some settings, keeping the rest.
 export function setSettings($: EngineInterface, patch: Partial<Settings>) {
   return change($, x => ({ ...x, settings: { ...x.settings, ...patch } }))
+}
+
+// The person's choices kept for every chat, beside the sessions: FolioPack's
+// Saves to, and the settings picked last (Watch or Automatic, the strategy,
+// Custom's ceiling), which a new chat starts with until another is picked.
+export type Prefs = { saveTo?: string; settings?: Partial<Settings> }
+
+async function prefsPath($: EngineInterface): Promise<string> {
+  return `${folioDir(await homeDir($))}/prefs.json`
+}
+
+export async function readPrefs($: EngineInterface): Promise<Prefs> {
+  const prefs = await readJson<Prefs>($, await prefsPath($))
+
+  return prefs !== null && typeof prefs === 'object' ? prefs : {}
+}
+
+// The writes, one after another, so two picks made at once both land.
+let prefsWrites: Promise<void> = Promise.resolve()
+
+// Keeps some of the choices, the rest as they were. Never rejects.
+export function writePrefs($: EngineInterface, patch: Prefs): Promise<void> {
+  prefsWrites = prefsWrites.then(() => mergePrefs($, patch)).catch(() => {})
+
+  return prefsWrites
+}
+
+async function mergePrefs($: EngineInterface, patch: Prefs): Promise<void> {
+  const kept = await readPrefs($)
+  const settings = patch.settings ? { settings: { ...kept.settings, ...patch.settings } } : {}
+  await $.fs.write(await prefsPath($), JSON.stringify({ ...kept, ...patch, ...settings }))
+}
+
+// A setting the person picked in the panel: this chat's, and the one every
+// new chat starts with until another is picked.
+export function pickSettings($: EngineInterface, patch: Partial<Settings>) {
+  void writePrefs($, { settings: patch })
+
+  return setSettings($, patch)
+}
+
+const MODES: readonly string[] = ['watch', 'auto']
+
+// The kept settings a new chat starts with: only the ones Folio knows, each as
+// it should be (a file edited by hand or by an older Folio may hold others).
+export function startSettings(saved: unknown): Partial<Settings> {
+  const s = saved !== null && typeof saved === 'object' ? (saved as Record<string, unknown>) : {}
+  const mode = typeof s.mode === 'string' && MODES.includes(s.mode) ? { mode: s.mode as Mode } : {}
+  const strategy = typeof s.strategy === 'string' && Object.hasOwn(STRATEGIES, s.strategy) ? { strategy: s.strategy as Strategy } : {}
+  const custom = typeof s.customReal === 'number' && Number.isFinite(s.customReal) && s.customReal > 0 ? { customReal: s.customReal } : {}
+
+  return { ...mode, ...strategy, ...custom }
 }
 
 export function emptyBrief(): Brief {

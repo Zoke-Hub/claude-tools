@@ -16,7 +16,7 @@ import { parkTasks, tasksFromTopics, withParts } from './tasks'
 import { houseRules } from './house'
 import { upgradeView } from './upgrade'
 import { countByKind, redact } from './private'
-import { addActivity, cardName, cardOf, change, EMPTY_VIEW, folioDir, fromCard, homeDir, indexPart, loadChat, normaliseChunk, privateVault, readJson, readOriginal, savePrivate, sessionEpoch, sessionsDir, writeOriginal } from './store'
+import { addActivity, cardName, cardOf, change, EMPTY_VIEW, fromCard, homeDir, indexPart, loadChat, normaliseChunk, privateVault, readJson, readOriginal, readPrefs, savePrivate, sessionEpoch, sessionsDir, writeOriginal, writePrefs } from './store'
 import type { CardFile } from './store'
 import { base, expandHome, relative, slash } from './paths'
 import { isClaudeReplying } from './actions'
@@ -110,13 +110,13 @@ async function defaultFolder($: EngineInterface, root: string, home: string): Pr
 // Saves to is the person's choice for every chat, so it is kept outside any one
 // session.
 async function readSaveTo($: EngineInterface): Promise<string> {
-  const prefs = await readJson<{ saveTo?: unknown }>($, `${folioDir(await homeDir($))}/prefs.json`)
+  const saveTo = (await readPrefs($)).saveTo
 
-  return typeof prefs?.saveTo === 'string' ? prefs.saveTo : ''
+  return typeof saveTo === 'string' ? saveTo : ''
 }
 
-export async function writeSaveTo($: EngineInterface, saveTo: string): Promise<void> {
-  await $.fs.write(`${folioDir(await homeDir($))}/prefs.json`, JSON.stringify({ saveTo }))
+export function writeSaveTo($: EngineInterface, saveTo: string): Promise<void> {
+  return writePrefs($, { saveTo })
 }
 
 // The folder as the person reads it: the home folder as ~.

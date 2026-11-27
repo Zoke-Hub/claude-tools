@@ -19,7 +19,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, Hook, Register, RenderChildren } from 'claude-code'
 
-import type { ChatPhase, ListInfo, LogEntry, Model, Plan, PlanPart, Point, SideChat, SubTask, Task, TaskState, TaskStep } from '../types'
+import type { ChatPhase, ListInfo, LogEntry, Model, Plan, PlanPart, PlanPoint, Point, SideChat, SubTask, Task, TaskState, TaskStep } from '../types'
 
 type Api = Parameters<Hook<'session.start'>>[0]
 /** A tool PulseWise declares for Claude (its count, its estimate). */
@@ -201,7 +201,7 @@ const AIMS = [
 const COUNT_SPEC: ToolSpec = {
   name: 'count',
   description:
-    "PulseWise's bar for your own work, in the things being worked on (notes, clips, renders, files; never \"steps\" or \"parts\"), so the person sees the whole plan and the truth about now. As a point starts, in the same message as its tick, lay out all its parts: {point, subs: [{name, total, unit}, ...]}, every change, note, clip or file, and every render, upload or check it will run in the background (a job or agent named as its part fills it). A point of one kind of piece: {point, done: 0, total, unit}. Then, as pieces finish, before your next call and above all before a slow one (a render, an upload, a publish): {point, sub: <name>, done} (or {point, done}). Raise total when more turn up. A part that can't be counted: {point, sub: <name>, none: true}, then finished: true when it is done. {point, none: true, why} only for work that can't be sized up front (tracking down a cause). A point handed whole to one agent or job needs no parts from you: its steps are its parts. Send counts with another call, never on their own. Background work the bar can't follow: {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
+    "PulseWise's bar for your own work, in the things being worked on (notes, clips, renders, files; never \"steps\" or \"parts\"), so the person sees the whole plan and the truth about now. As a point starts, in the same message as its tick, lay out all its parts: {point, subs: [{name, total, unit}, ...]}, every change, note, clip or file, and every render, upload or check it will run in the background (a job or agent named as its part fills it). A point that is one thing or one kind of piece: {point, done: 0, total, unit} (one part alone is no list). Then, as pieces finish, before your next call and above all before a slow one (a render, an upload, a publish): {point, sub: <name>, done} (or {point, done}). Raise total when more turn up. A part that can't be counted: {point, sub: <name>, none: true}, then finished: true when it is done. {point, none: true, why} only for work that can't be sized up front (tracking down a cause). A point handed whole to one agent or job needs no parts from you: its steps are its parts. Send counts with another call, never on their own. Background work the bar can't follow: {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -302,12 +302,12 @@ export const longJobsBlock = (isOrganising: boolean) => ({
     AIMS,
     'How to tell it:',
     `- The task list holds the points, in the order they run; your reply itself, and waiting for the person, are not points.${isOrganising ? ' A new list goes to a small model that lays it out against these aims, and its plan comes back with one of your next calls: send it, keeping whatever you know better.' : ''} Mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch (points running side by side each the moment their work starts).`,
-    `- Counts go through ${COUNT_TOOL}, with another call: a point's parts as it starts ({point, subs: [{name, total, unit}]}, or {point, done: 0, total, unit} for one kind of piece), then each as it moves. none: true (with why) only for work that can't be sized up front. A new list's heading (what it is for) and estimate go through ${ESTIMATE_TOOL}.`,
+    `- Counts go through ${COUNT_TOOL}, with another call: a point's parts as it starts ({point, subs: [{name, total, unit}]} for two or more things, or {point, done: 0, total, unit} for one thing or one kind of piece), then each as it moves. none: true (with why) only for work that can't be sized up front. A new list's heading (what it is for) and estimate go through ${ESTIMATE_TOOL}.`,
     '- Any script or command you expect to run longer than about half a minute (builds, renders, batch file or image jobs, quick inline scripts too) reports through `~/.claude/progress/progress.py` (`python3`; on Windows `python`, or `py` where only the launcher is installed), with `--point <its point\'s number>`:',
     '  - a command or tool that prints its own progress: `progress.py run --name "<what it does>" --point N -- <command>` (it reads ffmpeg\'s `time=`, `NN%` and `done/total` lines; a quick inline script prints one `done/total` line per item, flushed);',
     '  - a Python script: `sys.path.insert(0, os.path.expanduser("~/.claude/progress")); import progress`, then `with progress.job(name, steps=[...], point="N"):`, `progress.step(name, done, total)`, `progress.track(items, name)`;',
     '  - step by step from a shell: `progress.py start "<name>" --point N --steps "A,B,C"`, then `progress.py step "<name>" B` as each step starts, then `progress.py finish "<name>"`.',
-    '  - a step\'s numbers count the items inside it as they finish (`progress.py step "<name>" Tests 14 16 --unit tests`), never the step\'s own place in the list; leave them out when there is nothing to count. Steps are named in one to three plain words.',
+    '  - a step\'s numbers count the items inside it as they finish (`progress.py step "<name>" Tests 14 16 --unit tests`), never the step\'s own place in the list: a step that runs tests counts their checks (the run\'s own passed / total), one that fixes failures counts the failures; leave them out only when there is nothing inside it to count. Steps are named in one to three plain words.',
     '- Each background job, command and agent gets its own name: the name of the part it does, so it fills that part (one no part names joins its point as a new part). PulseWise adds the progress lines to each agent\'s brief itself, and again to every follow-up message, with its point as the list stands: don\'t write your own. A redo of a stopped job passes `--redoes "<old name>"` (in Python, `redoes=`). Background work joins the point you last counted, so send that point\'s count in the same message that starts it.',
     '- A server or watcher left running is not progress: it stays off the bar (or tell the count tool so, with work and service: true).',
     `- Names (points, parts, jobs, commands, agents): ${NAME_LIMIT} characters or fewer, with the words that tell this one from its neighbours first. Leave out what they all share (a round, who does it, the model: the bar shows an agent's model itself).`,
@@ -330,7 +330,7 @@ function agentProgressLines(name: string, point: number | null, m?: Model): stri
   return [
     'Progress (PulseWise, the progress bar; these lines stand over any other progress instructions in this brief): report your steps through `~/.claude/progress/progress.py` (`python3`; on Windows `python`, or `py` where only the launcher is installed), under this exact name:',
     `- at the start: \`progress.py start ${job}${point !== null ? ` --point ${point}` : ''} --steps "<part>,<part>,..."\`, your parts in order, each named in one to three plain words;`,
-    `- as each part starts: \`progress.py step ${job} "<part>"\`. Numbers after it count the items inside that part as they finish (\`progress.py step ${job} Tests 14 16 --unit tests\`), never the part's own place in the list; leave them out when there is nothing to count;`,
+    `- as each part starts: \`progress.py step ${job} "<part>"\`. Numbers after it count the items inside that part as they finish (\`progress.py step ${job} Tests 14 16 --unit tests\`), never the part's own place in the list: a part that runs tests counts their checks (the run's own passed / total), one that fixes failures counts the failures; leave them out only when there is nothing inside it to count;`,
     `- at the end: \`progress.py finish ${job}\`, or \`progress.py fail ${job} "<why>"\` if it stops.`,
     '- the person follows this on the bar instead of reading messages: name your parts by what they work on, and count the things themselves (files, clips, tests), never steps. A later message may bring these lines again with another point: the newest ones win.',
     own && others.length
@@ -1338,7 +1338,9 @@ function closeUpSegs(m: Model, segs: Seg[], index: number, now: number): Seg[] {
   const p = m.points[index]
   if (!p?.subs?.length) return segs
   const rest = segs.filter(s => s.key !== `c:${index}`)
-  const isBar = subForm(p) === 'bar'
+  // One sub-task alone (no form) is the beat's own bar, named as it was listed.
+  const form = subForm(p)
+  const isBar = form === 'bar' || form === null
   const own = subSegs(p, index)
   const views = subViews(m, index).filter(v => v.s)
   const pieces = views.reduce((a, v) => a + (v.s?.none ? 1 : Math.max(1, v.s?.total ?? 1)), 0)
@@ -2143,12 +2145,15 @@ function subUnit(subs: SubTask[]): string | null | undefined {
   return units.size > 1 ? undefined : (subs.find(s => s.unit)?.unit ?? null)
 }
 
-/** How a point's sub-tasks are drawn in its opened beat: a bar, a list with counts, names only; null without any. */
+/**
+ * How a point's sub-tasks are drawn in its opened beat: a bar, a list with counts, names only; null without any, or
+ * with one alone (it is the beat's own count, drawn as its bar: a one-line list would only repeat the readout).
+ */
 export function subForm(p: Point): 'bar' | 'list' | 'names' | null {
   const subs = p.subs ?? []
-  if (!subs.length) return null
+  if (subs.length < 2) return null
   if (subs.every(s => s.none)) return 'names'
-  if (subs.length < 2 || subs.some(s => s.none || s.total < SUB_BAR_PIECES) || subUnit(subs) === undefined) return 'list'
+  if (subs.some(s => s.none || s.total < SUB_BAR_PIECES) || subUnit(subs) === undefined) return 'list'
   const minutes = p.correctedMin ?? p.estimateMin ?? null
   const pieces = subs.reduce((a, s) => a + s.total, 0)
   return (minutes !== null ? minutes >= SUB_BAR_MIN : pieces >= SUB_BAR_ALL) ? 'bar' : 'list'
@@ -2205,10 +2210,14 @@ function applySubs(m: Model, n: number, input: Record<string, unknown>, now: num
   const subs = p.subs ?? []
   const form = subForm(p)
   const c = p.count
-  // Sub-tasks counted in different units count as sub-tasks done: "over N sub-tasks" would say it twice.
-  const over = c?.unit === 'sub-tasks' ? '' : ` over ${subs.length} sub-task${subs.length === 1 ? '' : 's'}`
+  // Sub-tasks counted in different units count as sub-tasks done: "over N sub-tasks" would say it twice. One alone is
+  // the point's own count.
+  const over = c?.unit === 'sub-tasks' || subs.length < 2 ? '' : ` over ${subs.length} sub-tasks`
   const head = c ? `Point ${n}: ${c.done} / ${c.total}${c.unit ? ` ${c.unit}` : ''}${over}${form ? `, shown as ${form === 'bar' ? 'a bar' : form === 'list' ? 'a list' : 'names'}` : ''}.` : ''
   const notes: string[] = [...errors]
+  // A point laid out as one part: no list under its beat, so it may as well be counted as one kind of piece.
+  if (Array.isArray(input.subs) && subs.length === 1)
+    notes.push('One part alone is the point\'s own count, with no list under its beat: list two or more things, or count it as one kind of piece ({point, done, total, unit}).')
   // A part that can't be counted beside parts that can: it shows nothing on their bar, so it is a point of its own.
   const blank = subs.filter(s => s.none)
   if (blank.length && blank.length < subs.length)
@@ -2295,14 +2304,21 @@ function progressReminder(m: Model): string | null {
     const wait = p.count ? REMIND_CALLS : FIRST_REMIND_CALLS
     if (calls - from < wait || (p.remindedCall != null && calls - p.remindedCall < REMIND_CALLS)) return
     p.remindedCall = calls
-    // A point the plan laid out is asked for its parts as the plan has them.
-    const planned = p.count ? null : plannedParts(m, i)
+    // A point the plan laid out is asked for its count as the plan has it: its parts, its own count, or (where the
+    // plan names neither) the things it works through, by name.
+    const planned = p.count ? null : plannedPoint(m, i)
+    const count = planned ? plannedCount(planned, i + 1) : ''
+    const asked = `point ${i + 1} "${p.name}" has no count yet`
     due.push(
       p.count
         ? `point ${i + 1} "${p.name}" was last counted ${p.count.done} / ${p.count.total}${p.count.unit ? ` ${p.count.unit}` : ''}, ${calls - from} calls ago`
-        : planned
-          ? `point ${i + 1} "${p.name}" has no count yet; the plan laid out its parts: {point: ${i + 1}, subs: ${partsJson(planned)}}`
-          : `point ${i + 1} "${p.name}" has no count yet`,
+        : !planned
+          ? asked
+          : planned.parts.length
+            ? `${asked}; the plan laid out its parts: ${count}`
+            : count
+              ? `${asked}; the plan counts it as one kind of piece: ${count}`
+              : `${asked}; the plan names no parts for it: as it starts, list the things it works through ({point: ${i + 1}, subs: [...]}, each by name: the files, tests or clips), or count it as one kind of piece`,
     )
   })
   // Background work of Claude's own still running with no count (not a service, not reported by a job).
@@ -3213,11 +3229,12 @@ function shortenLong($: Api, m: Model) {
 const ORGANISE_SYSTEM = [
   'You lay out the task list for a progress bar. A person watches the bar instead of reading the chat in which Claude, an AI assistant, does the work. This is the brief the bar works to:',
   AIMS,
-  'Return only JSON, no other text: {"heading": string, "points": [{"name": string, "parts": [{"name": string, "total": number, "unit": string} or {"name": string, "none": true}]}]}.',
+  'Return only JSON, no other text: {"heading": string, "points": [{"name": string, then either "parts": [{"name": string, "total": number, "unit": string} or {"name": string, "none": true}, ...], or "total": number and "unit": string, or neither}]}.',
   `- heading: what the whole list is for, ${HEADING_LIMIT} characters or fewer.`,
   '- points: the work in the order it runs, one job each. First split every point that joins two jobs: two actions on different things are two points ("Post r02 and close notes" is "Post r02" and "Close the notes"; "Post, reply and close notes" is "Post the round" and "Reply and close the notes"). Keep the draft\'s other points in its words, and its points already done first, as they are.',
   `- names: ${NAME_LIMIT} characters or fewer, the words that tell them apart first.`,
-  '- parts: what each point works through, one part per thing, named for the thing ("Note 2: photo entrance", "FF7", "r02 render"), never for the work ("Notes read", "Fixes"). Where the request gives the things or their number (two notes, FF6 to FF9), list each as its own part, so the bar shows which one is under way. Each part has total (its pieces; a note, a render or an upload is 1) and unit (the thing, plural: "notes", "clips", "renders", "uploads", "frames"). The renders, uploads, publishes and checks a point runs are parts of it. A part that can\'t be counted is {"name": ..., "none": true}.',
+  '- parts: only for a point that works through two or more things the request, the draft or the work so far name (two notes, FF6 to FF9, three files): one part per thing, named for the thing ("Note 2: photo entrance", "FF7", "r02 render"), never for the work ("Notes read", "Fixes"), so the bar shows which one is under way. Each part has total (its pieces; a note, a render or an upload is 1) and unit (the thing, plural: "notes", "clips", "renders", "uploads", "frames"). The renders, uploads, publishes and checks a point runs are parts of it. A part that can\'t be counted is {"name": ..., "none": true}.',
+  '- A point that is one thing, or pieces of one kind with nothing to tell them apart (one build, one install, 40 frames), has no parts: give the point itself total and unit. A point whose things aren\'t named yet (the tests to update, what a retest finds) gets neither: Claude names them as it starts. Never one part alone, and never a part named like its point.',
   '- Use only what the request, the draft and the work so far say or clearly imply: never invent work or numbers. Where the request names things one by one (notes, rows, files), list each.',
   '- Nothing twice: a check, render or upload that has its own point is not also a part of another.',
 ].join('\n')
@@ -3259,7 +3276,14 @@ export function parsePlan(text: string): Omit<Plan, 'list' | 'at'> | null {
   const points = (Array.isArray(r.points) ? r.points : []).flatMap(one => {
     const point = one && typeof one === 'object' ? (one as Record<string, unknown>) : {}
     const name = clean(point.name)
-    return name ? [{ name, parts: (Array.isArray(point.parts) ? point.parts : []).flatMap(partOf) }] : []
+    if (!name) return []
+    const parts = (Array.isArray(point.parts) ? point.parts : []).flatMap(partOf)
+    if (parts.length > 1) return [{ name, parts }]
+    // One part alone is no list: a counted one is the point's own count, one that can't be counted says nothing.
+    const only = parts[0]
+    const total = only ? (only.total ?? 0) : Math.round(Number(point.total))
+    const unit = only ? (only.unit ?? '') : clean(point.unit)
+    return [{ name, parts: [], ...(total >= 1 ? { total, ...(unit ? { unit } : {}) } : {}) }]
   })
   return points.length ? { heading: clean(r.heading), points } : null
 }
@@ -3267,22 +3291,32 @@ export function parsePlan(text: string): Omit<Plan, 'list' | 'at'> | null {
 /** A plan's parts as Claude sends them to the count tool: [{"name": ..., "total": ..., "unit": ...}, ...]. */
 const partsJson = (parts: PlanPart[]) => JSON.stringify(parts.map(part => (part.none ? { name: part.name, none: true } : part)))
 
+/** A plan point's count as Claude sends it for point `n`: its parts, or its own count; '' when it names neither. */
+const plannedCount = (point: PlanPoint, n: number) =>
+  point.parts.length
+    ? `{point: ${n}, subs: ${partsJson(point.parts)}}`
+    : point.total
+      ? `{point: ${n}, done: 0, total: ${point.total}${point.unit ? `, unit: "${point.unit}"` : ''}}`
+      : ''
+
 /** What Claude reads with the organised plan for its new list. */
 const planNote = (plan: Omit<Plan, 'list' | 'at'>) =>
   [
-    "the plan for this list, laid out by a small model against the bar's four aims. Send what fits, keeping whatever you know better: update_plan with these points (their done and in-progress marks as they stand), the heading through estimate if it differs from yours, and each point's parts through count, in the same message as its tick.",
+    "the plan for this list, laid out by a small model against the bar's four aims. Send what fits, keeping whatever you know better: update_plan with these points (their done and in-progress marks as they stand), the heading through estimate if it differs from yours, and each point's count, in the same message as its tick. A point with no count here works through things the request doesn't name: list them as it starts, each by name (the files, tests or clips), or count it as one kind of piece.",
     plan.heading ? `Heading: ${plan.heading}` : '',
-    ...plan.points.map((point, i) => `${i + 1}. ${point.name}${point.parts.length ? ` · subs: ${partsJson(point.parts)}` : ''}`),
+    ...plan.points.map((point, i) => {
+      const count = plannedCount(point, i + 1)
+      return `${i + 1}. ${point.name}${count ? ` · ${count}` : ''}`
+    }),
   ]
     .filter(Boolean)
     .join('\n')
 
-/** The plan's parts for point `index` of the list, by the plan's point named most like it; null without. */
-function plannedParts(m: Model, index: number): PlanPart[] | null {
+/** The plan's point for point `index` of the list (the one named most like it); null without a plan for this list. */
+function plannedPoint(m: Model, index: number): PlanPoint | null {
   const p = m.points[index]
   if (!p || !m.plan || m.plan.list !== m.list?.started) return null
-  const found = bestByFit(m.plan.points, one => workFit(one.name, p.name))
-  return found?.parts.length ? found.parts : null
+  return bestByFit(m.plan.points, one => workFit(one.name, p.name)) ?? null
 }
 
 /** A new list that is the plan sent back (half its points or more named as the plan's): it needs no new layout. */
@@ -3957,7 +3991,8 @@ export const register: Register = (on, options) => {
     // An opened point's sub-tasks show only while it is open: as its close-up's segments, or as a list under it.
     const openSubs = openPoint !== null && openPoint >= 0 && m.points[openPoint]?.subs?.length ? (m.points[openPoint] as Point) : null
     // In the list: Claude's own sub-tasks, not the ones a job fills (those move in the close-up's bar).
-    const subList = openSubs && openPoint !== null && subForm(openSubs) !== 'bar' ? subViews(m, openPoint).flatMap(v => (v.s && !v.task ? [v.s] : [])) : []
+    const openForm = openSubs ? subForm(openSubs) : null
+    const subList = openSubs && openPoint !== null && (openForm === 'list' || openForm === 'names') ? subViews(m, openPoint).flatMap(v => (v.s && !v.task ? [v.s] : [])) : []
     const detail = openKey ? closeUpSegs(m, detailSegs(m, openKey, now), openPoint ?? -1, now) : []
     const openSeg = openKey ? segs.find(s => s.key === openKey) : undefined
     const pick = (key: string, seg?: Seg) => {

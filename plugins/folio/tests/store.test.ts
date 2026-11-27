@@ -65,11 +65,11 @@ test('a change writes only the files it changes; a load that changes nothing wri
   await start($)
   await clock.advance(1000)
   files.writes = []
-  // The person switches the mode: the chat's state, in the index, is all that changes.
+  // The person switches the mode: the chat's state, in the index, changes, and the pick is kept for new chats.
   const ui = await mountPanel($)
   await ui.press({ key: 'mode-auto' })
   await clock.advance(1000)
-  expect(files.writes.filter(p => !p.includes('/log/'))).toEqual([`${DIR}/index.json`])
+  expect(files.writes.filter(p => !p.includes('/log/')).sort()).toEqual([`${HOME}/.claude/folio/prefs.json`, `${DIR}/index.json`].sort())
   await ui.unmount()
 })
 

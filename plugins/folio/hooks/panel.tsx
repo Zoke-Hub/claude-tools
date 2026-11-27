@@ -18,7 +18,7 @@ import { cappedBrief } from './brief'
 import type { BriefLines } from './brief'
 import { partNo, partNos, runs } from './fold'
 import { ACTIVITY_ICONS, ROOM, STEP_ICONS, checkboxSvg, chunkState, chunkTitle, contextParts, drawsOf, FIXED, FULL, heavyTextSvg, HIGH, insetSvg, KEPT, miniSvg, OVER, stripKey, stripParts, TRIMMED, WARN, ZIP_ICON } from './pictures'
-import { change, chunkOf, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, homeDir, sessionEpoch, setSettings, settingsOf, STRATEGIES } from './store'
+import { change, chunkOf, CUSTOM_MAX, CUSTOM_MIN, CUSTOM_STEP, EMPTY_VIEW, homeDir, sessionEpoch, pickSettings, settingsOf, STRATEGIES } from './store'
 import type { Suggestion } from './suggest'
 import { suggestionsFor } from './suggest'
 import { matchWindow } from './window'
@@ -327,7 +327,7 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
     void update($, open, list => (list.includes(name) ? list.filter(x => x !== name && !x.startsWith(`${name}:`)) : [...list.filter(x => !isOneOf(x)), name]))
   }
   // Claude Code's own auto-compact window follows: a million in Automatic.
-  const setMode = (mode: 'watch' | 'auto') => () => void setSettings($, { mode }).then(() => matchWindow($, mode))
+  const setMode = (mode: 'watch' | 'auto') => () => void pickSettings($, { mode }).then(() => matchWindow($, mode))
   // The meter shows the new strategy's sizes at once, as both bars do.
   const customTop = v.context?.customTop ?? CUSTOM_MAX
   const canCustom = customTop >= CUSTOM_MIN
@@ -351,7 +351,7 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
 
       return
     }
-    void setSettings($, { strategy })
+    void pickSettings($, { strategy })
   }
   // A step of the Custom ceiling, kept within the slider's stops.
   const stepCeiling = (by: number) => () => {
@@ -361,7 +361,7 @@ async function drawPanelBody($: EngineInterface, e: Parameters<EngineInterface['
 
       return
     }
-    void setSettings($, { customReal: next })
+    void pickSettings($, { customReal: next })
   }
   // Pressed once, it reads Folding… and takes no second press until Folio
   // confirms the fold or says why none ran; a second press that comes before
