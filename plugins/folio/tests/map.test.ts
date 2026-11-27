@@ -1,7 +1,7 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import type { EngineInterface, SessionMessage } from 'claude-code'
 
 import { chunksOf, splitChunks, textTokens } from '../hooks/chunks'
@@ -11,7 +11,7 @@ import { blockOf, END_MARK, mapBudget, MAP_TOKENS, nextMap } from '../hooks/map'
 import { keptParts } from '../hooks/measure'
 import { EMPTY_REAL, EMPTY_VIEW, normaliseChunk } from '../hooks/store'
 import type { ChunkRecord, Ledger, LedgerItem, MapState, PickerView, Task } from '../types'
-import { DIR, ledgerOf, mountPanel, request, saved, savedOriginal, savedView, seed, start, stubEngine, talk } from './engine'
+import { DIR, ledgerOf, mountPanel, request, saved, savedOriginal, savedView, seed, start, stubEngine, talk, test, TEST_MS } from './engine'
 import type { Engine, On } from './engine'
 
 // The map (milestone 2c): what Claude reads for the folded parts, built by
@@ -526,21 +526,21 @@ async function withSavedMap($: Engine, on: On, top: string, version: number): Pr
   return (await $.prompt.context({ blocks: [] })).blocks.find(b => b.name === 'folio-history')!.text
 }
 
-// These three load a chat and build its history whole: about 3 s alone, more
-// beside the other test files.
-test('a saved map is read back at the next load and built on, not built again', { timeoutMs: 15_000 }, async ($, on) => {
+// These three load a chat and build its history whole: about 6 s alone, the
+// slowest here, so they get twice the time the others get.
+test('a saved map is read back at the next load and built on, not built again', { timeoutMs: 2 * TEST_MS }, async ($, on) => {
   const top = '[folio: folded history]\nThe top as an earlier fold left it.'
   expect((await withSavedMap($, on, top, 2)).startsWith(`${top}\n\n`)).toBe(true)
 })
 
-test('a map of version 1 is built again, so its recall lines name the new ways to recall', { timeoutMs: 15_000 }, async ($, on) => {
+test('a map of version 1 is built again, so its recall lines name the new ways to recall', { timeoutMs: 2 * TEST_MS }, async ($, on) => {
   const history = await withSavedMap($, on, '[folio: folded history]\nThe top as an older Folio left it: "32" returns part 32 word for word.', 1)
   expect(history).not.toContain('The top as an older Folio left it')
   expect(history).toContain('part "32" gives part 32\'s card')
   expect(history).toContain('kind "command" finds what was run')
 })
 
-test('a map an index holds is not read: the map lives in its own files', { timeoutMs: 15_000 }, async ($, on) => {
+test('a map an index holds is not read: the map lives in its own files', { timeoutMs: 2 * TEST_MS }, async ($, on) => {
   const messages = talk(10)
   const files = seed(messages, 'watch')
   const index = saved(files)

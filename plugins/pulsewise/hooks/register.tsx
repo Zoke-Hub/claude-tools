@@ -6,19 +6,20 @@
  *   PulseWise   the whole band above the prompt
  *   pulse       a chat's main progress bar (this chat's, or another's under "Other pulses")
  *   beat        one segment of a pulse: one point of the task list (code: a point's Seg, key "p:N")
- *   readout     the line above the pulse while a beat is open: its name, status, own % and a × to close it
+ *   readout     the now line's place while a beat is open: its name, status, own % and a × to close it
  *   close-up    a beat's own bar, opened by clicking it (code: detail)
  *   track       a background job's bar, under "Tracks" (code: lane)
  *   fill        the coloured part inside a beat or track: blue running, green done, red failed
  *   sweep       the light block moving through a beat or track: work going on with no count (code: stripe)
- *   heading     the request the list is for, over the pulse while no beat is open
- *   sub-tasks   a running point's parts, under the pulse: a bar, a list with counts, or names (code: subs)
+ *   heading     what the list is for, on its own line over the pulse the whole time
+ *   now line    under the heading while no beat is open: the point Claude is on and the part it is doing (nowLine)
+ *   sub-tasks   a point's parts, in its opened beat's close-up: a bar, a list with counts, or names (code: subs)
  *   Other pulses, Done, Nudge   the buttons under the band
  */
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, Hook, Register, RenderChildren } from 'claude-code'
 
-import type { ChatPhase, ListInfo, LogEntry, Model, Point, SideChat, SubTask, Task, TaskState, TaskStep } from '../types'
+import type { ChatPhase, ListInfo, LogEntry, Model, Plan, PlanPart, Point, SideChat, SubTask, Task, TaskState, TaskStep } from '../types'
 
 type Api = Parameters<Hook<'session.start'>>[0]
 /** A tool PulseWise declares for Claude (its count, its estimate). */
@@ -79,6 +80,8 @@ const tick = atom({ plugin: 'pulsewise', key: 'tick' } as const, 0)
 const selected = atom({ plugin: 'pulsewise', key: 'selected' } as const, null)
 const showDone = atom({ plugin: 'pulsewise', key: 'showDone' } as const, false)
 const showSide = atom({ plugin: 'pulsewise', key: 'showSide' } as const, false)
+// The band folded down to one row (its chevron in the top-right corner folds and unfolds it).
+const folded = atom({ plugin: 'pulsewise', key: 'folded' } as const, false)
 
 /**
  * The model in this version's shape. The host keeps the model across a hot reload of the code, so a model an older
@@ -184,10 +187,21 @@ const retryNote = (name: string, answer: string) =>
 // Claude's own tools: its count for a point's own work, and its estimate for a new list.
 const COUNT_TOOL = 'mcp__pulsewise__count'
 const ESTIMATE_TOOL = 'mcp__pulsewise__estimate'
+
+// What the bar is for, said once in plain words: Claude reads it at the start of a chat (in the block) and the small
+// model that lays out a new list reads it as its brief. Every instruction after it is only how to send things, so
+// Claude can judge any case by these four, not by a rule for each.
+const AIMS = [
+  'What the bar is for: the person follows your work on it instead of reading your messages, so it shows the whole plan from the start and the truth about now.',
+  '1. The whole plan at once. One point per job: two jobs are two points (posting a round and closing its notes are two). As a point starts, lay out all its parts: every change, note, clip or file, and every render, upload or check it will run in the background. Nothing you already know about should first appear when it begins.',
+  '2. Each piece of work once, in real units. Count the things being worked on (notes, clips, renders, files), never "steps" or "parts". A background job or agent is the part it does: name it as that part, and it fills it. No job, agent or part repeats another point\'s work.',
+  '3. The truth about now. Counts move as pieces finish, and before a slow call (a render, an upload, a publish), so the % never sits still while work happens.',
+  '4. The plan stays current. When the list changes, work and counts follow the list as it now stands; a follow-up message to an agent carries its point as the list now stands (PulseWise adds it).',
+].join('\n')
 const COUNT_SPEC: ToolSpec = {
   name: 'count',
   description:
-    "PulseWise's bar for your own work on a task-list point. Every point is counted from the moment it starts, in the same message as its tick: size it by its pieces (files to change, cases to run, clips to place; a name holding a range or a number, like FF6–FF9 or 2 notes, already gives them) and send {point, done: 0, total, unit}; send it again as pieces finish, before the next call, above all before a slow one (an upload, a publish, a render). A point with parts of its own gets sub-tasks instead: {point, subs: [{name, total, unit}, ...]} when it starts, then {point, sub: <name>, done, total} as each moves; the point's count is then theirs. Sub-tasks counted in one unit, a few pieces each, show as a bar under the point; short ones as a list with their counts. A part that can't be counted: {point, sub: <name>, none: true}, then {point, sub: <name>, finished: true} when done (names only); if its siblings are counted, make it a point of its own instead. Send counts in the same message as another call, never on their own. Raise total when more pieces turn up (the bar shows that honestly). {point, none: true, why} only for work that can't be sized up front (tracking down a cause). A point whose work you hand whole to a background agent or job needs no count from you: its own steps show on the bar. Background scripts report through the progress helper instead; for background work the bar can't follow, send {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
+    "PulseWise's bar for your own work, in the things being worked on (notes, clips, renders, files; never \"steps\" or \"parts\"), so the person sees the whole plan and the truth about now. As a point starts, in the same message as its tick, lay out all its parts: {point, subs: [{name, total, unit}, ...]}, every change, note, clip or file, and every render, upload or check it will run in the background (a job or agent named as its part fills it). A point of one kind of piece: {point, done: 0, total, unit}. Then, as pieces finish, before your next call and above all before a slow one (a render, an upload, a publish): {point, sub: <name>, done} (or {point, done}). Raise total when more turn up. A part that can't be counted: {point, sub: <name>, none: true}, then finished: true when it is done. {point, none: true, why} only for work that can't be sized up front (tracking down a cause). A point handed whole to one agent or job needs no parts from you: its steps are its parts. Send counts with another call, never on their own. Background work the bar can't follow: {work, service: true} (a server or watcher that keeps running) or {work, finished: true}.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -224,7 +238,7 @@ const COUNT_SPEC: ToolSpec = {
 const ESTIMATE_SPEC: ToolSpec = {
   name: 'estimate',
   description:
-    "A new task list's heading and estimate, sent once, in the same message as its first call: heading, the request the list is for in a few words (shown over the bar), and minutes for the whole list and for each point, in list order, as long as they will really take you (waits for the person left out). A short list may send its heading alone. The list's total is clock time: points that run side by side count once. Decimals are fine (0.5 is half a minute). PulseWise corrects the estimate by how your past ones turned out, sizes each point on the bar by it until the point is done, and logs both against the real times.",
+    "A new task list's heading and estimate, sent once, in the same message as its first call: heading, what the whole list is for in a few words (it stays over the bar the whole time), and minutes for the whole list and for each point, in list order, as long as they will really take you (waits for the person left out). A short list may send its heading alone. The list's total is clock time: points that run side by side count once. Decimals are fine (0.5 is half a minute). PulseWise corrects the estimate by how your past ones turned out, sizes each point on the bar by it until the point is done, and logs both against the real times.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -236,12 +250,16 @@ const ESTIMATE_SPEC: ToolSpec = {
   isDeferred: false,
 }
 
+// Read by Claude with a new list that a small model is laying out (organiseList): its plan comes later, by itself.
+const ORGANISING = ' A small model is laying this list out against the bar\'s four aims; its plan comes with one of your next calls.'
+
 // Read by Claude once per new list worth estimating (isWorthEstimating): its estimate, which PulseWise corrects itself.
-const estimateNote = () =>
-  `PulseWise: a new task list. With your next call, send ${ESTIMATE_TOOL}: its heading (the request in a few words) and minutes for the whole list (clock time: points that run side by side count once) and for each point, as long as they will really take you (waits for the person left out). Decimals are fine.`
+const estimateNote = (isOrganising: boolean) =>
+  `PulseWise: a new task list. With your next call, send ${ESTIMATE_TOOL}: its heading (what the list is for, in a few words) and minutes for the whole list (clock time: points that run side by side count once) and for each point, as long as they will really take you (waits for the person left out). Decimals are fine.${isOrganising ? ORGANISING : ''}`
 
 // Read by Claude for a new list too short to estimate: its heading alone.
-const headingNote = () => `PulseWise: a new task list. With your next call, send ${ESTIMATE_TOOL} with its heading (the request in a few words).`
+const headingNote = (isOrganising: boolean) =>
+  `PulseWise: a new task list. With your next call, send ${ESTIMATE_TOOL} with its heading (what the list is for, in a few words).${isOrganising ? ORGANISING : ''}`
 
 // A list is asked for an estimate when it is more than three points, or has background work running: a short list
 // done in a few calls tells the time log little.
@@ -273,26 +291,28 @@ const addedNote = (names: string[], rules: string) =>
 
 // Read by Claude (never shown to the person) once, when it writes a new task list: plan the parallel work up front.
 const parallelPlan = (rules: string) =>
-  `PulseWise (the progress bar): this task list is new. Before starting it, check which open points need nothing from each other (no result, file or decision of another point) and start those side by side now, without waiting to be asked: background agents or background commands named like their points, each point marked in progress as its work starts and kept there until that work is finished and checked; join the results at a later point. A point that needs another one waits for it. Say in one line which points run side by side. A big but mechanical point may go to an agent on a cheaper model only as ${rules} allows: read it before handing one off, and never for judgement, design or words the user reads.`
+  `PulseWise (the progress bar): this task list is new. Before starting it, check which open points need nothing from each other (no result, file or decision of another point) and start those side by side now, without waiting to be asked: background agents or background commands named like their points, each point marked in progress as its work starts and kept there until that work is finished and checked; join the results at a later point. Inside a point too: many items of one kind (downloads, conversions, renders) go in one batched script that runs them side by side and counts them as they finish, not one call each, and agents doing such work are briefed the same way. A point that needs another one waits for it. Say in one line which points run side by side. A big but mechanical point may go to an agent on a cheaper model only as ${rules} allows: read it before handing one off, and never for judgement, design or words the user reads.`
 
-// Sent to Claude once per conversation (again after every compaction): what the bar is told, and by what. The
-// helper's stable copy is ~/.claude/progress/progress.py, which the mod puts there from its own bundled one.
-export const LONG_JOBS_BLOCK = {
+// Sent to Claude once per conversation (again after every compaction): what the bar is for (AIMS), then how to tell
+// it. The helper's stable copy is ~/.claude/progress/progress.py, which the mod puts there from its own bundled one.
+export const longJobsBlock = (isOrganising: boolean) => ({
   name: 'pulsewise',
   text: [
-    'PulseWise (the progress bar under the task list) shows what it is told:',
-    '- The task list: one point per piece of work the request needs, in the order it runs; a point is work ticked on its own (things done in one pass and ticked together are one point with a count), and your reply itself, and waiting for the person, are not points. Before you start, go over the list for work done twice: a point, a sub-task, or an agent\'s or job\'s part that does another point\'s work (an agent that renders and checks, beside a point that checks) is merged or left to that one point; say in one line what you merged. Mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch (points running side by side each the moment their work starts).',
-    `- Counts: every point is counted from the moment it starts, through ${COUNT_TOOL} in the same message as its tick: its pieces (FF6–FF9 is 4 rows, "2 notes" is 2 notes), or its sub-tasks when it has parts of its own, each with its own count. A part that can't be counted beside counted ones is a point of its own; none: true (with why) only for work that can't be sized up front. A new list's heading (the request in a few words) and estimate go through ${ESTIMATE_TOOL}. Both ride along with your other calls.`,
-    '- Any script or command you expect to run longer than about half a minute (builds, renders, batch file or image jobs, quick inline scripts too) reports through `~/.claude/progress/progress.py` (`python3`; on Windows, `python`), with `--point <its point\'s number>`:',
+    'PulseWise (the progress bar under the task list) shows what it is told.',
+    AIMS,
+    'How to tell it:',
+    `- The task list holds the points, in the order they run; your reply itself, and waiting for the person, are not points.${isOrganising ? ' A new list goes to a small model that lays it out against these aims, and its plan comes back with one of your next calls: send it, keeping whatever you know better.' : ''} Mark each point in progress as its own work starts and tick it as it really finishes, one at a time, never in a batch (points running side by side each the moment their work starts).`,
+    `- Counts go through ${COUNT_TOOL}, with another call: a point's parts as it starts ({point, subs: [{name, total, unit}]}, or {point, done: 0, total, unit} for one kind of piece), then each as it moves. none: true (with why) only for work that can't be sized up front. A new list's heading (what it is for) and estimate go through ${ESTIMATE_TOOL}.`,
+    '- Any script or command you expect to run longer than about half a minute (builds, renders, batch file or image jobs, quick inline scripts too) reports through `~/.claude/progress/progress.py` (`python3`; on Windows `python`, or `py` where only the launcher is installed), with `--point <its point\'s number>`:',
     '  - a command or tool that prints its own progress: `progress.py run --name "<what it does>" --point N -- <command>` (it reads ffmpeg\'s `time=`, `NN%` and `done/total` lines; a quick inline script prints one `done/total` line per item, flushed);',
     '  - a Python script: `sys.path.insert(0, os.path.expanduser("~/.claude/progress")); import progress`, then `with progress.job(name, steps=[...], point="N"):`, `progress.step(name, done, total)`, `progress.track(items, name)`;',
     '  - step by step from a shell: `progress.py start "<name>" --point N --steps "A,B,C"`, then `progress.py step "<name>" B` as each step starts, then `progress.py finish "<name>"`.',
     '  - a step\'s numbers count the items inside it as they finish (`progress.py step "<name>" Tests 14 16 --unit tests`), never the step\'s own place in the list; leave them out when there is nothing to count. Steps are named in one to three plain words.',
-    '- Each background job, command and agent gets its own name. PulseWise adds the progress lines to each agent\'s brief itself (its name and its point\'s number): don\'t write your own. A redo of a stopped job passes `--redoes "<old name>"` (in Python, `redoes=`). Background work joins the point you last counted, so send that point\'s count in the same message that starts it.',
+    '- Each background job, command and agent gets its own name: the name of the part it does, so it fills that part (one no part names joins its point as a new part). PulseWise adds the progress lines to each agent\'s brief itself, and again to every follow-up message, with its point as the list stands: don\'t write your own. A redo of a stopped job passes `--redoes "<old name>"` (in Python, `redoes=`). Background work joins the point you last counted, so send that point\'s count in the same message that starts it.',
     '- A server or watcher left running is not progress: it stays off the bar (or tell the count tool so, with work and service: true).',
-    `- Names (points, jobs, commands, agents): ${NAME_LIMIT} characters or fewer, with the words that tell this one from its neighbours first. Leave out what they all share (a round, who does it, the model: the bar shows an agent's model itself).`,
+    `- Names (points, parts, jobs, commands, agents): ${NAME_LIMIT} characters or fewer, with the words that tell this one from its neighbours first. Leave out what they all share (a round, who does it, the model: the bar shows an agent's model itself).`,
   ].join('\n'),
-}
+})
 
 // Agents that look things up and answer, with no work of their own to show on the bar: their briefs are left as they are.
 const LOOKUP_AGENTS = /^(explore|plan|claude-code-guide|statusline-setup|web-fetch)$/i
@@ -308,10 +328,11 @@ function agentProgressLines(name: string, point: number | null, m?: Model): stri
   const own = point !== null ? m?.points[point - 1] : undefined
   const others = own && m ? m.points.flatMap((p, i) => (i + 1 !== point && p.state !== 'done' ? [`${i + 1} "${p.name}"`] : [])) : []
   return [
-    'Progress (PulseWise, the progress bar; these lines stand over any other progress instructions in this brief): report your steps through `~/.claude/progress/progress.py` (`python3`; on Windows, `python`), under this exact name:',
+    'Progress (PulseWise, the progress bar; these lines stand over any other progress instructions in this brief): report your steps through `~/.claude/progress/progress.py` (`python3`; on Windows `python`, or `py` where only the launcher is installed), under this exact name:',
     `- at the start: \`progress.py start ${job}${point !== null ? ` --point ${point}` : ''} --steps "<part>,<part>,..."\`, your parts in order, each named in one to three plain words;`,
     `- as each part starts: \`progress.py step ${job} "<part>"\`. Numbers after it count the items inside that part as they finish (\`progress.py step ${job} Tests 14 16 --unit tests\`), never the part's own place in the list; leave them out when there is nothing to count;`,
     `- at the end: \`progress.py finish ${job}\`, or \`progress.py fail ${job} "<why>"\` if it stops.`,
+    '- the person follows this on the bar instead of reading messages: name your parts by what they work on, and count the things themselves (files, clips, tests), never steps. A later message may bring these lines again with another point: the newest ones win.',
     own && others.length
       ? `- your parts are point ${point} "${own.name}" only. The list's other open points (${others.join(', ')}) are done apart from you: give their work no parts of yours.`
       : '',
@@ -587,7 +608,73 @@ function isCountBesideJobs(m: Model, index: number): boolean {
 }
 
 /** Claude's counted share of a point as the bar draws it: null when it sent no count or its count stands aside. */
-const ownFraction = (m: Model, index: number) => (isCountBesideJobs(m, index) ? null : countFraction(m.points[index]))
+const ownFraction = (m: Model, index: number) => {
+  const p = m.points[index]
+  // With sub-tasks, Claude's part is all of them, the ones its jobs fill included (subFraction).
+  if (p?.subs?.length) return subFraction(m, index)
+  return isCountBesideJobs(m, index) ? null : countFraction(p)
+}
+
+/** One of a point's sub-tasks as the bar shows it: as Claude listed it (`s`), with the job that fills it (`task`). */
+type SubView = { name: string; s: SubTask | null; task: Task | null }
+
+/**
+ * A point's sub-tasks with its background work matched in: each job or agent of the point fills the sub-task named
+ * like it (its best fit, each sub-task taken once), and one that no sub-task names joins as a sub-task of its own
+ * (`s` null). Empty for a point with no sub-tasks.
+ */
+function subViews(m: Model, index: number): SubView[] {
+  const kept = drawing?.m === m ? drawing.views.get(index) : undefined
+  if (kept) return kept
+  const subs = m.points[index]?.subs ?? []
+  if (!subs.length) return []
+  const views: SubView[] = subs.map(s => ({ name: s.name, s, task: null }))
+  for (const t of pointTasks(m, index)) {
+    // A job fills the free sub-task it fits best, on one telling word or more (a looser fit than isSameWork: the
+    // sub-task is already the point's own, so a job's name need only point to it).
+    let best = -1
+    let bestFit = 0
+    views.forEach((v, j) => {
+      if (v.task || !v.s) return
+      const fit = workFit(t.name, v.name)
+      if (fit > bestFit) {
+        best = j
+        bestFit = fit
+      }
+    })
+    const found = views[best]
+    if (found) found.task = t
+    else views.push({ name: t.name, s: null, task: t })
+  }
+  if (drawing?.m === m) drawing.views.set(index, views)
+  return views
+}
+
+// The model a draw reads (the stored one, which mutate never changes in place: it works on a copy) and its points'
+// sub-task views, worked out once for the whole draw instead of again by each part of the band that asks.
+let drawing: { m: Model; views: Map<number, SubView[]> } | null = null
+
+/** How far one listed sub-task is: its job's progress once a job fills it (or Claude's count, if that is further). */
+function subViewFraction(m: Model, v: SubView): number {
+  const s = v.s
+  const own = !s ? 0 : s.none ? (s.finished ? 1 : 0) : Math.min(1, s.done / Math.max(1, s.total))
+  if (!v.task) return own
+  const job = v.task.state === 'done' ? 1 : v.task.state === 'failed' ? 0 : (taskFraction(sourceOf(m, v.task)) ?? 0)
+  return Math.max(own, job)
+}
+
+/** Claude's part of a point with sub-tasks: its listed sub-tasks, each by its pieces, the ones jobs fill included. */
+function subFraction(m: Model, index: number): number {
+  let sum = 0
+  let all = 0
+  for (const v of subViews(m, index)) {
+    if (!v.s) continue
+    const weight = v.s.none ? 1 : Math.max(1, v.s.total)
+    sum += weight * subViewFraction(m, v)
+    all += weight
+  }
+  return all ? sum / all : 0
+}
 
 // One of Claude's tool calls running longer than this with its count unchanged (a slow upload, publish or render):
 // Claude's counted part is drawn as it stood when that call began, so the beat doesn't sink during the one call.
@@ -651,6 +738,12 @@ function modelTag(agentModel: string | null | undefined): string {
   return word ? `${word[0]?.toUpperCase() ?? ''}${word.slice(1).toLowerCase()}` : ''
 }
 
+/** The sub-task a job fills (subViews), by the name it was listed under; null when no sub-task names it. */
+function filledName(m: Model, t: Task): string | null {
+  if (t.point < 0) return null
+  return subViews(m, t.point).find(v => v.s && v.task?.id === t.id)?.name ?? null
+}
+
 /**
  * How a beat's readout names the one piece of work running in it: an agent named like its point says so once
  * ("Agent (Fable)"), else with its own name ("Agent (Fable): Check the pack"); other work by its name.
@@ -676,7 +769,8 @@ function pointStatus(m: Model, index: number, now: number): string {
         : `${countWords(p) ?? `Claude working ${fmt(now - p.seenAt)}`} · not yet marked in progress`
       : 'not started'
   if (running.length > 1) return `${running.length} at once · ${Math.round(pointFill(m, index, now) * 100)}%`
-  if (running.length === 1 && only) return `${workName(only, p.name)} · ${taskStatus(m, sourceOf(m, only), now)}`
+  // A job that fills a listed sub-task goes by that sub-task's name: the piece of work, named once.
+  if (running.length === 1 && only) return `${filledName(m, only) ?? workName(only, p.name)} · ${taskStatus(m, sourceOf(m, only), now)}`
   if (p.state === 'running' && isHeld(m)) return `${heldWords(m)} · ${fmt(ownNow(m, now) - (p.started ?? now))}`
   if (p.state === 'running') return countWords(p) ?? `Claude working ${fmt(now - (p.started ?? now))}`
   const end = Math.max(p.ended ?? now, ...tasks.map(t => t.ended ?? now))
@@ -809,7 +903,9 @@ function detailSegs(m: Model, key: string, now: number): Seg[] {
     return source.steps.length > 1 ? stepSegs(source, now) : [taskSeg(t, now, m)]
   }
   const index = Number(key.slice(2))
-  const tasks = index === -1 ? otherTasks(m) : pointTasks(m, index)
+  // A job that fills one of the point's sub-tasks is part of Claude's part (subFraction), not a part beside it.
+  const filled = new Set(subViews(m, index).flatMap(v => (v.s && v.task ? [v.task.id] : [])))
+  const tasks = (index === -1 ? otherTasks(m) : pointTasks(m, index)).filter(t => !filled.has(t.id))
   const single = tasks.length === 1 ? tasks[0] : undefined
   const p = m.points[index]
   const f = p ? ownFraction(m, index) : null
@@ -908,6 +1004,34 @@ function lineItems(m: Model, now: number, isWorking: boolean, onlyClaude = false
   return items
 }
 
+/**
+ * The line under the heading while no beat is open: the point Claude is on and what it is doing there now (the
+ * sub-task a job fills while it runs, else the sub-task under way, else the point's running job, count or Claude's
+ * current step), as "3. Work the notes: Note 2: photo entrance · 1 / 2 changes". A running job is named only: its
+ * numbers are on its own track. Empty when nothing runs.
+ */
+function nowLine(m: Model, now: number, isWorking: boolean): string {
+  const running = m.points.findIndex(p => p.state === 'running')
+  const at = claudePoint(m, now)
+  const i = at >= 0 && m.points[at]?.state !== 'done' ? at : running
+  const p = m.points[i]
+  if (!p) return ''
+  const head = `${i + 1}. ${labelOf(m, p.name)}`
+  const views = subViews(m, i).filter(v => v.s)
+  // A running job's numbers are on its track under Tracks (named as the sub-task it fills): here only its name.
+  const jobbed = views.find(v => v.task?.state === 'running')
+  if (jobbed?.task) return `${head}: ${jobbed.name}`
+  const open = views.filter(v => subViewFraction(m, v) < 1)
+  const own = open.find(v => (v.s?.done ?? 0) > 0) ?? open[0]
+  if (own?.s) return `${head}: ${own.name}${subValue(own.s) ? ` · ${subValue(own.s)}` : ''}`
+  const job = pointTasks(m, i).find(t => t.state === 'running')
+  if (job) return `${head}: ${workName(job, p.name)}`
+  const counted = countText(p)
+  if (counted) return `${head}: ${counted}`
+  const claude = claudeNow(m, now, isWorking)
+  return claude ? `${head}: ${claude}` : head
+}
+
 /** One background job's own bar. */
 type Lane = { key: string; title: string; kind?: string; right: string; isBusy: boolean; segs: Seg[]; line: string; point?: number; isAlert?: boolean }
 
@@ -947,7 +1071,8 @@ function laneRows(m: Model, now: number): Lane[] {
       const forPoint = t.point >= 0 && m.points[t.point] ? `point ${t.point + 1} · ` : ''
       const line = isEnded ? `${forPoint}${t.state === 'failed' ? 'stopped' : 'done'} · ${elapsed}` : t.service ? `${forPoint}serving · running ${elapsed}` : `${forPoint}${what}`
       const tag = t.kind === 'agent' ? modelTag(t.model) : ''
-      return { key: `l:${t.id}`, title: `${labelOf(m, t.name).replace(/^Agent:\s*/, '')}${tag ? ` · ${tag}` : ''}`, kind: t.kind === 'agent' ? 'agent' : undefined, right: t.service && !isEnded ? 'serving' : right, isBusy: isBusy && !t.service, segs, line, point: t.point, isAlert: t.state === 'silent' }
+      // A job that fills a listed sub-task is that sub-task's track, under its listed name.
+      return { key: `l:${t.id}`, title: `${filledName(m, t) ?? labelOf(m, t.name).replace(/^Agent:\s*/, '')}${tag ? ` · ${tag}` : ''}`, kind: t.kind === 'agent' ? 'agent' : undefined, right: t.service && !isEnded ? 'serving' : right, isBusy: isBusy && !t.service, segs, line, point: t.point, isAlert: t.state === 'silent' }
     })
 }
 
@@ -982,9 +1107,10 @@ const MAIN_BAR_TOP = 1
 const MAIN_BAR_H = 10
 // The beats' height in rows: the segments' click windows are cut to it.
 const BAR_ROWS = MAIN_BAR_H / ROW_PX
-// The readout's × is centred in a square this big, its centre this far down the readout's picture.
-const CLOSE_SIZE = 18
-const CLOSE_CENTER_Y = 11
+// A corner button (the readout's ×, the band's chevron) is centred in a square this big, its centre this far down its
+// row's picture.
+const CORNER_SIZE = 18
+const CORNER_CENTER_Y = 11
 // How far down its picture a close-up's bar sits, under the hairline.
 const DETAIL_TOP = 10
 const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
@@ -994,8 +1120,9 @@ const SVG_STYLE = [
   `text{font-family:${FONT}}`,
   '.track{fill:rgba(255,255,255,0.16)}.run{fill:#4C8DF6}.done{fill:#3FB950}.fail{fill:#F85149}.warn{fill:#E3B341}',
   '.t1{fill:#ECECEC}.t2{fill:#A9A9A9}.t3{fill:#8C8C8C}.edge{fill:none;stroke:rgba(255,255,255,0.6);stroke-width:1.5}',
+  '.chev{fill:none;stroke:#A9A9A9;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}',
   '@media (prefers-color-scheme: light){.track{fill:rgba(0,0,0,0.12)}.run{fill:#2F6FE4}.done{fill:#2DA44E}.fail{fill:#CF222E}.warn{fill:#9A6700}',
-  '.t1{fill:#1F1F1F}.t2{fill:#5C5C5C}.t3{fill:#8A8A8A}.edge{stroke:rgba(0,0,0,0.45)}}',
+  '.t1{fill:#1F1F1F}.t2{fill:#5C5C5C}.t3{fill:#8A8A8A}.edge{stroke:rgba(0,0,0,0.45)}.chev{stroke:#5C5C5C}}',
   '</style>',
 ].join('')
 
@@ -1089,7 +1216,7 @@ const pulseRightRoom = (right: string) => (right ? Math.ceil(right.length * 7) +
  * close mark at the right end.
  */
 function headerPicture(line: string, pct: string, width: number): { source: string; height: number } {
-  const closeW = CLOSE_SIZE + 6
+  const closeW = CORNER_SIZE + 6
   const room = width - Math.ceil(pct.length * 7) - 12 - closeW
   const cut = line.indexOf(': ')
   const title = cut > 0 ? line.slice(0, cut) : line
@@ -1099,7 +1226,7 @@ function headerPicture(line: string, pct: string, width: number): { source: stri
   const body = [
     `<text x="0" y="15" font-size="13"><tspan class="t1" font-weight="500">${esc(shownTitle)}</tspan><tspan class="t2">${esc(shownWhat)}</tspan></text>`,
     `<text class="t1" x="${pc(width - closeW, width)}" y="15" text-anchor="end" font-size="13" font-weight="500">${esc(pct)}</text>`,
-    `<text class="t3" x="${pc(width - CLOSE_SIZE / 2, width)}" y="16" text-anchor="middle" font-size="14">×</text>`,
+    `<text class="t3" x="${pc(width - CORNER_SIZE / 2, width)}" y="16" text-anchor="middle" font-size="14">×</text>`,
   ].join('')
   return { source: svgDoc(22, body), height: 22 }
 }
@@ -1128,15 +1255,45 @@ const LANE_BAR_TOP = 19
 const LANE_BAR = 5
 
 /** A job row's value on the right: its % (or time) bright while it runs, what follows it dimmer. */
-function rightMarkup(row: Lane, top: number): string {
+function rightMarkup(row: Lane, top: number, x = '100%'): string {
   const [first = '', ...rest] = row.right.split(' · ')
   const cls = row.isAlert ? 'warn' : row.isBusy ? 't1' : 't3'
   const after = rest.length ? `<tspan class="${row.isAlert ? 'warn' : 't2'}"> · ${esc(rest.join(' · '))}</tspan>` : ''
-  return `<text x="100%" y="${top + 13}" text-anchor="end" font-size="12.5"><tspan class="${cls}">${esc(first)}</tspan>${after}</text>`
+  return `<text x="${x}" y="${top + 13}" text-anchor="end" font-size="12.5"><tspan class="${cls}">${esc(first)}</tspan>${after}</text>`
 }
 
-/** Rows of small bars: a title and its % or time, a thin bar of its own parts, and one line of what runs. */
-function miniBarsPicture(rows: Lane[], width: number, id: string, caption = '', indent = 0): { source: string; height: number } {
+// The chevron in the band's top-right corner (a corner button, CORNER_SIZE as the readout's ×): its centre level with
+// its row's text (the heading's, as the ×; the folded row's, a little higher), and the room the row's text leaves it.
+const FOLDED_CHEVRON_Y = 9
+const CHEVRON_ROOM = CORNER_SIZE + 8
+
+/**
+ * The chevron, drawn at the right end of the band's first row (a drawn icon, not text): pointing down to fold the band
+ * to one row, up to bring the whole band back. Anchored to the picture's right edge (x 100%) and drawn leftward from it,
+ * with a margin, so the app's own edge never cuts it whatever width it gives the band; it stays over its click area
+ * (right: 0).
+ */
+function chevronMarkup(isUp: boolean, centerY: number): string {
+  const [top, bottom] = [CORNER_SIZE / 2 - 1.75, CORNER_SIZE / 2 + 1.75]
+  const path = isUp ? `M-10 ${bottom} L-6.5 ${top} L-3 ${bottom}` : `M-10 ${top} L-6.5 ${bottom} L-3 ${top}`
+  return `<svg x="100%" y="${centerY - CORNER_SIZE / 2}" width="1" height="${CORNER_SIZE}" overflow="visible"><path class="chev" d="${path}"/></svg>`
+}
+
+/**
+ * The band folded down: this chat's pulse as one row, the way another chat's shows under "Other pulses" (its title,
+ * its % and time left, a thin bar of its points, and what runs now): that row's own drawing, with the chevron's room
+ * kept on its right and the chevron, pointing up, in it.
+ */
+const foldedPicture = (row: Lane, width: number) =>
+  miniBarsPicture([row], width, 'f', '', { rightRoom: CHEVRON_ROOM, extra: chevronMarkup(true, FOLDED_CHEVRON_Y) })
+
+/**
+ * Rows of small bars: a title and its % or time, a thin bar of its own parts, and one line of what runs. `indent` sets
+ * the title in from the left; `rightRoom` keeps room right of the % (the folded band's chevron), and `extra` is drawn
+ * over the rows.
+ */
+function miniBarsPicture(rows: Lane[], width: number, id: string, caption = '', at: { indent?: number; rightRoom?: number; extra?: string } = {}): { source: string; height: number } {
+  const { indent = 0, rightRoom = 0, extra = '' } = at
   const offset = caption ? CAPTION_H : 0
   const head = caption ? `<text class="t3" x="0" y="12" font-size="11.5">${esc(fitLabel(caption, width, 6.1))}</text>` : ''
   const body = rows
@@ -1144,15 +1301,15 @@ function miniBarsPicture(rows: Lane[], width: number, id: string, caption = '', 
       const top = offset + n * LANE_ROW
       const spots = placeSegments(shares(row.segs), width, 0)
       return [
-        `<text x="${indent}" y="${top + 13}" font-size="12.5"><tspan class="t1">${esc(fitLabel(row.title, width - 40 - row.right.length * 7 - (row.kind ? 50 : 0), 6.8))}</tspan>${row.kind ? `<tspan class="t3"> · ${esc(row.kind)}</tspan>` : ''}</text>`,
-        rightMarkup(row, top),
+        `<text x="${indent}" y="${top + 13}" font-size="12.5"><tspan class="t1">${esc(fitLabel(row.title, width - 40 - rightRoom - row.right.length * 7 - (row.kind ? 50 : 0), 6.8))}</tspan>${row.kind ? `<tspan class="t3"> · ${esc(row.kind)}</tspan>` : ''}</text>`,
+        rightMarkup(row, top, rightRoom ? pc(width - rightRoom, width) : '100%'),
         row.segs.length ? barMarkup(row.segs, spots, width, top + LANE_BAR_TOP, LANE_BAR, null, `${id}${n}-`) : '',
         row.line ? `<text class="${row.isAlert ? 'warn' : 't3'}" x="0" y="${top + 40}" font-size="11">${esc(fitLabel(row.line, width, 6.1))}</text>` : '',
       ].join('')
     })
     .join('')
   const height = offset + rows.length * LANE_ROW - 4
-  return { source: svgDoc(height, head + body), height }
+  return { source: svgDoc(height, head + body + extra), height }
 }
 
 /** A sub-task's count in words ("1 / 2 changes"), "done" for a finished one with no count, '' for an open one with none. */
@@ -1172,14 +1329,27 @@ function subSegs(p: Point, index: number): Seg[] {
 }
 
 /**
- * An opened beat's close-up with sub-tasks: Claude's own part gives way to them. Drawn as a bar, its sub-tasks are the
- * bar's segments in Claude's place; as a list, Claude's segment leaves the bar (the list under it carries that part),
- * and with no other work on the point no bar is drawn at all. Its jobs and agents keep their segments either way.
+ * An opened beat's close-up with sub-tasks: Claude's own part gives way to them. A sub-task a job fills is a moving
+ * segment of the bar, named as it was listed and filled by its job; Claude's own sub-tasks join the bar when they are
+ * drawn as one (subForm), else they are the list under it. They share Claude's part of the bar by their pieces. Work
+ * that no sub-task names keeps its own segments.
  */
-function closeUpSegs(segs: Seg[], p: Point | undefined, index: number): Seg[] {
+function closeUpSegs(m: Model, segs: Seg[], index: number, now: number): Seg[] {
+  const p = m.points[index]
   if (!p?.subs?.length) return segs
   const rest = segs.filter(s => s.key !== `c:${index}`)
-  return subForm(p) === 'bar' ? [...subSegs(p, index), ...rest] : rest
+  const isBar = subForm(p) === 'bar'
+  const own = subSegs(p, index)
+  const views = subViews(m, index).filter(v => v.s)
+  const pieces = views.reduce((a, v) => a + (v.s?.none ? 1 : Math.max(1, v.s?.total ?? 1)), 0)
+  const claude = segs.find(s => s.key === `c:${index}`)?.weight ?? 1000 * Math.max(1, views.length)
+  const shown = views.flatMap((v, j): Seg[] => {
+    const seg = own[j]
+    if (!seg || (!v.task && !isBar)) return []
+    const weight = Math.max(1, (claude * (v.s?.none ? 1 : Math.max(1, v.s?.total ?? 1))) / Math.max(1, pieces))
+    return [v.task ? { ...taskSeg(v.task, now, m), key: seg.key, name: v.name, weight, fill: subViewFraction(m, v) } : { ...seg, weight }]
+  })
+  return [...shown, ...rest]
 }
 
 // A sub-task list's row height.
@@ -1206,9 +1376,20 @@ function subListPicture(subs: SubTask[], width: number): { source: string; heigh
   return { source: svgDoc(height, rows), height }
 }
 
-/** The heading over the pulse: the request the list is for, while no beat is open. */
+/** The heading over the pulse: what the list is for, on its own line the whole time, with the chevron at its right end. */
 function headingPicture(text: string, width: number): { source: string; height: number } {
-  return { source: svgDoc(22, `<text class="t1" x="0" y="15" font-size="13" font-weight="500">${esc(fitLabel(text, width, 7.2))}</text>`), height: 22 }
+  const body = `<text class="t1" x="0" y="15" font-size="13" font-weight="500">${esc(fitLabel(text, width - CHEVRON_ROOM, 7.2))}</text>${chevronMarkup(false, CORNER_CENTER_Y)}`
+  return { source: svgDoc(22, body), height: 22 }
+}
+
+/** The line under the heading while no beat is open (nowLine): the running point bright, what it does dimmer. */
+function nowPicture(line: string, width: number): { source: string; height: number } {
+  const cut = line.indexOf(': ')
+  const title = cut > 0 ? line.slice(0, cut) : line
+  const what = cut > 0 ? ` · ${line.slice(cut + 2)}` : ''
+  const shownTitle = fitLabel(title, width, 6.8)
+  const shownWhat = shownTitle === title ? fitLabel(what, width - title.length * 6.8, 6.4) : ''
+  return { source: svgDoc(20, `<text x="0" y="14" font-size="12.5"><tspan class="t2">${esc(shownTitle)}</tspan><tspan class="t3">${esc(shownWhat)}</tspan></text>`), height: 20 }
 }
 
 /** What runs in another chat, after its project folder's name when that is not this chat's. */
@@ -1234,7 +1415,7 @@ function otherChatsPicture(chats: SideChat[], width: number): { source: string; 
     })),
   }))
   // The name sits in from the bar's edge, so its click highlight has room round it.
-  return miniBarsPicture(rows, width, 'x', '', NAME_PAD)
+  return miniBarsPicture(rows, width, 'x', '', { indent: NAME_PAD })
 }
 
 /** The finished things, newest first, each with a green tick or a red cross. */
@@ -1563,6 +1744,32 @@ function nameFit(mine: Set<string>, theirs: Set<string>): number {
   const share = shared.length / Math.max(1, Math.min(mine.size, theirs.size))
   if (isNamedLike(mine, theirs)) return 1 + share
   return shared.some(isTellingWord) ? share : 0
+}
+
+/**
+ * How well two names fit as the same piece of work (a job and the sub-task it fills, a plan's point and the list's):
+ * 3 for the same words, else nameFit (0 when they share no telling word). An agent's "Agent: " doesn't count.
+ */
+const workFit = (a: string, b: string) => {
+  const bare = (name: string) => name.replace(/^Agent:\s*/, '').trim().toLowerCase()
+  return bare(a) === bare(b) ? 3 : nameFit(taskWords(a), taskWords(b))
+}
+
+/** Two names for the same piece of work: the same words, or named like each other. */
+const isSameWork = (a: string, b: string) => workFit(a, b) >= 1
+
+/** The one of `items` that fits best by `fit`, and well enough to be the same work (1 or more); undefined for none. */
+function bestByFit<T>(items: T[], fit: (item: T) => number): T | undefined {
+  let best: T | undefined
+  let bestFit = 1
+  for (const item of items) {
+    const f = fit(item)
+    if (f >= bestFit) {
+      best = item
+      bestFit = f + 1e-9
+    }
+  }
+  return best
 }
 
 /**
@@ -1920,54 +2127,6 @@ function applyWork(m: Model, input: Record<string, unknown>, now: number, fx: Ef
   return 'With work, send service: true (it keeps running) or finished: true (its work is done).'
 }
 
-// Words that name a kind of work. A job's step or a sub-task sharing one with another point's name (and not with its
-// own point's) may be doing that point's work: "Check render" in point 2 beside a point 3 "Check r02 frame by frame".
-const WORK_WORDS = new Set(['check', 'review', 'verify', 'test', 'render', 'post', 'publish', 'upload', 'export', 'install', 'push', 'commit', 'release', 'deliver'])
-
-/** The other open points a step or sub-task of point `own` names a kind of work of (WORK_WORDS), by index. */
-function otherPointsLike(m: Model, text: string, own: number): number[] {
-  const ownWords = nameWords(m.points[own]?.name ?? '')
-  const kinds = [...nameWords(text)].filter(word => WORK_WORDS.has(word) && !ownWords.has(word))
-  if (!kinds.length) return []
-  return m.points.flatMap((p, i) => (i !== own && p.state !== 'done' && kinds.some(word => nameWords(p.name).has(word)) ? [i] : []))
-}
-
-/** What Claude reads about a part that may repeat other points' work. */
-const repeatsNote = (m: Model, what: string, others: number[]) =>
-  `${what} looks like ${others.map(i => `point ${i + 1} "${m.points[i]?.name ?? ''}"`).join(' and ')}: if it is the same work, leave it to ${others.length === 1 ? 'that point' : 'those points'} (or merge them in the list).`
-
-const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']
-// Plural words after a number that are measures, not things to count ("30 fps", "10 seconds").
-const MEASURES = new Set(['fps', 'secs', 'seconds', 'mins', 'minutes', 'hours', 'days', 'weeks', 'months', 'years', 'times', 'pixels', 'percents', 'bits', 'bytes'])
-
-/** A plural word that names things to count ("rows", "photos"), not a measure ("minutes", "fps"). */
-const isThingsWord = (word: string | undefined) => !!word && /^[a-z][a-z-]*s$/i.test(word) && !MEASURES.has(word.toLowerCase())
-
-/**
- * How many things a point's name already names: a range ("FF6–FF9", "A17-A30", "r01–r05", "rows 1–12") or a number
- * with what it counts ("2 notes", "the six scenes"). Null for none. A range of plain numbers counts only beside a word
- * for the things counted, so a measure ("2-3 minutes"), a date ("the 11-26 build") or years ("2024–2026") are not.
- */
-export function countInName(name: string): { total: number; what: string; unit: string | null } | null {
-  const range = /\b([a-z]{0,4})(\d{1,4})\s*[–—-]\s*(?:\1)?(\d{1,4})\b/i.exec(name)
-  if (range) {
-    const [whole, prefix = '', from = '', to = ''] = range
-    const a = Number(from)
-    const b = Number(to)
-    const before = /([a-z][a-z-]*)\s+$/i.exec(name.slice(0, range.index))?.[1]
-    const after = /^\s+([a-z][a-z-]*)/i.exec(name.slice(range.index + whole.length))?.[1]
-    const things = isThingsWord(after) ? after : isThingsWord(before) ? before : undefined
-    if (b > a && b - a < 500 && (prefix || (b <= 999 && things))) return { total: b - a + 1, what: whole.trim(), unit: things ? things.toLowerCase() : null }
-  }
-  const counted = new RegExp(`\\b(\\d{1,3}|${NUMBER_WORDS.join('|')})\\s+(?:new\\s+|more\\s+|short\\s+)?([a-z][a-z-]*s)\\b`, 'i').exec(name)
-  if (counted) {
-    const [whole, number = '', noun = ''] = counted
-    const total = /^\d+$/.test(number) ? Number(number) : NUMBER_WORDS.indexOf(number.toLowerCase())
-    if (total >= 1 && !MEASURES.has(noun.toLowerCase())) return { total, what: whole.trim(), unit: noun.toLowerCase() }
-  }
-  return null
-}
-
 // A point's sub-tasks are drawn as a bar when their work takes a while and moves on it: all counted in one unit, each
 // with SUB_BAR_PIECES pieces or more, and the point estimated at SUB_BAR_MIN minutes or more (with no estimate, at
 // least SUB_BAR_ALL pieces in all). Short ones are a list with their counts; ones that can't be counted, their names.
@@ -1984,7 +2143,7 @@ function subUnit(subs: SubTask[]): string | null | undefined {
   return units.size > 1 ? undefined : (subs.find(s => s.unit)?.unit ?? null)
 }
 
-/** How a point's sub-tasks are drawn under the pulse: a bar, a list with counts, their names only; null without any. */
+/** How a point's sub-tasks are drawn in its opened beat: a bar, a list with counts, names only; null without any. */
 export function subForm(p: Point): 'bar' | 'list' | 'names' | null {
   const subs = p.subs ?? []
   if (!subs.length) return null
@@ -2039,7 +2198,6 @@ function applySub(p: Point, raw: Record<string, unknown>, now: number): string {
 /** Claude's counts for a point's sub-tasks (the count tool's `sub` or `subs`), applied; returns the reply Claude reads. */
 function applySubs(m: Model, n: number, input: Record<string, unknown>, now: number): string {
   const p = m.points[n - 1] as Point
-  const known = new Set((p.subs ?? []).map(s => s.name.toLowerCase()))
   const given = Array.isArray(input.subs) ? input.subs.map(one => (one && typeof one === 'object' ? (one as Record<string, unknown>) : { name: one })) : [{ ...input, name: input.sub }]
   const errors = given.map(raw => applySub(p, raw, now)).filter(Boolean)
   subCount(p, now, m.calls ?? 0)
@@ -2055,11 +2213,6 @@ function applySubs(m: Model, n: number, input: Record<string, unknown>, now: num
   const blank = subs.filter(s => s.none)
   if (blank.length && blank.length < subs.length)
     notes.push(`${blank.map(s => `"${s.name}"`).join(', ')} can't be counted beside sub-tasks that can: give ${blank.length === 1 ? 'it a point' : 'them points'} of ${blank.length === 1 ? 'its' : 'their'} own in the list.`)
-  // New sub-tasks that name another point's kind of work.
-  for (const s of subs.filter(one => !known.has(one.name.toLowerCase()))) {
-    const others = otherPointsLike(m, s.name, n - 1)
-    if (others.length) notes.push(repeatsNote(m, `Sub-task "${s.name}"`, others))
-  }
   return [head, ...notes].filter(Boolean).join(' ')
 }
 
@@ -2142,12 +2295,13 @@ function progressReminder(m: Model): string | null {
     const wait = p.count ? REMIND_CALLS : FIRST_REMIND_CALLS
     if (calls - from < wait || (p.remindedCall != null && calls - p.remindedCall < REMIND_CALLS)) return
     p.remindedCall = calls
-    const named = p.count ? null : countInName(p.name)
+    // A point the plan laid out is asked for its parts as the plan has them.
+    const planned = p.count ? null : plannedParts(m, i)
     due.push(
       p.count
         ? `point ${i + 1} "${p.name}" was last counted ${p.count.done} / ${p.count.total}${p.count.unit ? ` ${p.count.unit}` : ''}, ${calls - from} calls ago`
-        : named
-          ? `point ${i + 1} "${p.name}" has no count yet, and its name names ${named.total} (${named.what}): send total: ${named.total}${named.unit ? `, unit: "${named.unit}"` : ''}, or sub-tasks for them`
+        : planned
+          ? `point ${i + 1} "${p.name}" has no count yet; the plan laid out its parts: {point: ${i + 1}, subs: ${partsJson(planned)}}`
           : `point ${i + 1} "${p.name}" has no count yet`,
     )
   })
@@ -2386,28 +2540,6 @@ function takeNotes(m: Model): string | null {
   return notes.map(note => `PulseWise: ${note}`).join('\n')
 }
 
-/**
- * A job checked against the list, once (and its steps again when more come): a point number the list doesn't have,
- * and steps that name another point's kind of work. Either is told to Claude.
- */
-function checkJob(m: Model, t: Task, d: JobFile) {
-  if (!m.points.length) return
-  if (t.checkedSteps === undefined) {
-    const wanted = String(d.point ?? '').trim()
-    if (/^\d+$/.test(wanted) && !m.points[Number(wanted) - 1]) {
-      const where = t.point >= 0 ? `point ${t.point + 1} "${m.points[t.point]?.name ?? ''}"` : 'other work'
-      tell(m, `job "${t.name}" says --point ${wanted}, but the list has ${m.points.length} points; it shows under ${where}. Give jobs the point's number in the list as it is now.`)
-    }
-  }
-  const from = t.checkedSteps ?? 0
-  if (t.steps.length > from)
-    for (const s of t.steps.slice(from)) {
-      const others = otherPointsLike(m, s.name, t.point)
-      if (others.length) tell(m, repeatsNote(m, `Step "${s.name}" of job "${t.name}"`, others))
-    }
-  t.checkedSteps = t.steps.length
-}
-
 function applyJobFile(m: Model, d: JobFile, now: number, fx: Effect[]): boolean {
   const existing = m.tasks.find(t => t.id === d.id)
   if (!existing) {
@@ -2425,7 +2557,6 @@ function applyJobFile(m: Model, d: JobFile, now: number, fx: Effect[]): boolean 
     linkToShell(m, task)
     linkToAgent(m, task)
     linkRedo(m, task, d.redoes ?? null, now, fx)
-    if (d.state === 'running') checkJob(m, task, d)
     if (d.state !== 'running') endTask(m, task, d.state === 'done', d.ended ?? now, fx, d.message ?? undefined, true)
     return true
   }
@@ -2434,9 +2565,7 @@ function applyJobFile(m: Model, d: JobFile, now: number, fx: Effect[]): boolean 
     if (existing.endedByFile || d.state !== 'running' || !hasReported) return false
     reopenJob(m, existing)
   }
-  Object.assign(existing, { ...progressOf(d), updated: Math.max(existing.updated, d.updated) })
-  if (existing.state === 'running' && existing.steps.length > (existing.checkedSteps ?? 0)) checkJob(m, existing, d)
-  // Not yet linked to the command that runs it (the bar read the job before the command came in, or saw it before a
+  Object.assign(existing, { ...progressOf(d), updated: Math.max(existing.updated, d.updated) })  // Not yet linked to the command that runs it (the bar read the job before the command came in, or saw it before a
   // reload brought this rule in): tried again at each report.
   if (existing.state === 'running' && !m.tasks.some(t => t.coveredBy === existing.id)) linkToShell(m, existing)
   if (existing.state === 'silent' && hasReported) resume(existing)
@@ -3080,6 +3209,146 @@ function shortenLong($: Api, m: Model) {
   })()
 }
 
+// The small model that lays out a new list (organiseList): its brief is the bar's AIMS, and it hands back JSON.
+const ORGANISE_SYSTEM = [
+  'You lay out the task list for a progress bar. A person watches the bar instead of reading the chat in which Claude, an AI assistant, does the work. This is the brief the bar works to:',
+  AIMS,
+  'Return only JSON, no other text: {"heading": string, "points": [{"name": string, "parts": [{"name": string, "total": number, "unit": string} or {"name": string, "none": true}]}]}.',
+  `- heading: what the whole list is for, ${HEADING_LIMIT} characters or fewer.`,
+  '- points: the work in the order it runs, one job each. First split every point that joins two jobs: two actions on different things are two points ("Post r02 and close notes" is "Post r02" and "Close the notes"; "Post, reply and close notes" is "Post the round" and "Reply and close the notes"). Keep the draft\'s other points in its words, and its points already done first, as they are.',
+  `- names: ${NAME_LIMIT} characters or fewer, the words that tell them apart first.`,
+  '- parts: what each point works through, one part per thing, named for the thing ("Note 2: photo entrance", "FF7", "r02 render"), never for the work ("Notes read", "Fixes"). Where the request gives the things or their number (two notes, FF6 to FF9), list each as its own part, so the bar shows which one is under way. Each part has total (its pieces; a note, a render or an upload is 1) and unit (the thing, plural: "notes", "clips", "renders", "uploads", "frames"). The renders, uploads, publishes and checks a point runs are parts of it. A part that can\'t be counted is {"name": ..., "none": true}.',
+  '- Use only what the request, the draft and the work so far say or clearly imply: never invent work or numbers. Where the request names things one by one (notes, rows, files), list each.',
+  '- Nothing twice: a check, render or upload that has its own point is not also a part of another.',
+].join('\n')
+// What the small model reads of the request and of Claude's work so far.
+const REQUEST_KEPT = 2000
+const RECENT_KEPT = 12
+
+/** What the small model is given: the request, Claude's draft list with each point's state, and Claude's work so far. */
+export const organisePrompt = (request: string, items: { name: string; state: string }[], work: string[]) =>
+  [
+    `The request:\n${request || '(not known)'}`,
+    `Claude's draft list:\n${items.map((item, i) => `${i + 1}. ${item.name}${item.state === 'done' ? ' (done)' : item.state === 'running' ? ' (in progress)' : ''}`).join('\n')}`,
+    work.length ? `What Claude has done so far:\n${work.map(line => `- ${line}`).join('\n')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+/** The small model's answer as a plan (heading and points with parts), or null when it isn't one. */
+export function parsePlan(text: string): Omit<Plan, 'list' | 'at'> | null {
+  const from = text.indexOf('{')
+  const to = text.lastIndexOf('}')
+  if (from < 0 || to <= from) return null
+  let raw: unknown
+  try {
+    raw = JSON.parse(text.slice(from, to + 1))
+  } catch {
+    return null
+  }
+  const r = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const clean = (value: unknown) => (typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '')
+  const partOf = (one: unknown): PlanPart[] => {
+    const part = one && typeof one === 'object' ? (one as Record<string, unknown>) : {}
+    const name = clean(part.name)
+    if (!name) return []
+    const total = Math.round(Number(part.total))
+    const unit = clean(part.unit)
+    return [part.none === true || !(total >= 1) ? { name, none: true } : { name, total, ...(unit ? { unit } : {}) }]
+  }
+  const points = (Array.isArray(r.points) ? r.points : []).flatMap(one => {
+    const point = one && typeof one === 'object' ? (one as Record<string, unknown>) : {}
+    const name = clean(point.name)
+    return name ? [{ name, parts: (Array.isArray(point.parts) ? point.parts : []).flatMap(partOf) }] : []
+  })
+  return points.length ? { heading: clean(r.heading), points } : null
+}
+
+/** A plan's parts as Claude sends them to the count tool: [{"name": ..., "total": ..., "unit": ...}, ...]. */
+const partsJson = (parts: PlanPart[]) => JSON.stringify(parts.map(part => (part.none ? { name: part.name, none: true } : part)))
+
+/** What Claude reads with the organised plan for its new list. */
+const planNote = (plan: Omit<Plan, 'list' | 'at'>) =>
+  [
+    "the plan for this list, laid out by a small model against the bar's four aims. Send what fits, keeping whatever you know better: update_plan with these points (their done and in-progress marks as they stand), the heading through estimate if it differs from yours, and each point's parts through count, in the same message as its tick.",
+    plan.heading ? `Heading: ${plan.heading}` : '',
+    ...plan.points.map((point, i) => `${i + 1}. ${point.name}${point.parts.length ? ` · subs: ${partsJson(point.parts)}` : ''}`),
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+/** The plan's parts for point `index` of the list, by the plan's point named most like it; null without. */
+function plannedParts(m: Model, index: number): PlanPart[] | null {
+  const p = m.points[index]
+  if (!p || !m.plan || m.plan.list !== m.list?.started) return null
+  const found = bestByFit(m.plan.points, one => workFit(one.name, p.name))
+  return found?.parts.length ? found.parts : null
+}
+
+/** A new list that is the plan sent back (half its points or more named as the plan's): it needs no new layout. */
+function isPlanSentBack(plan: Plan | null | undefined, items: { content?: unknown }[]): boolean {
+  if (!plan) return false
+  const names = items.map(item => String(item.content ?? ''))
+  const kept = plan.points.filter(one => names.some(name => isSameWork(name, one.name)))
+  return kept.length * 2 >= plan.points.length
+}
+
+/*
+ * A new list's layout, kept in the model so a reload of the code keeps it (all in memory, never on disk):
+ *   asked      planAsk {list, at, tries}: the small model is laying out the list that started at `list`
+ *   answered   plan {list, heading, points} and a note for Claude's next call; planAsk cleared
+ *   sent back  a new list made from the plan: plan.list moves to it, and it is not laid out again
+ *   dropped    the list was replaced or finished before the answer came: the answer is thrown away
+ *   lost       no answer ORGANISE_WAIT_MS on (a reload mid-ask, a timeout, an answer with no plan): asked again at
+ *              Claude's next call, ORGANISE_TRIES times in all; then the list stands as Claude wrote it
+ * What the small model reads besides the list: the person's latest message (request) and Claude's steps since (recent).
+ */
+const ORGANISE_WAIT_MS = 60_000
+const ORGANISE_TRIES = 2
+
+/** A list whose layout was asked for and never came: due to be asked again (the "lost" state above). */
+export const isLayoutLost = (m: Model, now: number) =>
+  !!m.planAsk &&
+  m.planAsk.list === m.list?.started &&
+  m.plan?.list !== m.list?.started &&
+  now - m.planAsk.at > ORGANISE_WAIT_MS &&
+  m.planAsk.tries < ORGANISE_TRIES &&
+  m.points.some(p => p.state !== 'done')
+
+/**
+ * Lays out a new list in the background (the organiseLists setting): the small model reads the request, Claude's draft
+ * and its steps since, and its plan reaches Claude as a note with its next call. See the states above.
+ */
+function organiseList($: Api, m: Model) {
+  const list = m.list?.started
+  if (list == null) return
+  void (async () => {
+    // Marked asked first, so a second call for the same list (or a reload) doesn't ask twice at once.
+    const { changed, after } = await mutate($, (model, now) => {
+      const ask = model.planAsk
+      if (model.list?.started !== list || (ask?.list === list && now - ask.at <= ORGANISE_WAIT_MS)) return false
+      model.planAsk = { list, at: now, tries: ask?.list === list ? ask.tries + 1 : 1 }
+      return true
+    })
+    if (!changed) return
+    const prompt = organisePrompt(after.request ?? '', after.points.map(p => ({ name: p.name, state: p.state })), after.recent ?? [])
+    try {
+      const r = await $.model.complete({ model: SMALL_MODEL, system: ORGANISE_SYSTEM, prompt, maxTokens: 1500, effort: 'low', timeoutMs: 45_000 })
+      const plan = r.isAnswered ? parsePlan(r.text) : null
+      if (!plan) return
+      await mutate($, (model, now) => {
+        if (model.list?.started !== list || model.points.every(p => p.state === 'done')) return false
+        model.plan = { ...plan, list, at: now }
+        model.planAsk = null
+        tell(model, planNote(plan))
+        return true
+      })
+    } catch {
+      // No plan this time: asked again later if the list still wants one (isLayoutLost).
+    }
+  })()
+}
+
 /** What the other-chats button says: which chats are listed and whether each works, waits or is done. */
 const sideKey = (m: Model) => m.side.map(chat => `${chat.session}:${chat.busy ? (chat.needsInput ? 'wait' : 'busy') : 'done'}`).join(',')
 
@@ -3262,6 +3531,7 @@ function otherPulses(ui: Ui, $: Api, chats: SideChat[], width: number) {
 export const register: Register = (on, options) => {
   // On unless the person turns it off: Claude starts independent points side by side, unasked.
   const isSideBySide = options.sideBySide !== false
+  const isOrganised = options.organiseLists !== false
   // A reload runs register again: start from a clean slate.
   session = ''
   host = ''
@@ -3320,7 +3590,20 @@ export const register: Register = (on, options) => {
   })
 
   // How long jobs get a bar, sent once per conversation whether or not side-by-side planning is on.
-  on('prompt.context', async ($, e, next) => next({ ...e, blocks: [...e.blocks, LONG_JOBS_BLOCK] }))
+  on('prompt.context', async ($, e, next) => next({ ...e, blocks: [...e.blocks, longJobsBlock(isOrganised)] }))
+
+  // The person's latest message, for the small model that lays out a new list (organiseList); Claude's work starts over.
+  on('prompt.submit', async ($, e, next) => {
+    if (isOrganised && !e.command && !e.isMeta && e.text.trim()) {
+      const request = e.text.trim().slice(0, REQUEST_KEPT)
+      await mutate($, m => {
+        m.request = request
+        m.recent = []
+        return true
+      })
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   // Claude's count for a point's own work, and its estimate for a new list: applied, and the bar drawn at once.
   on('tool.call', { tool: COUNT_TOOL }, async ($, e) => {
@@ -3358,14 +3641,21 @@ export const register: Register = (on, options) => {
         const items = Array.isArray(input.items) ? (input.items as { content?: unknown; status?: unknown }[]) : null
         const before = view(await read($, model))
         const isNew = !!items && !isSameList(before.points, items)
+        const isOpen = !!items && items.some(item => item.status !== 'completed')
+        // A new list goes to the small model to be laid out, once the person's request is known (prompt.submit),
+        // unless it is the plan it last laid out, sent back.
+        const isSentBack = isNew && isPlanSentBack(before.plan, items)
+        const isOrganising = isOrganised && !!before.request && isNew && isOpen && items.length >= 2 && !isSentBack
         const added = addedPoints(before, input)
         const rules = `${$.plugin.root}/progress/cheaper-agents.md`
         const parallel = !isSideBySide ? '' : isNewPlan(before, input) ? parallelPlan(rules) : added.length ? addedNote(added, rules) : ''
         // A new list with work still to do: its heading, and Claude's estimate for it when it is worth estimating.
-        const estimate = isNew && items.some(item => item.status !== 'completed') ? (isWorthEstimating(items, before) ? estimateNote() : headingNote()) : ''
+        const estimate = isNew && isOpen ? (isWorthEstimating(items, before) ? estimateNote(isOrganising) : headingNote(isOrganising)) : ''
         note = [parallel, estimate].filter(Boolean).join('\n\n')
         const { after } = await mutate($, (m, now, fx) => {
           applyPlan(m, input, now, fx)
+          // A plan sent back carries over to the list it became; any other new list drops the old plan.
+          if (isNew) m.plan = isSentBack && m.plan && m.list ? { ...m.plan, list: m.list.started } : null
           // A list Claude ticked done earlier in this same turn is still the work in hand (see isClaudeOnList).
           m.listTurn = m.turn
           return true
@@ -3373,6 +3663,7 @@ export const register: Register = (on, options) => {
         // The bar follows the list at once (points added, gone, renamed), with short labels on the way for long names.
         redraw($, Date.now())
         shortenLong($, after)
+        if (isOrganising) organiseList($, after)
         // A new pulse starts with every beat folded: nothing opened from the list before.
         if (isNew) {
           followKeys.clear()
@@ -3444,6 +3735,8 @@ export const register: Register = (on, options) => {
     if (label)
       await mutate($, (m, now) => {
         m.actions = [...(m.actions ?? []), { label, started: now, toolUseId, isWaiting }].slice(-20)
+        // Claude's steps since the person's message, for the small model laying out a new list.
+        if (isOrganised && !isWaiting && m.recent?.[m.recent.length - 1] !== label) m.recent = [...(m.recent ?? []), label].slice(-RECENT_KEPT)
         // The step's own words (a command's description) say which point it is: the bar follows them even when the
         // list lags behind.
         noteStep(m, text('description'), now)
@@ -3484,6 +3777,9 @@ export const register: Register = (on, options) => {
       }
       return changed
     })
+    // A layout asked for and never answered (a reload mid-ask, a timeout) is asked again (see organiseList's states).
+    const current = view(await read($, model))
+    if (isOrganised && isLayoutLost(current, Date.now())) organiseList($, current)
     if (!said.reminder || ran.deny !== undefined || ran.isError) return ran
     return { ...ran, context: [...(ran.context ?? []), said.reminder] }
   }).catch(($, e, next) => next(e))
@@ -3583,6 +3879,8 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const m = view(await read($, model))
+    // This draw's sub-task views, worked out once (subViews).
+    drawing = { m, views: new Map() }
     const tickNow = await read($, tick)
     const now = Date.now()
     // Drawn after a quiet spell (the app holds an idle chat's timers back): check jobs and other chats now, so what
@@ -3658,8 +3956,9 @@ export const register: Register = (on, options) => {
     const lanes = openPoint !== null ? allLanes.filter(lane => lane.point !== openPoint) : allLanes
     // An opened point's sub-tasks show only while it is open: as its close-up's segments, or as a list under it.
     const openSubs = openPoint !== null && openPoint >= 0 && m.points[openPoint]?.subs?.length ? (m.points[openPoint] as Point) : null
-    const subList = openSubs && subForm(openSubs) !== 'bar' ? (openSubs.subs ?? []) : []
-    const detail = openKey ? closeUpSegs(detailSegs(m, openKey, now), openSubs ?? undefined, openPoint ?? -1) : []
+    // In the list: Claude's own sub-tasks, not the ones a job fills (those move in the close-up's bar).
+    const subList = openSubs && openPoint !== null && subForm(openSubs) !== 'bar' ? subViews(m, openPoint).flatMap(v => (v.s && !v.task ? [v.s] : [])) : []
+    const detail = openKey ? closeUpSegs(m, detailSegs(m, openKey, now), openPoint ?? -1, now) : []
     const openSeg = openKey ? segs.find(s => s.key === openKey) : undefined
     const pick = (key: string, seg?: Seg) => {
       pressCount += 1
@@ -3741,6 +4040,37 @@ export const register: Register = (on, options) => {
     // Nudge: always there while the band shows a task list, from the first moment (whatever runs or not; a list can
     // be behind at any time).
     const showNudge = m.points.length > 0
+    // The chevron in the band's top-right corner folds the band to one row and brings it back (folded). The top row
+    // always shows, with the list's heading, else the chat's title, so the chevron always has its place.
+    const isFolded = await read($, folded)
+    const toggleFold = () => update($, folded, was => !was)
+    const title = m.list?.heading || chatTitle || 'This chat'
+    const chevronTip = isFolded ? 'Show the whole bar' : 'Fold the bar to one row'
+    const chevronCols = tipColumns(chevronTip)
+    // Its click area: a square window over the chevron the first row's picture draws (chevronMarkup), as the readout's ×.
+    const chevron = (
+      <Box position="absolute" top={0} right={0} width={toColumns(CORNER_SIZE)} flexDirection="column">
+        <Box height={((isFolded ? FOLDED_CHEVRON_Y : CORNER_CENTER_Y) - CORNER_SIZE / 2) / ROW_PX} />
+        {clickArea(ui, 'fold', CORNER_SIZE, CORNER_SIZE, () => void toggleFold(), hoverBox(ui, chevronTip, { top: 1, left: toColumns(CORNER_SIZE) - chevronCols, cols: chevronCols }))}
+      </Box>
+    )
+    if (isFolded) {
+      // Folded: this chat's pulse as one row, as another chat's shows (its bar unfolds it too).
+      const line = nowLine(m, now, e.props.isWorking).replace(': ', ' · ')
+      const row: Lane = { key: 'f', title, right, isBusy: isBusy(m), segs, line }
+      const pic = foldedPicture(row, width)
+      return (
+        <Box flexDirection="column" width={band}>
+          <Svg source={pic.source} alt={`${title}: ${right}${line ? `. ${line}` : ''}`} height={pic.height} />
+          <Box position="absolute" top={0} left={0} width="100%" flexDirection="column">
+            {/* The bar's click area starts where foldedPicture draws it, LANE_BAR_TOP px into the row. */}
+            <Box height={LANE_BAR_TOP / ROW_PX} />
+            {clickArea(ui, 'unfold-bar', width, LANE_BAR, () => void toggleFold())}
+          </Box>
+          {chevron}
+        </Box>
+      )
+    }
     // The readout shows only while a beat is opened (its name, status, own % and a ×); with nothing opened the pulse
     // carries the whole list's % and time left at its right end, and no number under it is brightened.
     const pulseRight = openKey ? '' : right
@@ -3750,10 +4080,12 @@ export const register: Register = (on, options) => {
     const followed = openKey ? segs.find(s => s.key === openKey) : undefined
     const readLine = followed ? `${followed.key.startsWith('p:') && followed.key !== 'p:-1' ? `${Number(followed.key.slice(2)) + 1}. ` : ''}${followed.name}: ${followed.status}` : ''
     const readRight = followed ? `${Math.round(Math.min(1, followed.fill) * 100)}%` : ''
-    // With no beat open, the list's heading (the request it is for) takes the readout's place.
-    const heading = m.list?.heading ?? ''
-    const header = followed ? headerPicture(readLine, readRight, width) : heading ? headingPicture(heading, width) : null
-    const headerAlt = followed ? `${readLine}${readRight ? `. ${readRight}` : ''}` : heading
+    // The list's heading (what it is for) stays on its own line over the pulse the whole time. Under it, the readout
+    // of an opened beat, else what runs now (nowLine).
+    const headingPic = headingPicture(title, width)
+    const nowText = followed ? '' : nowLine(m, now, e.props.isWorking)
+    const header = followed ? headerPicture(readLine, readRight, width) : nowText ? nowPicture(nowText, width) : null
+    const headerAlt = followed ? `${readLine}${readRight ? `. ${readRight}` : ''}` : nowText
     // The opened point's short sub-tasks, as a list under its close-up (sub-tasks drawn as a bar are the close-up).
     const subs = subList.length ? { pic: subListPicture(subList, width), alt: subList.map(s => `${s.name}${subValue(s) ? ` ${subValue(s)}` : ''}`).join('; ') } : null
     const opened = openSeg && detail.length ? detailPicture(detail, width) : null
@@ -3813,14 +4145,18 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column" rowGap={1}>
-        {(header || hasList) && (
-          <Box flexDirection="column" width={band}>
-            {header && <Svg source={header.source} alt={headerAlt} height={header.height} />}
-            {followed && (
-              // The close area: a square window centred on the readout's ×, cut from a wider app button.
-              <Box position="absolute" top={0} right={0} width={toColumns(CLOSE_SIZE)} flexDirection="column">
-                <Box height={(CLOSE_CENTER_Y - CLOSE_SIZE / 2) / ROW_PX} />
-                {clickArea(ui, 'close-detail', CLOSE_SIZE, CLOSE_SIZE, () => void closeOpen($))}
+        <Box flexDirection="column" width={band}>
+            <Svg source={headingPic.source} alt={title} height={headingPic.height} />
+            {header && (
+              <Box flexDirection="column" width={band}>
+                <Svg source={header.source} alt={headerAlt} height={header.height} />
+                {followed && (
+                  // The close area: a square window centred on the readout's ×, cut from a wider app button.
+                  <Box position="absolute" top={0} right={0} width={toColumns(CORNER_SIZE)} flexDirection="column">
+                    <Box height={(CORNER_CENTER_Y - CORNER_SIZE / 2) / ROW_PX} />
+                    {clickArea(ui, 'close-detail', CORNER_SIZE, CORNER_SIZE, () => void closeOpen($))}
+                  </Box>
+                )}
               </Box>
             )}
             {hasList && <Box flexDirection="column">
@@ -3844,8 +4180,8 @@ export const register: Register = (on, options) => {
           </Box>
           </Box>
         </Box>}
+            {chevron}
           </Box>
-        )}
         {opened && openSeg && (
           <Box flexDirection="column" width={band}>
             <Svg source={opened.source} alt={`${openSeg.name} ${overall(detail)}%. ${detail.map(describe).join('; ')}`} height={opened.height} />

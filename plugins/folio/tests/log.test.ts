@@ -1,11 +1,11 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import { logPath } from '../hooks/debug'
 import { outputId } from '../hooks/shorten'
-import { callTool, HOME, savedOriginal, savedView, start, stubEngine } from './engine'
+import { callTool, HOME, savedOriginal, savedView, start, stubEngine, test } from './engine'
 
 // The test chat's log for the day the test clock starts on.
 const LOG = `${HOME}/.claude/folio/log/1970-01-01/test-session.jsonl`

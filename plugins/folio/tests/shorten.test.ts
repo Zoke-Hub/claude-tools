@@ -1,11 +1,11 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import { isFileRead } from '../hooks/shell'
 import { outputId, shorten, SHORTEN_FROM } from '../hooks/shorten'
-import { callTool, DIR, savedView, start, stubEngine } from './engine'
+import { callTool, DIR, savedView, start, stubEngine, test } from './engine'
 import type { Engine } from './engine'
 
 // A shell output of numbered lines, one of them a needle to find.

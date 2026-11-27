@@ -1,13 +1,13 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
-import type { EngineInterface, FsEntry } from 'claude-code'
+import type { EngineInterface, FsEntry, On } from 'claude-code'
 
 import { glideAt, overflowOf } from '../hooks/glide'
 import { projectFolderText, walk } from '../hooks/pack'
-import { bigProject, entry, file, heldHaiku, isSorting, mountPanel, near, packStateOf, start, stubEngine } from './engine'
+import { bigProject, entry, file, heldHaiku, isSorting, mountPanel, near, packStateOf, start, stubEngine, test } from './engine'
 
 // FolioPack in a big project: the default folder's whole path from the
 // project's folder, gliding when it is too long; the walk reading several
@@ -71,8 +71,7 @@ test("the walk reads several folders at once and lists each folder's files where
   expect((await walk(disk, '/p', { isStopped: () => true })).files).toEqual([])
 })
 
-// A big project's look takes about 5 s of real time here, near the 5 s default.
-test('Close while FolioPack is still looking stops the look: Haiku is asked no more, Folio keeps working, and opened again it looks afresh', { timeoutMs: 15_000 }, async ($, on) => {
+test('Close while FolioPack is still looking stops the look: Haiku is asked no more, Folio keeps working, and opened again it looks afresh', async ($, on) => {
   const packState = packStateOf(on)
   const { clock, asked, release } = heldHaiku(on, bigProject())
   await start($)
@@ -97,6 +96,40 @@ test('Close while FolioPack is still looking stops the look: Haiku is asked no m
   expect(await ui.find({ key: 'pack-up' })).toBeTruthy()
   // The default folder's line sits under Saves to.
   expect(await ui.find({ key: 'folio-pack-default' })).toBeTruthy()
+  await ui.unmount()
+})
+
+// The loading box hears of each file the listing finds, and while a draw waits
+// its turn, the clock is read to see whether that draw was lost. One read
+// answers for all the files found before it is back: a read for each file was
+// a call to the engine per file.
+test('listing a big project reads the clock a few times, not once for each file it finds', async ($, on) => {
+  // Each read of the clock, counted on its way to the test's clock.
+  let reads = 0
+  const counting = ((event: string, ...rest: unknown[]) => {
+    const hook = rest.at(-1)
+    if (event === 'clock.now' && typeof hook === 'function') {
+      rest[rest.length - 1] = (...args: unknown[]) => {
+        reads += 1
+
+        return (hook as (...a: unknown[]) => unknown)(...args)
+      }
+    }
+
+    return (on as unknown as (...a: unknown[]) => unknown)(event, ...rest)
+  }) as unknown as On
+  const { clock, asked, release } = heldHaiku(counting, bigProject())
+  await start($)
+  const ui = await mountPanel($, { columns: 110, rows: 60 })
+  const before = reads
+  void ui.press({ key: 'folio-pack' })
+  for (let i = 0; i < 100 && asked() === 0; i++) await clock.advance(10)
+  // The 3,600 files are listed and Haiku is asked about the first batch.
+  expect(asked()).toBe(1)
+  expect(await ui.find({ type: 'Text', text: /^Looking through the project/ })).toBeTruthy()
+  expect(reads - before).toBeLessThan(300)
+  release()
+  for (let i = 0; i < 50 && !(await ui.find({ key: 'pack-up' })); i++) await clock.advance(1000)
   await ui.unmount()
 })
 

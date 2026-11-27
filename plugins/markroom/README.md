@@ -32,7 +32,9 @@ Or in a Claude Code chat:
 
 Then ask Claude for a review board, for example "make a MarkRoom board for these three frames".
 
-**Update:** `claude plugin update markroom@zoke`, then restart Claude Code.
+**Update:** send Claude "Update Folio, PulseWise and MarkRoom from https://github.com/Zoke-Hub/claude-tools: read its
+UPDATE.md and follow it.", then restart Claude Code. `claude plugin update markroom@zoke` alone keeps the copy you have
+when an update keeps the version number; the repository's `UPDATE.md` reinstalls it then.
 
 ## What it needs
 
@@ -48,7 +50,7 @@ Then ask Claude for a review board, for example "make a MarkRoom board for these
 
 ## Where things are kept, and what is sent
 
-- Each board is a folder in your project (`review/<name>-markroom`: the page, the prepared images and `board.json`),
+- Each board is a folder in your project (`Work/MarkRoom/<name>`: the page, the prepared images and `board.json`),
   plus the artifact on claude.ai, which is private until you share it.
 - Notes, replies, closed tabs and tab order live in that artifact's database on claude.ai; pictures pasted into notes
   and live rounds go to its file store. What Claude reads back is saved under the board folder (`feedback/`,

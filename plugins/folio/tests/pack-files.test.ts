@@ -1,11 +1,11 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import type { FsEntry, SessionMessage } from 'claude-code'
 
-import { mountPanel, savedOriginal, savedView, start, stubEngine } from './engine'
+import { mountPanel, savedOriginal, savedView, start, stubEngine, test } from './engine'
 import type { Engine, On } from './engine'
 
 // What FolioPack lists from a project: the files a chat touched (with its file

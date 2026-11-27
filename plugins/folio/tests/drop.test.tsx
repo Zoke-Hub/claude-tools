@@ -1,10 +1,10 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import { cardName } from '../hooks/store'
-import { callTool, DIR, openPanel, saved, savedView, seed, stubEngine, start, talk } from './engine'
+import { callTool, DIR, openPanel, saved, savedView, seed, stubEngine, start, talk, test } from './engine'
 
 // The drop list (structure proposal 3.7): pins and the answer cache, side-message
 // tidying, and the "why keep it exact" note are gone; what an older Folio saved

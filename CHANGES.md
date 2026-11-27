@@ -3,6 +3,61 @@
 Newest first, each entry dated. A version number can stay the same from one entry to the next, so an update goes by the
 date: the entries after the date a tool's copy was installed on a computer are new there.
 
+## 2026-11-27 · MarkRoom, Folio and PulseWise: work the same without the setup pack (numbers unchanged)
+
+- **MarkRoom on Windows without the setup pack:** `render_marks.py` reads and writes the notes as UTF-8 itself, so notes
+  in any language no longer stop it where Windows' own code page is in use (the pack had set `PYTHONUTF8`).
+  `build_board.mjs` finds ffmpeg from PowerShell or cmd too, not only from Git Bash, so pictures in WebP, HEIC or TIFF
+  and very large ones are converted wherever it runs.
+- **MarkRoom's own rules travel with it:** "the dashboard" or any review page means a MarkRoom; things are *in* the
+  MarkRoom; each changed file gets its own link. These now sit in the skill's description, which every chat lists, so
+  they hold before the skill is loaded. Every sheet someone picks from goes in the MarkRoom, a tab per sheet; a board
+  published from another Claude account is replaced by a new one, with its link saved.
+- **MarkRoom builds new boards in `Work/MarkRoom/<name>`**, where Folio's folder rule keeps each tool's files. A project
+  that already keeps its boards somewhere else keeps them there.
+- **Folio's folder rule** adds what the setup pack's keep-every-version rule said: a version is never overwritten or
+  deleted, a new one takes the next number (r01_, r02_), and a replaced note or handoff is kept under a dated name.
+- **PulseWise:** many items of one kind inside a point (downloads, conversions, renders) go in one batched script that
+  counts them as they finish, and the helper runs with `py` where Windows has only the launcher.
+- **Updating:** each tool's README now points to `UPDATE.md`, which also reinstalls a tool whose update keeps its version
+  number (`claude plugin update` alone keeps the old copy then).
+- **PulseWise folds down:** a chevron at the right end of the band's top row folds the band to one row, this chat's
+  pulse the way another chat's shows (the heading, the %, a thin bar of the points and what runs now); the chevron,
+  then pointing up, or the row's bar brings the whole band back as it was.
+- **PulseWise, tidied:** one helper decides when two names mean the same work; a list's layout is kept with the bar's
+  state and asked again once if it never came back (a reload mid-ask); a point's parts are worked out once per draw.
+
+## 2026-11-27 · PulseWise (number unchanged)
+
+- **PulseWise tells Claude what the bar is for.** In place of a rule for each case, Claude reads four aims in plain
+  words: the whole plan at once (one point per job, each point's parts laid out as it starts, renders, uploads and
+  checks included); each piece of work once, counted in the things worked on, never "steps"; the truth about now;
+  the plan kept current. The count and estimate tools and agents' briefs say the same.
+- **New task lists laid out by Haiku.** A new list goes to a small model in the background, with your latest message
+  and what Claude has done since; its plan (a point joining two jobs split, each note or file its own part, the
+  renders and uploads listed up front, a heading) reaches Claude with one of its next calls. Setting `organiseLists`
+  turns it off.
+- **A job fills the part it was listed as.** A render or upload listed as a sub-task is filled by its job when it runs,
+  under the listed name on the bar, its track and the readout; a job no part names joins its point as a part.
+- **The heading stays over the bar** the whole time, with the point Claude is on and the part it is doing under it.
+- **Taken out:** reading a count out of a point's name, the "looks like point N" note, and the note for a
+  `--point` past the list's end. The aims and the laid-out plan cover what they tried to catch.
+
+## 2026-11-27 · Folio (number unchanged)
+
+- **Folio, project folders for any kind of work:** the project-folders rule now has Claude shape a project's folders
+  to the way the person works, keeping the same order: a README at the top, a few top-level folders named as the
+  person names things, what the work makes kept by stage (drafts apart from deliveries) and by piece with every version
+  logged, sorted References, and Work for everything else. Video work keeps its folders as before (Animations, Renders,
+  Segments, Work/Scripts); other work takes its folders from what the person asks for and the files they have, and
+  Claude says in one line what each holds. Claude offers to change the layout when the way the person works changes.
+- **Folio, FolioPack opens faster on big projects:** while its loading box waited to be drawn, FolioPack asked the app
+  for the time once for every file it listed (about 3,600 times on a 3,600-file project, 16,000 on a 16,000-file one).
+  It now asks once at a time (again after 200 files if an answer never came): on the test project, the first look
+  starts in about 0.3 s instead of 2.3 s.
+- **Folio's tests** allow 30 seconds each (heavy ones 60), since the test runner runs a dozen files at once and each
+  test then takes five or six times as long as alone.
+
 ## 2026-11-26 · PulseWise (number unchanged)
 
 - **PulseWise, a heading and sub-tasks:** each task list gets a heading, the request it is for, shown over the bar.

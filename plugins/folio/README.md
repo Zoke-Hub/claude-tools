@@ -79,12 +79,16 @@ original stays on your computer word for word, and Claude can bring any of it ba
   A MarkRoom board travels as its files and notes, never as the board: its `board.json` and page go without the
   board's link and uploaded files, its live round docs stay behind, and Claude on the other computer is told to make a
   board of its own from the files.
-- **Project folders.** Folio gives every chat a short rule for laying out a project's folders: `Animations`,
-  `Renders/Drafts` and `Renders/Final` by animation, `Segments` by animation, sorted `References`, and `Work` for
-  everything else (`Work/Scripts` for the script and breakdown, `Work/Backup`, and a folder for each tool), with a README
-  at the top and folder names starting with a capital letter. A project's own layout rule comes first, and a code
-  repository keeps its own. Claude offers to tidy a project that has drifted and moves files only on your yes.
-  FolioPack's groups follow the same layout.
+- **Project folders.** Folio gives every chat a short rule for laying out a project's folders, shaped to the way you
+  work and keeping one order: a README at the top saying what goes where, a few top-level folders named as you name
+  things, what you make kept apart by stage (drafts apart from deliveries) and grouped by piece with every version
+  logged, sorted `References` with `SOURCES.md`, and `Work` for everything else (`Work/Backup` and a folder for each
+  tool), folder names starting with a capital letter. For video work that is `Animations`, `Renders/Drafts` and
+  `Renders/Final` by animation, `Segments` by animation and `Work/Scripts`, the groups FolioPack's list follows; for
+  other work (a writer's chapters and drafts, a researcher's sources and notes) Claude takes the folders from what you
+  ask for and the files you have, and says in one line what each holds. A project's own layout rule comes first, and a
+  code repository keeps its own. Claude offers to tidy a project that has drifted, or to change the layout when the way
+  you work changes, and moves files only on your yes.
 - **Where new files go.** As a chat starts, Folio reads where the project already keeps each kind of file (renders,
   editing and design projects, references, sound) and tells Claude in a short note (about 150 tokens). The
   project-folders rule comes first: the note fills in where a project doesn't follow that layout yet, or where the rule
@@ -110,7 +114,9 @@ claude plugin install folio --marketplace Zoke-Hub/claude-tools
 
 Or in a chat: `/plugin marketplace add Zoke-Hub/claude-tools`, then `/plugin install folio@zoke`.
 
-Open a new chat afterwards. To update: `claude plugin update folio@zoke`, then restart the app.
+Open a new chat afterwards. To update, send Claude "Update Folio, PulseWise and MarkRoom from
+https://github.com/Zoke-Hub/claude-tools: read its UPDATE.md and follow it." `claude plugin update folio@zoke` alone
+keeps the copy you have when an update keeps the version number; the repository's `UPDATE.md` reinstalls it then.
 
 ## What it needs
 
@@ -155,7 +161,7 @@ Plugin settings:
 - **Shorten long shell outputs** (`shortenOutputs`), on by default.
 - **Point Claude to folded parts** (`promptPointers`), on by default: the one line added to a prompt or a subagent's
   brief that names something only folded parts hold.
-- **Keep project folders organised** (`projectLayout`), on by default: the project-folders rule, about 400 tokens, sent
+- **Keep project folders organised** (`projectLayout`), on by default: the project-folders rule, about 550 tokens, sent
   at the start of a chat and after each compaction.
 - **Tell Claude where this project keeps its files** (`projectPlaces`), on by default: the note a chat's first
   message carries, after the project-folders rule (see "Where new files go").

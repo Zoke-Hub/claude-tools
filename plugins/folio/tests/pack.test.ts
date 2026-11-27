@@ -1,7 +1,7 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import type { FsEntry, SessionMessage } from 'claude-code'
 
@@ -10,7 +10,7 @@ import { chatFiles } from '../hooks/pack'
 import { freeNumbers } from '../hooks/sync'
 import { normaliseChunk } from '../hooks/store'
 import type { ChunkRecord, Ledger, PickerView, TaskList } from '../types'
-import { callTool, DIR, entry, file, HOME, isSorting, mountPanel, openChat, PACKS, packUpNow, saved, savedView, seed, stubEngine, start, talk } from './engine'
+import { callTool, DIR, entry, file, HOME, isSorting, mountPanel, openChat, PACKS, packUpNow, saved, savedView, seed, stubEngine, start, talk, test, TEST_MS } from './engine'
 import type { Engine } from './engine'
 
 // FolioPack's categories (Haiku's, with the rules for what it leaves out) and
@@ -360,8 +360,9 @@ test('the form names each file by its path in the project, and the pack finds it
   expect(packed?.[1]).toBe('# Plan\nCut A19 first.')
 })
 
-// A big listing takes about 4 s of real time here, near the 5 s default.
-test('a big listing is read in batches: each names the categories so far, and only a changed batch is asked again', { timeoutMs: 15_000 }, async ($, on) => {
+// A big listing takes about 5 s alone, among the slowest here, so it gets
+// twice the time the others get.
+test('a big listing is read in batches: each names the categories so far, and only a changed batch is asked again', { timeoutMs: 2 * TEST_MS }, async ($, on) => {
   const tree = shots()
   const answer = (prompt: string) => {
     const ids = [...prompt.matchAll(/^d(\d+) /gm)].map(m => `d${m[1]}`)
@@ -445,8 +446,9 @@ test('sorting stops asking after two calls with no answer, and the rules place t
 })
 
 // The clock moves 200 s here, and the scan's one-second redraw timer ticks
-// through all of it, so it takes longer than most.
-test('sorting asks no more after three minutes, and keeps what came', { timeoutMs: 15_000 }, async ($, on) => {
+// through all of it, so it takes longer than most (about 6 s alone) and gets
+// twice the time the others get.
+test('sorting asks no more after three minutes, and keeps what came', { timeoutMs: 2 * TEST_MS }, async ($, on) => {
   // Each answer comes when the test lets it, so the clock between asks is the test's own.
   const waiting: Array<() => void> = []
   const askedAt: number[] = []

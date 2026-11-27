@@ -120,8 +120,6 @@ export type Task = {
   /** Claude's call count when it started, and when PulseWise last reminded Claude of it running on with no count. */
   startCall?: number
   remindedCall?: number | null
-  /** How many of a job's steps were checked against the list's other points (a step that repeats one is told to Claude). */
-  checkedSteps?: number
   /** An agent whose brief got PulseWise's progress lines (a working agent, not a look-up one): its follow-ups get them too. */
   briefed?: boolean
   message: string | null
@@ -198,9 +196,23 @@ export type Model = {
   list?: ListInfo | null
   /** Short labels for names longer than the bar shows whole, written by a small model (Haiku): name -> label. */
   labels?: Record<string, string>
-  /** Notes for Claude waiting for its next call (a job's step that repeats another point, a point number past the list). */
+  /** Notes for Claude waiting for its next call (the organised plan for a new list). */
   notes?: string[]
+  /** The small model's layout of the current list (organiseList), kept to quote a point's parts when it starts. */
+  plan?: Plan | null
+  /** A layout asked for and not yet answered: the list's start, when it was asked, and how many times. */
+  planAsk?: { list: number; at: number; tries: number } | null
+  /** The person's latest message, for the small model (kept in memory with the model, never on disk). */
+  request?: string
+  /** Claude's steps since that message, by their labels, for the small model. */
+  recent?: string[]
 }
+
+/** One part of a point in an organised plan: its pieces and what they are, or none for one that can't be counted. */
+export type PlanPart = { name: string; total?: number; unit?: string; none?: boolean }
+
+/** A list as the small model laid it out: its heading, and each point with its parts. `list` is the list's start. */
+export type Plan = { list: number; at: number; heading: string; points: { name: string; parts: PlanPart[] }[] }
 
 /** The current task list as a whole, for the estimate and the time log. */
 export type ListInfo = {
@@ -224,6 +236,8 @@ declare module 'claude-code' {
       selected: string | null
       showDone: boolean
       showSide: boolean
+      /** The band folded down to one row by its chevron. */
+      folded: boolean
     }
   }
 }

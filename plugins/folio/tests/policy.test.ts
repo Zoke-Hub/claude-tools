@@ -1,7 +1,7 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import { FOLD_ASK } from '../hooks/actions'
 import { estimateTokens, textTokens } from '../hooks/chunks'
@@ -9,7 +9,7 @@ import { summaryTokens } from '../hooks/measure'
 import { fixedBlocks } from '../hooks/projects'
 import { EMPTY_REAL, EMPTY_VIEW, normaliseChunk } from '../hooks/store'
 import { suggestionsFor } from '../hooks/suggest'
-import { HOME, mountPanel, openChat, request, saved, savedView, seed, talk } from './engine'
+import { HOME, mountPanel, openChat, request, saved, savedView, seed, talk, test } from './engine'
 
 // When to fold and how far, in real tokens: the saving a fold really made,
 // the ratio that turns Folio's estimates into real tokens, and the waits.

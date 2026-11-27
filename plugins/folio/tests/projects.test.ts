@@ -1,10 +1,10 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import type { FsEntry } from 'claude-code'
 
-import { mountPanel, openChat, seed, start, stubEngine, talk } from './engine'
+import { mountPanel, openChat, seed, start, stubEngine, talk, test } from './engine'
 import type { Engine, On } from './engine'
 
 // The project-folders rule: one block every chat carries, so every computer
@@ -25,6 +25,20 @@ test('every chat carries the project-folders rule, naming the folders FolioPack 
   for (const words of ['Animations/', 'Renders/Drafts/<Animation>/', 'Renders/Final/<Animation>/', 'Segments/<Animation>/', 'References/', 'Work/Scripts', 'Work/Backup', 'FolioPacks in Work/Folio/Folio packs', 'capital letter', 'only when something goes in it', 'nothing else loose', 'never delete', 'code repository keeps its own layout']) {
     expect(rule!.text).toContain(words)
   }
+})
+
+test('the rule shapes the folders to the way the person works, keeping its ideas of order; video work keeps its own folders', async ($, on) => {
+  const text = (await blocksOf($, on)).find(b => b.name === 'folio-projects')!.text
+  // Shaped to the person's work, with the order kept whatever the work.
+  for (const words of ["Shape each project's folders to the way this person works", 'ideas of order', 'named as the person names them', 'apart by stage', 'grouped by piece', 'every version kept and logged', 'never overwritten or deleted', 'takes the next number', 'kept under a dated name', 'README at the top saying what goes where']) {
+    expect(text).toContain(words)
+  }
+  // The video layout is the video case, not the rule for everything; other work takes its names from the person.
+  expect(text).toContain('Video and animation work: Animations/')
+  expect(text).toContain('Other work: take the stages, pieces and names from what the person asks for')
+  expect(text).toContain('say in one line what each top-level folder holds')
+  expect(text).toContain('when the way the person works changes, offer to change it')
+  expect(text).not.toContain('Lay a video project out like this')
 })
 
 test('with the setting off, the rule is not sent and the recall line still is', { options: { projectLayout: false } }, async ($, on) => {

@@ -1193,17 +1193,35 @@ const LOADING_DRAW_MS = 500
 let isDrawDue = false
 let dueAt = 0
 let lastDrawAt = 0
+// Whether the clock is being read to see if the draw due was lost. The news
+// comes a file at a time while the project is listed, so one read answers for
+// all the news that comes before it is back: a read for each file was a call
+// to the engine per file (3,600 files: 2 s more). A read that never answered
+// would hold the check for the rest of the scan, so after DUE_CHECK_SKIPS news
+// with no answer it counts as lost and the next news reads the clock again.
+let isCheckingDue = false
+let dueChecksSkipped = 0
+const DUE_CHECK_SKIPS = 200
 // Whether the loading box was last drawn where the surface has no region to
 // count its times (the terminal): the scan then draws it again each second.
 let isClockless = false
 
 function drawScan($: EngineInterface) {
   if (isDrawDue) {
-    void $.clock.now().then(now => {
-      if (!isDrawDue || now - dueAt < 2 * LOADING_DRAW_MS) return
-      isDrawDue = false
-      drawScan($)
-    }, () => {})
+    if (isCheckingDue && ++dueChecksSkipped < DUE_CHECK_SKIPS) return
+    isCheckingDue = true
+    dueChecksSkipped = 0
+    void $.clock.now().then(
+      now => {
+        isCheckingDue = false
+        if (!isDrawDue || now - dueAt < 2 * LOADING_DRAW_MS) return
+        isDrawDue = false
+        drawScan($)
+      },
+      () => {
+        isCheckingDue = false
+      },
+    )
 
     return
   }
@@ -1313,6 +1331,8 @@ async function scan($: EngineInterface) {
   try {
     scanSteps = null
     isDrawDue = false
+    isCheckingDue = false
+    dueChecksSkipped = 0
     await setForm($, null, 'scanning')
     // Drawn again when the loading box is due, as the scan gets on, and each
     // second where the surface can't count the times itself.

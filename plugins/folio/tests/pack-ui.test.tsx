@@ -1,12 +1,12 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import type { FsEntry } from 'claude-code'
 
 import { packFolder, projectFolder } from '../hooks/pack'
-import { entry, HOME, openPanel, savedView, stubEngine, start } from './engine'
+import { entry, HOME, openPanel, savedView, stubEngine, start, test } from './engine'
 import type { Engine, On } from './engine'
 
 // The panel as the app opens it, wide enough for FolioPack's rows.

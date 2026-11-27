@@ -1,14 +1,14 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 
 import { FOLD_ASK } from '../hooks/actions'
 import { chunksOf, FOLD_LINE, messageTexts, splitChunks, toolResultsOf } from '../hooks/chunks'
 import { isPaired } from '../hooks/fold'
 import { cardName } from '../hooks/store'
-import { callTool, DIR, HOME, mountPanel, openChat, request, saved, seed, talk } from './engine'
+import { callTool, DIR, HOME, mountPanel, openChat, request, saved, seed, talk, test } from './engine'
 import type { Engine } from './engine'
 
 // Folding in the middle of a long reply (section 7, question 7): Claude Code

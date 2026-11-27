@@ -1,12 +1,12 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 
 import { FOLD_ASK, REBUILD_ASK } from '../hooks/actions'
 import type { Ledger } from '../types'
-import { callTool, DIR, HOME, mountPanel, request, saved, savedView, seed, start, stubEngine, talk } from './engine'
+import { callTool, DIR, HOME, mountPanel, request, saved, savedView, seed, start, stubEngine, talk, test } from './engine'
 import type { Engine, On } from './engine'
 
 // A fold's or a rebuild's ask, from the press to Claude Code's answer: when

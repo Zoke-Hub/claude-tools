@@ -1,6 +1,6 @@
 ---
 name: markroom
-description: Build and run MarkRoom, one review board for stills AND videos. Image tabs - a design, frame, storyboard, poster, thumbnail, screenshot, contact sheet or a long overview strip - pan and zoom; video tabs - a cut, preview or animation render - play, scrub frame by frame, and pin every note to a timecode or range. On both, the reviewer draws markers, arrows, boxes, freehand drawings and text, gathers as many marks as a point needs into one numbered note, and writes its comment; rounds of the same thing sit in one tab with a Version dropdown for older ones; video has a full-screen mode. Claude reads the notes from the artifact's database, renders each note on its image or video frame, makes the changes, then replies to and resolves each note. Use whenever someone wants to mark up, annotate, redline, draw on or leave feedback on an image, design or video, asks for a review page, wants timecoded or frame-accurate comments on a cut, or when working through notes left on a MarkRoom board.
+description: Build and run MarkRoom, one review board for stills AND videos. Image tabs (a design, frame, storyboard, thumbnail, screenshot, contact sheet or long strip) pan and zoom; video tabs (a cut, preview or render) play, scrub frame by frame and pin each note to a timecode or range. The reviewer draws markers, arrows, boxes, drawings and text, gathers marks into numbered notes and comments; rounds sit in one tab with a Version dropdown. Claude reads the notes, renders each on its frame, makes the changes, then replies to and resolves each note. Use whenever someone wants to mark up, annotate, redline or give feedback on an image, design or video, asks for a review page or "the dashboard", wants timecoded comments on a cut, has sheets to pick from (contact sheets, look stills, options), or notes are left in a MarkRoom. Always, even before this skill loads, things are *in* the MarkRoom, never "on" it, and after changing a MarkRoom, link each changed file with build_board.mjs --link <file id>, never the bare board.
 ---
 
 <!--
@@ -26,6 +26,11 @@ the MarkRoom"). Never "on": not "on the MarkRoom", "on the board" or "on MarkRoo
 adding a round. Actions use the same words: open the MarkRoom, post it to the MarkRoom, check the MarkRoom. Plain
 "MarkRoom" only in titles and headers ("MarkRoom · by Zoke"). When the user says "the dashboard", "the board" or "the
 review page" for a board in play, they mean the MarkRoom: answer with "the MarkRoom" without remarking on the wording.
+With no board yet, "open the dashboard" or any review or feedback page means a new MarkRoom (§2).
+
+**What goes in it.** Every sheet the user picks from (contact sheets, look stills, option sheets, a cut-out's pieces
+sheet) is posted in the MarkRoom, one tab per sheet, not only shown in chat, and the picks are read from its notes.
+Finished cut-outs of objects are not posted unless the user asks.
 
 **Link to the file that changed (Claude only, every time).** Whenever Claude changes anything in a MarkRoom (makes a
 board, adds a round or a file, replies to notes or marks them done, closes or reopens tabs), its final message that turn
@@ -226,9 +231,11 @@ working folder (or add `--project <folder>`): that folder is the project the boa
    - Otherwise ask the user with AskUserQuestion, one option per board: label "Post in <board title>", description naming
      the open chat(s) on it and their tabs, and that posting there republishes the board once, which brings it to the
      front of their screen. Add a last option "New board". Picked a board: §2b. Picked "New board": step 1.
-1. **Build** into a folder inside the project, so the board and its feedback stay with the work:
+1. **Build** into a folder inside the project, so the board and its feedback stay with the work: `Work/MarkRoom/<name>`,
+   where the project keeps each tool's files in `Work/` (a project that already keeps its boards somewhere else, such as
+   `review/<name>-markroom`, keeps them there, and its existing boards stay where they are):
    ```bash
-   node "${CLAUDE_SKILL_DIR}/scripts/build_board.mjs" --out <project>/review/<name>-markroom --title "<Name> MarkRoom" \
+   node "${CLAUDE_SKILL_DIR}/scripts/build_board.mjs" --out <project>/Work/MarkRoom/<name> --title "<Name> MarkRoom" \
      --chat "<name> [<ref>]" [--group "<tab name>"] <image|video>[=<label>] [<image|video>[=<label>] ...]
    ```
    - Images and videos mix freely. Video files (.mp4 .mov .m4v .webm .mkv) are remuxed with faststart when they are already
@@ -390,6 +397,10 @@ Each note's fields say where it stands, so any chat (a new one, or after a compa
 
 Add the new render as a new round on the **same** board, so old notes stay attached to the round they were written on,
 and the older rounds stay one click away in the Version dropdown.
+
+**A board this account can't update.** A board published from another Claude account (its `url` in `board.json`) refuses
+this account's publishes and uploads. Then make a new board for the round (§2), save its `url` in `board.json` in place of
+the old one, and say so in one line; the old board keeps its notes.
 
 **On a published board, add the round live: never republish for a new round.** A republish makes the Claude app open
 that board on the user's screen, wherever they are (another board, a note half typed). A live round is uploaded to the

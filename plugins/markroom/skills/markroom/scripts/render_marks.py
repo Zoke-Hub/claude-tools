@@ -71,7 +71,7 @@ def read_docs(path, skip=None):
     for f in files:
         if skip and os.path.basename(os.path.dirname(f)) == skip:
             continue
-        with open(f) as fh:
+        with open(f, encoding="utf-8") as fh:
             d = json.load(fh)
         for it in (d if isinstance(d, list) else d.get("documents", [d]) if isinstance(d, dict) else []):
             yield f, it, it.get("data", it) if isinstance(it, dict) else None
@@ -286,7 +286,8 @@ def main():
 
     board_json = a.board if a.board.endswith(".json") else os.path.join(a.board, "board.json")
     board_dir = os.path.dirname(os.path.abspath(board_json))
-    board = json.load(open(board_json))
+    with open(board_json, encoding="utf-8") as fh:
+        board = json.load(fh)
     out = a.out or os.path.join(board_dir, "feedback-render")
     os.makedirs(out, exist_ok=True)
     notes = [m for m in load_notes(a.marks) if a.status == "all" or m.get("status", "open") == a.status]
@@ -342,7 +343,9 @@ def main():
             for i, b in enumerate(ov):
                 ln = f"- **{b.get('img', '?')}** ({b.get('status', 'open')}): {(b.get('text') or '').strip() or '(pictures only)'}"
                 lines.insert(2 + i, ln + pics_line(b) + reply_lines(b, since=""))
-    with open(os.path.join(out, "notes.md"), "w") as fh:
+    # UTF-8 on every system: Windows would read and write the notes in its own code page (cp1252) and break on any
+    # letter outside it.
+    with open(os.path.join(out, "notes.md"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     print(f"{len(notes)} note(s) -> {out}")
 

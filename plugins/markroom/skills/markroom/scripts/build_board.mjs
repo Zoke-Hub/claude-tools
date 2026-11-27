@@ -186,7 +186,12 @@ const out = path.resolve(opt.out);
 fs.mkdirSync(path.join(out, "img"), { recursive: true });
 
 const slug = (s) => String(s).toLowerCase().normalize("NFKD").replace(/[^\w\s-]/g, "").trim().replace(/[\s_]+/g, "-").replace(/-+/g, "-").slice(0, 48) || "image";
-const which = (cmd) => { try { execFileSync("which", [cmd], { stdio: "ignore" }); return true; } catch { return false; } };
+// Whether a command is on PATH, read from PATH itself: `which` exists only in a Unix shell (on Windows, Git Bash), so
+// from PowerShell or cmd it was never found and image conversions stopped.
+const which = (cmd) => {
+  const exts = process.platform === "win32" ? (process.env.PATHEXT || ".EXE;.CMD;.BAT").split(";") : [""];
+  return (process.env.PATH || "").split(path.delimiter).some((dir) => dir && exts.some((ext) => fs.existsSync(path.join(dir, cmd + ext))));
+};
 const HAS_SIPS = which("sips");
 // ffmpeg-full first when it's there (keg-only on Homebrew), else whatever is on PATH
 const FF_DIR = ["/opt/homebrew/opt/ffmpeg-full/bin", "/usr/local/opt/ffmpeg-full/bin"].find((d) => fs.existsSync(path.join(d, "ffmpeg")));

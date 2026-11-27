@@ -1,14 +1,14 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 
 import { chunksOf, FOLD_MARK, splitChunks } from '../hooks/chunks'
 import { outlineText } from '../hooks/fold'
 import { resetRecall } from '../hooks/recall'
 import { emptyBrief, normaliseChunk } from '../hooks/store'
-import { callTool, savedOriginal, savedView, stubEngine, talk, start } from './engine'
+import { callTool, savedOriginal, savedView, stubEngine, talk, start, test } from './engine'
 import type { On } from './engine'
 
 // The test chat's saved index, and each chunk's original by its id.

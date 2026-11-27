@@ -1,11 +1,11 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import { elapsedText } from '../hooks/clock'
 import { scanShare, stepLines, stepTime } from '../hooks/panel'
-import { bigProject, heldHaiku, mountPanel, near, packStateOf, start } from './engine'
+import { bigProject, heldHaiku, mountPanel, near, packStateOf, start, test } from './engine'
 
 // FolioPack's loading box: a look through the project that takes a while
 // shows what it is doing, the time since it started and a bar, then its three

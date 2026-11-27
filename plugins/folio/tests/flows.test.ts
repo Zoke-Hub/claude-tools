@@ -1,7 +1,7 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 
 import { FOLD_ASK } from '../hooks/actions'
 import { BOARD_RULE } from '../hooks/boards'
@@ -9,7 +9,7 @@ import { outputId, shorten } from '../hooks/shorten'
 import { chunksOf, messageTexts, splitChunks, TIDY_MARK, toolResultsOf, TRIM_MARK } from '../hooks/chunks'
 import type { Original } from '../hooks/store'
 import type { Ledger } from '../types'
-import { callTool, chat, DIR, mountPanel, openChat, PACKS, packUpNow, request, saved, savedOriginal, savedView, seed, start, stubEngine, talk } from './engine'
+import { callTool, chat, DIR, mountPanel, openChat, PACKS, packUpNow, request, saved, savedOriginal, savedView, seed, start, stubEngine, talk, test } from './engine'
 
 test("a long turn's new work is saved before Claude Code's own compaction runs", async ($, on) => {
   const messages = talk(40)

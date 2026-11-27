@@ -1,7 +1,7 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 
 import { FOLD_ASK, REBUILD_ASK } from '../hooks/actions'
@@ -9,7 +9,7 @@ import { chunksOf, currentChat, FOLD_LINE, splitChunks, TIDY_MARK } from '../hoo
 import { buildFolded, isPaired, noPlan, planFold, protectedIds } from '../hooks/fold'
 import { EMPTY_VIEW, normaliseChunk } from '../hooks/store'
 import type { PickerView } from '../types'
-import { chat, openChat, saved, seed, talk } from './engine'
+import { chat, openChat, saved, seed, talk, test } from './engine'
 import type { Engine } from './engine'
 
 // How parts are found again in the chat after Folio's own folds, trims and

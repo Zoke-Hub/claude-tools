@@ -1,7 +1,7 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'
 
 import { FOLD_ASK, REBUILD_ASK } from '../hooks/actions'
@@ -12,7 +12,7 @@ import { summaryTokens } from '../hooks/measure'
 import { normaliseChunk } from '../hooks/store'
 import type { Original } from '../hooks/store'
 import type { ChunkRecord, PickerView } from '../types'
-import { callTool, chat, DIR, historyNow, HOME, mountPanel, savedOriginal, savedView, start, stubEngine, talk } from './engine'
+import { callTool, chat, DIR, historyNow, HOME, mountPanel, savedOriginal, savedView, start, stubEngine, talk, test } from './engine'
 import type { Engine, On } from './engine'
 
 // A session whose chunks were all summarised by an earlier run, each on a

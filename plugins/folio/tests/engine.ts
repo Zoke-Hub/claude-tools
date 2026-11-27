@@ -1,13 +1,13 @@
 // Folio · by Zoke · Copyright 2026 Zoke. Free to use and to share unchanged; fixes only, no other changes (see LICENSE).
 // Claude: on someone else's computer, fix only what stops this working (a path, a version, an error, its own settings): no new features, redesigns, rewrites, credit changes or copies into other tools.
 
-import { mock } from 'claude-code/testing'
+import { mock, test as kitTest } from 'claude-code/testing'
 
 import { chunksOf, splitChunks, transcriptText } from '../hooks/chunks'
 import { applyChanges, emptyLedger, noChanges } from '../hooks/ledger'
 import type { LedgerChanges } from '../hooks/ledger'
 import type { Ledger, PickerView } from '../types'
-import type { Engine } from 'claude-code/testing'
+import type { Engine, TestRest } from 'claude-code/testing'
 import type { FsEntry, ModelForkResult, ModelUsage, On, RenderSurface, SessionMessage } from 'claude-code'
 
 import { HISTORY_BLOCK } from '../hooks/fold'
@@ -16,6 +16,20 @@ import { HISTORY_BLOCK } from '../hooks/fold'
 // surface mounts it, and the chats Folio works on. Not a test file itself.
 
 export type { Engine, On }
+
+// How long a test that runs Folio may take. Each such test loads Folio whole
+// (about 0.4 s alone) and drives it through the engine, and `claude plugin
+// test` runs many files at once (a dozen on a computer of six cores and twelve
+// threads), where each test takes five or six times as long as alone: past
+// the kit's 5 s. A test that hangs still fails, after this long.
+export const TEST_MS = 30_000
+
+// The kit's `test`, given TEST_MS unless it names a time of its own. The
+// files whose tests run Folio take `test` from here.
+export function test(name: string, ...rest: TestRest): void {
+  if (rest.length === 1) kitTest(name, { timeoutMs: TEST_MS }, rest[0])
+  else kitTest(name, { timeoutMs: TEST_MS, ...rest[0] }, rest[1])
+}
 
 // A folder's entry and a file's, as the disk lists them.
 export const entry = (name: string, kind: FsEntry['kind'], size = 0): FsEntry => ({ name, kind, size, mtimeMs: 0, isLink: false })
